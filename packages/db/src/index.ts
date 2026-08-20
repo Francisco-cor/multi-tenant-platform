@@ -1,3 +1,4 @@
+export { sql } from 'drizzle-orm';
 export {
   createDatabase,
   type Database,

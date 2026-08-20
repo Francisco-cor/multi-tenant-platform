@@ -3,8 +3,11 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import postgres from 'postgres';
 
-const connectionString = process.env.DATABASE_URL;
-if (!connectionString) throw new Error('DATABASE_URL is required to run migrations');
+const configuredConnectionString = process.env.DATABASE_URL;
+if (!configuredConnectionString) throw new Error('DATABASE_URL is required to run migrations');
+const connectionUrl = new URL(configuredConnectionString);
+connectionUrl.searchParams.delete('schema');
+const connectionString = connectionUrl.toString();
 
 const migrationsDirectory = join(dirname(fileURLToPath(import.meta.url)), '../migrations');
 const migrationFiles = (await readdir(migrationsDirectory))

@@ -17,8 +17,12 @@ import {
   InMemoryIdentityStore,
   type AuditRecord,
   type BranchRecord,
+  type CreateInvitationResult,
+  type IdentityStore,
+  type InvitationRecord,
   type MembershipRecord,
   type OrganizationRecord,
+  type SessionRecord,
   type UserRecord,
 } from './identity-store.js';
 
@@ -63,10 +67,11 @@ class RequestProblem extends Error {
 interface SessionAuth {
   token: string;
   user: UserRecord;
-  session: NonNullable<ReturnType<InMemoryIdentityStore['getSession']>>;
+  session: SessionRecord;
 }
 
 interface TenantContext extends SessionAuth {
+  requestId: string;
   tenantId: string;
   organization: OrganizationRecord;
   membership: MembershipRecord;
@@ -74,7 +79,7 @@ interface TenantContext extends SessionAuth {
 }
 
 interface AppOptions {
-  store?: InMemoryIdentityStore;
+  store?: IdentityStore;
   baseDomain?: string;
   allowDevLogin?: boolean;
   oidc?: {
@@ -165,11 +170,11 @@ function organizationView(organization: OrganizationRecord) {
   };
 }
 
-function membershipView(
+async function membershipView(
   membership: MembershipRecord,
-  store: InMemoryIdentityStore,
-): Record<string, unknown> {
-  const user = store.getUser(membership.userId);
+  store: IdentityStore,
+): Promise<Record<string, unknown>> {
+  const user = await store.getUser(membership.userId);
   return {
     id: membership.id,
     userId: membership.userId,
@@ -181,7 +186,7 @@ function membershipView(
 }
 
 export function buildApp(options: AppOptions = {}): FastifyInstance {
-  const store = options.store ?? new InMemoryIdentityStore(true);
+  const store: IdentityStore = options.store ?? new InMemoryIdentityStore(true);
   const stateStore = new InMemoryOidcStateStore();
   const baseDomain = options.baseDomain ?? process.env.TENANT_BASE_DOMAIN ?? DEFAULT_BASE_DOMAIN;
   const allowDevLogin = options.allowDevLogin ?? process.env.NODE_ENV !== 'production';
@@ -196,17 +201,30 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   };
   const secureCookies = process.env.NODE_ENV === 'production';
 
+  const listOrganizationsForUser = async (userId: string): Promise<OrganizationRecord[]> => {
+    const memberships = await store.listMembershipsForUser(userId);
+    return (
+      await Promise.all(
+        memberships.map(async (membership) => store.getOrganization(membership.organizationId)),
+      )
+    ).filter((organization): organization is OrganizationRecord => organization !== null);
+  };
+
   const app = Fastify({
     logger: { level: process.env.LOG_LEVEL ?? 'info' },
     bodyLimit: 1024 * 1024,
   });
 
-  const requireSession = (request: FastifyRequest): SessionAuth => {
+  app.addHook('onClose', async () => {
+    await store.close?.();
+  });
+
+  const requireSession = async (request: FastifyRequest): Promise<SessionAuth> => {
     const token = requestToken(request);
     if (!token) throw new RequestProblem(401, 'UNAUTHORIZED', 'Authentication required');
-    const session = store.getSession(token);
+    const session = await store.getSession(token);
     if (!session) throw new RequestProblem(401, 'UNAUTHORIZED', 'Authentication required');
-    const user = store.getUser(session.userId);
+    const user = await store.getUser(session.userId);
     if (!user) throw new RequestProblem(401, 'UNAUTHORIZED', 'Authentication required');
     if (user.status !== 'active') {
       throw new RequestProblem(403, 'FORBIDDEN', 'User access is suspended');
@@ -214,31 +232,40 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     return { token, user, session };
   };
 
-  const requireTenantContext = (request: FastifyRequest): TenantContext => {
-    const auth = requireSession(request);
+  const requireTenantContext = async (request: FastifyRequest): Promise<TenantContext> => {
+    const auth = await requireSession(request);
     const resolution = resolveTenantFromHost(request.headers.host, baseDomain, '');
     if (!resolution) {
       throw new RequestProblem(400, 'TENANT_REQUIRED', 'A valid tenant host is required');
     }
-    const organization = store.getOrganizationBySlug(resolution.tenantSlug);
+    const organization = await store.getOrganizationBySlug(resolution.tenantSlug);
     if (!organization || organization.status !== 'active') {
       throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
     }
-    const membership = store.getActiveMembership(auth.user.id, organization.id);
+    const membership = await store.getActiveMembership(
+      { tenantId: organization.id, requestId: request.id, userId: auth.user.id },
+      auth.user.id,
+    );
     if (!membership) {
       throw new RequestProblem(403, 'FORBIDDEN', 'Access denied');
     }
-    const memberships = store.listMembershipsForUser(auth.user.id);
+    const memberships = await store.listMembershipsForUser(auth.user.id);
     if (memberships.length > 1 && !auth.session.selectedTenantId) {
       throw new RequestProblem(
         409,
         'ORGANIZATION_SELECTION_REQUIRED',
         'Select an organization explicitly',
         {
-          organizations: memberships.flatMap((candidate) => {
-            const candidateOrganization = store.getOrganization(candidate.organizationId);
-            return candidateOrganization ? [organizationView(candidateOrganization)] : [];
-          }),
+          organizations: (
+            await Promise.all(
+              memberships.map(async (candidate) => {
+                const candidateOrganization = await store.getOrganization(candidate.organizationId);
+                return candidateOrganization ? organizationView(candidateOrganization) : null;
+              }),
+            )
+          ).filter(
+            (candidate): candidate is ReturnType<typeof organizationView> => candidate !== null,
+          ),
         },
       );
     }
@@ -247,6 +274,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     }
     return {
       ...auth,
+      requestId: request.id,
       tenantId: organization.id,
       organization,
       membership,
@@ -329,11 +357,11 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     if (!state) throw new RequestProblem(400, 'BAD_REQUEST', 'Invalid or expired OIDC state');
 
     const identity = await createOidcIdentity(query.code, state);
-    const user = store.upsertOidcUser(identity);
+    const user = await store.upsertOidcUser(identity);
     if (user.status !== 'active')
       throw new RequestProblem(403, 'FORBIDDEN', 'User access is suspended');
-    const token = store.createSession(user.id);
-    store.addAudit({
+    const token = await store.createSession(user.id);
+    await store.addAudit({
       action: 'login',
       actorUserId: user.id,
       requestId: request.id,
@@ -349,29 +377,35 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   app.post('/v1/auth/dev-login', async (request, reply) => {
     if (!allowDevLogin) throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
     const body = parseOrThrow(DevLoginSchema, request.body);
-    const user = store.getUser(body.userId);
+    const user = await store.getUser(body.userId);
     if (!user || user.status !== 'active')
       throw new RequestProblem(401, 'UNAUTHORIZED', 'Authentication required');
-    const token = store.createSession(user.id);
-    store.addAudit({ action: 'login', actorUserId: user.id, requestId: request.id });
+    const token = await store.createSession(user.id);
+    await store.addAudit({ action: 'login', actorUserId: user.id, requestId: request.id });
     reply.header('set-cookie', sessionCookie(token, secureCookies));
+    const organizations = await listOrganizationsForUser(user.id);
     return {
       user: userView(user),
-      organizations: store.listMembershipsForUser(user.id).flatMap((membership) => {
-        const organization = store.getOrganization(membership.organizationId);
-        return organization ? [organizationView(organization)] : [];
-      }),
+      organizations: organizations.map(organizationView),
     };
   });
 
   app.get('/v1/auth/me', async (request) => {
-    const auth = requireSession(request);
+    const auth = await requireSession(request);
+    const memberships = await store.listMembershipsForUser(auth.user.id);
+    const organizations = (
+      await Promise.all(
+        memberships.map(async (membership) => {
+          const organization = await store.getOrganization(membership.organizationId);
+          return organization ? { ...organizationView(organization), role: membership.role } : null;
+        }),
+      )
+    ).filter(
+      (organization): organization is NonNullable<typeof organization> => organization !== null,
+    );
     return {
       user: userView(auth.user),
-      organizations: store.listMembershipsForUser(auth.user.id).flatMap((membership) => {
-        const organization = store.getOrganization(membership.organizationId);
-        return organization ? [{ ...organizationView(organization), role: membership.role }] : [];
-      }),
+      organizations,
       selectedOrganizationId: auth.session.selectedTenantId ?? null,
     };
   });
@@ -379,10 +413,14 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   app.post('/v1/auth/logout', async (request, reply) => {
     const token = requestToken(request);
     if (token) {
-      const session = store.getSession(token);
+      const session = await store.getSession(token);
       if (session) {
-        store.addAudit({ action: 'logout', actorUserId: session.userId, requestId: request.id });
-        store.revokeSession(token);
+        await store.addAudit({
+          action: 'logout',
+          actorUserId: session.userId,
+          requestId: request.id,
+        });
+        await store.revokeSession(token);
       }
     }
     reply.header('set-cookie', clearSessionCookie(secureCookies));
@@ -390,17 +428,20 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   });
 
   app.post('/v1/auth/switch-organization', async (request) => {
-    const auth = requireSession(request);
+    const auth = await requireSession(request);
     const body = parseOrThrow(TenantSwitchSchema, request.body);
-    const organization = store.getOrganizationBySlug(body.slug);
+    const organization = await store.getOrganizationBySlug(body.slug);
     const membership = organization
-      ? store.getActiveMembership(auth.user.id, organization.id)
+      ? await store.getActiveMembership(
+          { tenantId: organization.id, requestId: request.id, userId: auth.user.id },
+          auth.user.id,
+        )
       : null;
     if (!organization || organization.status !== 'active' || !membership) {
       throw new RequestProblem(403, 'FORBIDDEN', 'Organization switch is not allowed');
     }
-    store.selectTenant(auth.token, organization.id);
-    store.addAudit({
+    await store.selectTenant(auth.token, organization.id);
+    await store.addAudit({
       action: 'organization.switched',
       actorUserId: auth.user.id,
       tenantId: organization.id,
@@ -414,14 +455,15 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   });
 
   app.post('/v1/organizations', async (request, reply) => {
-    const auth = requireSession(request);
+    const auth = await requireSession(request);
     const body = parseOrThrow(OrganizationCreateSchema, request.body);
     let organization: OrganizationRecord;
     try {
-      organization = store.createOrganization({
+      organization = await store.createOrganization({
         name: body.name,
         slug: body.slug,
         ownerUserId: auth.user.id,
+        requestId: request.id,
       });
     } catch (error) {
       if (error instanceof Error && error.message === 'organization_slug_taken') {
@@ -429,8 +471,8 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       }
       throw error;
     }
-    store.selectTenant(auth.token, organization.id);
-    store.addAudit({
+    await store.selectTenant(auth.token, organization.id);
+    await store.addAudit({
       action: 'organization.created',
       actorUserId: auth.user.id,
       tenantId: organization.id,
@@ -444,13 +486,13 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   });
 
   app.get('/v1/context', async (request) => {
-    const context = requireTenantContext(request);
+    const context = await requireTenantContext(request);
     requirePermission(context, 'organization:read');
     return {
       requestId: request.id,
       user: userView(context.user),
       organization: organizationView(context.organization),
-      membership: membershipView(context.membership, store),
+      membership: await membershipView(context.membership, store),
       roles: context.roles,
       permissions: PERMISSIONS.filter((permission) =>
         rolesHavePermission(context.roles, permission),
@@ -459,16 +501,17 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   });
 
   app.get('/v1/organization', async (request) => {
-    const context = requireTenantContext(request);
+    const context = await requireTenantContext(request);
     requirePermission(context, 'organization:read');
     return { organization: organizationView(context.organization) };
   });
 
   app.get('/v1/branches', async (request) => {
-    const context = requireTenantContext(request);
+    const context = await requireTenantContext(request);
     requirePermission(context, 'branches:read');
+    const branches = await store.listBranches(context);
     return {
-      data: store.listBranches(context.tenantId).map((branch: BranchRecord) => ({
+      data: branches.map((branch: BranchRecord) => ({
         id: branch.id,
         slug: branch.slug,
         name: branch.name,
@@ -478,26 +521,26 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   });
 
   app.get('/v1/members', async (request) => {
-    const context = requireTenantContext(request);
+    const context = await requireTenantContext(request);
     requirePermission(context, 'members:read');
+    const memberships = await store.listMembershipsForOrganization(context);
     return {
-      data: store
-        .listMembershipsForOrganization(context.tenantId)
-        .map((membership) => membershipView(membership, store)),
+      data: await Promise.all(memberships.map((membership) => membershipView(membership, store))),
     };
   });
 
   app.post('/v1/members/invitations', async (request, reply) => {
-    const context = requireTenantContext(request);
+    const context = await requireTenantContext(request);
     requirePermission(context, 'members:invite');
     const body = parseOrThrow(InvitationCreateSchema, request.body);
-    let created: ReturnType<InMemoryIdentityStore['createInvitation']>;
+    let created: CreateInvitationResult;
     try {
-      created = store.createInvitation({
+      created = await store.createInvitation({
         organizationId: context.tenantId,
         email: body.email,
         role: body.role,
         invitedBy: context.user.id,
+        context,
       });
     } catch (error) {
       if (error instanceof Error && error.message === 'member_already_exists') {
@@ -505,7 +548,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       }
       throw error;
     }
-    store.addAudit({
+    await store.addAudit({
       action: 'invitation.created',
       actorUserId: context.user.id,
       tenantId: context.tenantId,
@@ -525,11 +568,11 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   });
 
   app.post('/v1/members/invitations/:token/accept', async (request) => {
-    const auth = requireSession(request);
+    const auth = await requireSession(request);
     const resolution = resolveTenantFromHost(request.headers.host, baseDomain, '');
     if (!resolution)
       throw new RequestProblem(400, 'TENANT_REQUIRED', 'A valid tenant host is required');
-    const organization = store.getOrganizationBySlug(resolution.tenantSlug);
+    const organization = await store.getOrganizationBySlug(resolution.tenantSlug);
     if (!organization || organization.status !== 'active') {
       throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
     }
@@ -538,13 +581,14 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       throw new RequestProblem(400, 'BAD_REQUEST', 'Invitation token is invalid');
     }
 
-    let invitation: ReturnType<InMemoryIdentityStore['acceptInvitation']>;
+    let invitation: InvitationRecord;
     try {
-      invitation = store.acceptInvitation({
+      invitation = await store.acceptInvitation({
         rawToken: params.token,
         userId: auth.user.id,
         email: auth.user.email,
         expectedOrganizationId: organization.id,
+        context: { tenantId: organization.id, requestId: request.id, userId: auth.user.id },
       });
     } catch (error) {
       if (
@@ -560,31 +604,36 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       throw error;
     }
 
-    const membership = store
-      .listMembershipsForOrganization(organization.id)
-      .find((candidate) => candidate.userId === auth.user.id);
-    store.addAudit({
+    const memberships = await store.listMembershipsForOrganization({
+      tenantId: organization.id,
+      requestId: request.id,
+      userId: auth.user.id,
+    });
+    const membership = memberships.find((candidate) => candidate.userId === auth.user.id);
+    await store.addAudit({
       action: 'invitation.accepted',
       actorUserId: auth.user.id,
       tenantId: organization.id,
       resourceId: invitation.id,
       requestId: request.id,
     });
-    return { membership: membership ? membershipView(membership, store) : null };
+    return { membership: membership ? await membershipView(membership, store) : null };
   });
 
   app.patch('/v1/members/:membershipId', async (request) => {
-    const context = requireTenantContext(request);
+    const context = await requireTenantContext(request);
     requirePermission(context, 'members:update_role');
     const params = request.params as { membershipId?: string };
     const body = parseOrThrow(RoleUpdateSchema, request.body);
-    const membership = params.membershipId ? store.getMembership(params.membershipId) : null;
+    const membership = params.membershipId
+      ? await store.getMembership(context, params.membershipId)
+      : null;
     if (!membership || membership.organizationId !== context.tenantId) {
       throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
     }
     try {
-      const updated = store.updateMembershipRole(membership.id, body.role);
-      store.addAudit({
+      const updated = await store.updateMembershipRole(context, membership.id, body.role);
+      await store.addAudit({
         action: 'membership.role_changed',
         actorUserId: context.user.id,
         tenantId: context.tenantId,
@@ -592,7 +641,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
         requestId: request.id,
         metadata: { role: updated.role },
       });
-      return { membership: membershipView(updated, store) };
+      return { membership: await membershipView(updated, store) };
     } catch (error) {
       if (error instanceof Error && error.message === 'last_owner') {
         throw new RequestProblem(409, 'CONFLICT', 'An organization must keep an active owner');
@@ -602,23 +651,25 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   });
 
   app.delete('/v1/members/:membershipId', async (request) => {
-    const context = requireTenantContext(request);
+    const context = await requireTenantContext(request);
     requirePermission(context, 'members:remove');
     const params = request.params as { membershipId?: string };
-    const membership = params.membershipId ? store.getMembership(params.membershipId) : null;
+    const membership = params.membershipId
+      ? await store.getMembership(context, params.membershipId)
+      : null;
     if (!membership || membership.organizationId !== context.tenantId) {
       throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
     }
     try {
-      const removed = store.removeMembership(membership.id);
-      store.addAudit({
+      const removed = await store.removeMembership(context, membership.id);
+      await store.addAudit({
         action: 'membership.removed',
         actorUserId: context.user.id,
         tenantId: context.tenantId,
         resourceId: removed.id,
         requestId: request.id,
       });
-      return { membership: membershipView(removed, store) };
+      return { membership: await membershipView(removed, store) };
     } catch (error) {
       if (error instanceof Error && error.message === 'last_owner') {
         throw new RequestProblem(409, 'CONFLICT', 'An organization must keep an active owner');
@@ -628,9 +679,9 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   });
 
   app.get('/v1/audit', async (request) => {
-    const context = requireTenantContext(request);
+    const context = await requireTenantContext(request);
     requirePermission(context, 'audit:read');
-    const audit: AuditRecord[] = store.listAudit(context.tenantId);
+    const audit: AuditRecord[] = await store.listAudit(context);
     return {
       data: audit.map((record) => ({
         id: record.id,

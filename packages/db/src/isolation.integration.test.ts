@@ -6,7 +6,10 @@ import { TenantOrganizationRepository } from './repositories.js';
 import type { TenantRepositoryContext } from './tenant-context.js';
 
 const runIntegration = process.env.RUN_DB_INTEGRATION === '1';
-const connectionString = process.env.DATABASE_URL;
+const configuredConnectionString = process.env.DATABASE_URL;
+const connectionUrl = configuredConnectionString ? new URL(configuredConnectionString) : null;
+connectionUrl?.searchParams.delete('schema');
+const connectionString = connectionUrl?.toString();
 const suite = runIntegration && connectionString ? describe : describe.skip;
 
 suite('postgres tenant isolation', () => {
@@ -42,9 +45,8 @@ suite('postgres tenant isolation', () => {
 
   it('hides another tenant even when the caller knows its identifier', async () => {
     const contextA: TenantRepositoryContext = { tenantId: tenantA, requestId: 'integration-a' };
-    const repository = new TenantOrganizationRepository(databaseHandle.db);
-
     await withTenantTransaction(databaseHandle, contextA, async (transaction) => {
+      const repository = new TenantOrganizationRepository(transaction);
       await expect(repository.findById(contextA, tenantA)).resolves.toMatchObject({
         name: 'Tenant A',
       });

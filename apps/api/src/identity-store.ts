@@ -54,6 +54,12 @@ export interface SessionRecord {
   selectedTenantId?: string;
 }
 
+export interface StoreTenantContext {
+  tenantId: string;
+  requestId: string;
+  userId?: string;
+}
+
 export interface AuditRecord {
   id: string;
   action:
@@ -79,6 +85,74 @@ export interface CreateInvitationInput {
   role: Role;
   invitedBy: string;
   expiresInMs?: number;
+  context?: StoreTenantContext;
+}
+
+export interface CreateOrganizationInput {
+  name: string;
+  slug: string;
+  ownerUserId: string;
+  requestId?: string;
+}
+
+export interface AcceptInvitationInput {
+  rawToken: string;
+  userId: string;
+  email: string;
+  expectedOrganizationId: string;
+  context?: StoreTenantContext;
+}
+
+export interface CreateInvitationResult {
+  invitation: InvitationRecord;
+  rawToken: string;
+}
+
+export interface IdentityStore {
+  getUser(userId: string): UserRecord | PromiseLike<UserRecord | null> | null;
+  upsertOidcUser(identity: OidcIdentity): UserRecord | PromiseLike<UserRecord>;
+  createSession(userId: string): string | PromiseLike<string>;
+  getSession(token: string): SessionRecord | PromiseLike<SessionRecord | null> | null;
+  revokeSession(token: string): void | PromiseLike<void>;
+  selectTenant(token: string, tenantId: string): void | PromiseLike<void>;
+  getOrganizationBySlug(
+    slug: string,
+  ): OrganizationRecord | PromiseLike<OrganizationRecord | null> | null;
+  getOrganization(
+    organizationId: string,
+  ): OrganizationRecord | PromiseLike<OrganizationRecord | null> | null;
+  getActiveMembership(
+    context: StoreTenantContext,
+    userId: string,
+  ): MembershipRecord | PromiseLike<MembershipRecord | null> | null;
+  listMembershipsForUser(userId: string): MembershipRecord[] | PromiseLike<MembershipRecord[]>;
+  listMembershipsForOrganization(
+    context: StoreTenantContext,
+  ): MembershipRecord[] | PromiseLike<MembershipRecord[]>;
+  listBranches(context: StoreTenantContext): BranchRecord[] | PromiseLike<BranchRecord[]>;
+  createOrganization(
+    input: CreateOrganizationInput,
+  ): OrganizationRecord | PromiseLike<OrganizationRecord>;
+  createInvitation(
+    input: CreateInvitationInput,
+  ): CreateInvitationResult | PromiseLike<CreateInvitationResult>;
+  acceptInvitation(input: AcceptInvitationInput): InvitationRecord | PromiseLike<InvitationRecord>;
+  getMembership(
+    context: StoreTenantContext,
+    membershipId: string,
+  ): MembershipRecord | PromiseLike<MembershipRecord | null> | null;
+  updateMembershipRole(
+    context: StoreTenantContext,
+    membershipId: string,
+    role: Role,
+  ): MembershipRecord | PromiseLike<MembershipRecord>;
+  removeMembership(
+    context: StoreTenantContext,
+    membershipId: string,
+  ): MembershipRecord | PromiseLike<MembershipRecord>;
+  addAudit(record: Omit<AuditRecord, 'id' | 'at'>): AuditRecord | PromiseLike<AuditRecord>;
+  listAudit(context: StoreTenantContext): AuditRecord[] | PromiseLike<AuditRecord[]>;
+  close?: () => void | PromiseLike<void>;
 }
 
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
@@ -231,11 +305,22 @@ export class InMemoryIdentityStore {
     return this.organizations.get(organizationId) ?? null;
   }
 
-  getMembership(membershipId: string): MembershipRecord | null {
-    return this.memberships.get(membershipId) ?? null;
+  getMembership(
+    contextOrMembershipId: StoreTenantContext | string,
+    maybeMembershipId?: string,
+  ): MembershipRecord | null {
+    const membershipId =
+      typeof contextOrMembershipId === 'string' ? contextOrMembershipId : maybeMembershipId;
+    return membershipId ? (this.memberships.get(membershipId) ?? null) : null;
   }
 
-  getActiveMembership(userId: string, organizationId: string): MembershipRecord | null {
+  getActiveMembership(
+    contextOrUserId: StoreTenantContext | string,
+    userIdOrOrganizationId: string,
+  ): MembershipRecord | null {
+    const userId = typeof contextOrUserId === 'string' ? contextOrUserId : userIdOrOrganizationId;
+    const organizationId =
+      typeof contextOrUserId === 'string' ? userIdOrOrganizationId : contextOrUserId.tenantId;
     return (
       [...this.memberships.values()].find(
         (membership) =>
@@ -252,22 +337,28 @@ export class InMemoryIdentityStore {
     );
   }
 
-  listMembershipsForOrganization(organizationId: string): MembershipRecord[] {
+  listMembershipsForOrganization(
+    contextOrOrganizationId: StoreTenantContext | string,
+  ): MembershipRecord[] {
+    const organizationId =
+      typeof contextOrOrganizationId === 'string'
+        ? contextOrOrganizationId
+        : contextOrOrganizationId.tenantId;
     return [...this.memberships.values()].filter(
       (membership) =>
         membership.organizationId === organizationId && membership.status !== 'removed',
     );
   }
 
-  listBranches(organizationId: string): BranchRecord[] {
+  listBranches(contextOrOrganizationId: StoreTenantContext | string): BranchRecord[] {
+    const organizationId =
+      typeof contextOrOrganizationId === 'string'
+        ? contextOrOrganizationId
+        : contextOrOrganizationId.tenantId;
     return [...this.branches.values()].filter((branch) => branch.organizationId === organizationId);
   }
 
-  createOrganization(input: {
-    name: string;
-    slug: string;
-    ownerUserId: string;
-  }): OrganizationRecord {
+  createOrganization(input: CreateOrganizationInput): OrganizationRecord {
     if (this.getOrganizationBySlug(input.slug)) throw new Error('organization_slug_taken');
     const organization: OrganizationRecord = {
       id: newId('tenant'),
@@ -287,10 +378,7 @@ export class InMemoryIdentityStore {
     return organization;
   }
 
-  createInvitation(input: CreateInvitationInput): {
-    invitation: InvitationRecord;
-    rawToken: string;
-  } {
+  createInvitation(input: CreateInvitationInput): CreateInvitationResult {
     const email = normalizeEmail(input.email);
     const existing = [...this.memberships.values()].find((membership) => {
       const user = this.users.get(membership.userId);
@@ -316,12 +404,7 @@ export class InMemoryIdentityStore {
     return { invitation, rawToken };
   }
 
-  acceptInvitation(input: {
-    rawToken: string;
-    userId: string;
-    email: string;
-    expectedOrganizationId: string;
-  }): InvitationRecord {
+  acceptInvitation(input: AcceptInvitationInput): InvitationRecord {
     const tokenHash = hashToken(input.rawToken);
     const invitation = [...this.invitations.values()].find(
       (candidate) => candidate.tokenHash === tokenHash,
@@ -352,7 +435,16 @@ export class InMemoryIdentityStore {
     return invitation;
   }
 
-  updateMembershipRole(membershipId: string, role: Role): MembershipRecord {
+  updateMembershipRole(
+    contextOrMembershipId: StoreTenantContext | string,
+    membershipIdOrRole: string,
+    maybeRole?: Role,
+  ): MembershipRecord {
+    const membershipId =
+      typeof contextOrMembershipId === 'string' ? contextOrMembershipId : membershipIdOrRole;
+    const role =
+      typeof contextOrMembershipId === 'string' ? (membershipIdOrRole as Role) : maybeRole;
+    if (!role) throw new Error('membership_role_required');
     const membership = this.memberships.get(membershipId);
     if (!membership || membership.status !== 'active') throw new Error('membership_not_found');
     if (membership.role === 'owner' && role !== 'owner') {
@@ -369,7 +461,13 @@ export class InMemoryIdentityStore {
     return membership;
   }
 
-  removeMembership(membershipId: string): MembershipRecord {
+  removeMembership(
+    contextOrMembershipId: StoreTenantContext | string,
+    maybeMembershipId?: string,
+  ): MembershipRecord {
+    const membershipId =
+      typeof contextOrMembershipId === 'string' ? contextOrMembershipId : maybeMembershipId;
+    if (!membershipId) throw new Error('membership_id_required');
     const membership = this.memberships.get(membershipId);
     if (!membership || membership.status !== 'active') throw new Error('membership_not_found');
     if (membership.role === 'owner') {
@@ -392,7 +490,9 @@ export class InMemoryIdentityStore {
     return audit;
   }
 
-  listAudit(tenantId: string): AuditRecord[] {
+  listAudit(contextOrTenantId: StoreTenantContext | string): AuditRecord[] {
+    const tenantId =
+      typeof contextOrTenantId === 'string' ? contextOrTenantId : contextOrTenantId.tenantId;
     return this.auditLog.filter((record) => record.tenantId === tenantId);
   }
 }

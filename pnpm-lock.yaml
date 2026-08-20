@@ -41,6 +41,9 @@ importers:
       '@platform/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@platform/db':
+        specifier: workspace:*
+        version: link:../../packages/db
       '@platform/domain':
         specifier: workspace:*
         version: link:../../packages/domain
@@ -57,6 +60,9 @@ importers:
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
+      postgres:
+        specifier: ^3.4.7
+        version: 3.4.9
       tsx:
         specifier: ^4.19.2
         version: 4.23.12

@@ -17,6 +17,7 @@
     "@platform/config": "workspace:*",
     "@platform/domain": "workspace:*",
     "@platform/contracts": "workspace:*",
+    "@platform/db": "workspace:*",
     "@platform/observability": "workspace:*",
     "fastify": "^5.4.0",
     "zod": "^3.25.76"
@@ -24,6 +25,7 @@
   "devDependencies": {
     "@types/node": "^24.3.0",
     "tsx": "^4.19.2",
+    "postgres": "^3.4.7",
     "vitest": "^3.2.4"
   }
 }
