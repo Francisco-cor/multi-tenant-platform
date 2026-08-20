@@ -4,7 +4,7 @@ Operations Hub B2B para organizaciones con múltiples sucursales. El proyecto pr
 
 ## Estado
 
-Fase 0 y 1 estan cerradas. La Fase 2 tiene implementado el vertical slice de identidad, organizaciones, subdominios, RBAC y auditoria. La Fase 3 ya incluye la migracion base PostgreSQL, RLS y el limite transaccional de tenant; el corte completo de la API a repositories persistentes sigue en la siguiente iteracion. El roadmap completo esta en [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md).
+Fase 0 y 1 estan cerradas. La Fase 2 mantiene el vertical slice de identidad y RBAC con store en memoria para tests unitarios. La Fase 3 ya incluye migraciones PostgreSQL, RLS real, contexto transaccional y API conectada al adaptador persistente tenant-scoped.
 
 ## Requisitos locales
 

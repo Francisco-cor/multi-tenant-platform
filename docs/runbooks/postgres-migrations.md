@@ -5,7 +5,8 @@
 1. Copiar `.env.example` a `.env` y conservar `DATABASE_URL` apuntando al servicio `platform`.
 2. Levantar PostgreSQL: `docker compose up -d postgres`.
 3. Aplicar migraciones: `pnpm --filter @platform/db migrate`.
-4. Ejecutar aislamiento real: `RUN_DB_INTEGRATION=1 pnpm --filter @platform/db test:integration`.
+4. Ejecutar aislamiento real: `RUN_DB_INTEGRATION=1 pnpm --filter @platform/db test:integration`
+5. Ejecutar el corte API/RLS: `RUN_DB_INTEGRATION=1 pnpm --filter @platform/api test:integration`.
 
 La integracion usa el usuario local `platform` solo para preparar/limpiar datos y hace `SET LOCAL ROLE platform_app` durante la operacion tenant-scoped. La migracion crea `platform_app` como `NOLOGIN` y le concede solo DML sobre las tablas base.
 
@@ -20,3 +21,5 @@ La integracion usa el usuario local `platform` solo para preparar/limpiar datos 
 ## Fallo o pausa
 
 El runner ejecuta cada migracion dentro de una transaccion y libera el advisory lock al cerrar la conexion. Si falla, conservar el error, revisar `schema_migrations` y corregir con una nueva migracion compatible. No editar una migracion ya registrada ni ejecutar `git reset` para intentar reparar el esquema.
+
+El runner y los tests eliminan el query parameter `schema` si aparece en DATABASE_URL, porque `postgres` lo interpreta como GUC; el esquema activo es `public` por defecto.
