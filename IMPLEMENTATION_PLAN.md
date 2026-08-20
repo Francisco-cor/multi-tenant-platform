@@ -51,9 +51,10 @@ Antes de terminar una sesión:
 
 ### Registro de continuidad
 
-| Sesión | Fecha      | Fase | Hecho                                                      | Bloqueos / decisiones                   | Próximo paso                             |
-| ------ | ---------- | ---- | ---------------------------------------------------------- | --------------------------------------- | ---------------------------------------- |
-| 0      | 2026-08-20 | 0–1  | Documento maestro, bootstrap y contratos iniciales creados | Persistencia/auth reales aún pendientes | Instalar dependencias y validar CI local |
+| Sesión | Fecha      | Fase | Hecho                                                                                                                            | Bloqueos / decisiones                                             | Próximo paso                                          |
+| ------ | ---------- | ---- | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | ----------------------------------------------------- |
+| 0      | 2026-08-20 | 0–1  | Documento maestro, bootstrap y contratos iniciales creados                                                                       | Persistencia/auth reales aún pendientes                           | Instalar dependencias y validar CI local              |
+| 1      | 2026-08-20 | 2    | OIDC state/nonce y claims, sesiones, host tenant, selección explícita, RBAC API, invitaciones one-shot y auditoría implementados | Store en memoria deliberado; UI/E2E y persistencia/RLS pendientes | Completar UI/E2E y comenzar Fase 3 con migración base |
 
 ## 3. Arquitectura objetivo
 
@@ -200,14 +201,14 @@ Las fases se ejecutan en orden, pero una fase puede tener trabajo paralelo cuand
 
 ### Tareas
 
-- [ ] Integrar login OIDC con issuer configurable, `state`, `nonce` y validación de claims.
-- [ ] Modelar usuarios, organizaciones, sucursales, membresías, invitaciones y sesiones.
-- [ ] Implementar creación de organización e invitación con token de un solo uso y expiración.
-- [ ] Resolver `*.app.com` y dominio local sin confiar en headers manipulables.
-- [ ] Implementar cambio explícito de organización cuando un usuario pertenece a varias.
-- [ ] Validar tenant activo, usuario suspendido y membresía revocada en cada request.
+- [x] Integrar login OIDC con issuer configurable, `state`, `nonce` y validación de claims.
+- [x] Modelar usuarios, organizaciones, sucursales, membresías, invitaciones y sesiones.
+- [x] Implementar creación de organización e invitación con token de un solo uso y expiración.
+- [x] Resolver `*.app.com` y dominio local sin confiar en headers manipulables.
+- [x] Implementar cambio explícito de organización cuando un usuario pertenece a varias.
+- [x] Validar tenant activo, usuario suspendido y membresía revocada en cada request.
 - [ ] Aplicar RBAC en API y ocultar acciones no permitidas en UI sin usar la UI como control.
-- [ ] Auditar login, logout, invitación, aceptación, cambio de tenant y cambios de roles.
+- [x] Auditar login, logout, invitación, aceptación, cambio de tenant y cambios de roles.
 
 ### Criterios de salida
 
@@ -215,6 +216,8 @@ Las fases se ejecutan en orden, pero una fase puede tener trabajo paralelo cuand
 - Un usuario con membresía solo en A recibe autorización segura al intentar entrar a B.
 - Revocar una membresía invalida el acceso sin depender de limpiar cache manualmente.
 - Hay E2E de login simulado y de aislamiento entre dos organizaciones.
+
+> Progreso sesión 1: el vertical slice API de identidad y tenant context está implementado con store en memoria, tests de aislamiento y documentación. La UI autenticada y el E2E con navegador quedan pendientes; la persistencia real y RLS pertenecen a la Fase 3.
 
 ## Fase 3 — PostgreSQL, migraciones y aislamiento real
 

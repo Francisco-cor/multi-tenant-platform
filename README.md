@@ -4,7 +4,7 @@ Operations Hub B2B para organizaciones con múltiples sucursales. El proyecto pr
 
 ## Estado
 
-Actualmente se están implementando las fases 0 y 1. El roadmap completo, los criterios de salida y los escenarios de fallo están en [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md).
+Fase 0 y 1 están cerradas. La Fase 2 tiene implementado el vertical slice de identidad, organizaciones, subdominios, RBAC y auditoría; la persistencia PostgreSQL/RLS queda para la Fase 3. El roadmap completo, los criterios de salida y los escenarios de fallo están en [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md).
 
 ## Requisitos locales
 
