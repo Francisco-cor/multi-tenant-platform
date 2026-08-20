@@ -11,9 +11,15 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint --config ../../eslint.config.mjs src",
     "test": "vitest run --passWithNoTests",
-    "test:integration": "vitest run --config vitest.integration.config.ts"
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "migrate": "tsx src/migrate.ts"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.44.5",
+    "postgres": "^3.4.7"
   },
   "devDependencies": {
+    "tsx": "^4.19.2",
     "vitest": "^3.2.4"
   }
 }

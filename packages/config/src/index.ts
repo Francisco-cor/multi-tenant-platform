@@ -7,6 +7,10 @@ export const environmentSchema = z.object({
   TENANT_BASE_DOMAIN: z.string().min(1).default('app.localhost'),
   WEB_PUBLIC_URL: z.string().url().default('http://app.localhost:3000'),
   DATABASE_URL: z.string().url().optional(),
+  DATABASE_ROLE: z
+    .string()
+    .regex(/^[a-z_][a-z0-9_]*$/i)
+    .optional(),
   REDIS_URL: z.string().url().optional(),
   S3_ENDPOINT: z.string().url().optional(),
   S3_REGION: z.string().default('us-east-1'),
