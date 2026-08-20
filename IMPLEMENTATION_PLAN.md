@@ -51,10 +51,11 @@ Antes de terminar una sesión:
 
 ### Registro de continuidad
 
-| Sesión | Fecha      | Fase | Hecho                                                                                                                            | Bloqueos / decisiones                                             | Próximo paso                                          |
-| ------ | ---------- | ---- | -------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- | ----------------------------------------------------- |
-| 0      | 2026-08-20 | 0–1  | Documento maestro, bootstrap y contratos iniciales creados                                                                       | Persistencia/auth reales aún pendientes                           | Instalar dependencias y validar CI local              |
-| 1      | 2026-08-20 | 2    | OIDC state/nonce y claims, sesiones, host tenant, selección explícita, RBAC API, invitaciones one-shot y auditoría implementados | Store en memoria deliberado; UI/E2E y persistencia/RLS pendientes | Completar UI/E2E y comenzar Fase 3 con migración base |
+| Sesión | Fecha      | Fase | Hecho                                                                                                                                   | Bloqueos / decisiones                                                                                                                       | Próximo paso                                                            |
+| ------ | ---------- | ---- | --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| 0      | 2026-08-20 | 0–1  | Documento maestro, bootstrap y contratos iniciales creados                                                                              | Persistencia/auth reales aún pendientes                                                                                                     | Instalar dependencias y validar CI local                                |
+| 1      | 2026-08-20 | 2    | OIDC state/nonce y claims, sesiones, host tenant, selección explícita, RBAC API, invitaciones one-shot y auditoría implementados        | Store en memoria deliberado; UI/E2E y persistencia/RLS pendientes                                                                           | Completar UI/E2E y comenzar Fase 3 con migración base                   |
+| 2      | 2026-08-20 | 3    | Migracion base, RLS forzado, contexto Drizzle transaccional, repository tenant-scoped, runner con advisory lock y prueba A/B preparados | Docker daemon no disponible en esta sesion; falta ejecutar la integracion contra PostgreSQL real y conectar la API al adaptador persistente | Levantar PostgreSQL, ejecutar migracion/prueba y hacer el corte del API |
 
 ## 3. Arquitectura objetivo
 
@@ -225,15 +226,15 @@ Las fases se ejecutan en orden, pero una fase puede tener trabajo paralelo cuand
 
 ### Tareas
 
-- [ ] Implementar tablas base con IDs UUID/ULID, timestamps UTC y `created_by` donde aplique.
-- [ ] Añadir `tenant_id` a todas las tablas clasificadas como tenant-scoped.
-- [ ] Crear índices compuestos orientados a los patrones reales: `(tenant_id, id)`, estados, fechas y claves únicas.
-- [ ] Definir constraints de unicidad con tenant (`tenant_id, sku`, `tenant_id, slug`, etc.).
-- [ ] Implementar RLS con una variable de sesión transaccional, por ejemplo `app.tenant_id`.
+- [x] Implementar tablas base con IDs UUID, timestamps UTC y `created_by` donde aplique.
+- [x] Añadir `tenant_id` a todas las tablas clasificadas como tenant-scoped; `organizations` queda documentada como tenant root cuyo `id` es el limite.
+- [x] Crear indices compuestos orientados a los patrones reales: `(tenant_id, slug)` y claves de membresia; se ampliaran con cada agregado operativo.
+- [x] Definir constraints de unicidad con tenant (`tenant_id, user_id` y `tenant_id, slug`).
+- [x] Implementar RLS con la variable de sesion transaccional `app.tenant_id` y `FORCE ROW LEVEL SECURITY`.
 - [ ] Asegurar que cada acceso de API usa transacción/contexto de DB correctamente aislado.
 - [ ] Probar comportamiento con pool de conexiones y evitar contexto tenant pegado a una conexión reutilizada.
 - [ ] Separar migraciones de aplicación, migraciones de datos y cambios de índices grandes.
-- [ ] Documentar expand-contract y política de migraciones hacia atrás.
+- [x] Documentar expand-contract y politica de migraciones hacia atras en el runbook de PostgreSQL.
 - [ ] Crear backups locales, restore de prueba y verificación de migraciones desde una versión anterior.
 
 ### Criterios de salida
@@ -241,6 +242,8 @@ Las fases se ejecutan en orden, pero una fase puede tener trabajo paralelo cuand
 - Las pruebas de integración demuestran aislamiento usando repository filters y RLS.
 - No hay foreign key o índice crítico que permita mezclar tenants accidentalmente.
 - Una migración fallida no deja el esquema en un estado desconocido sin runbook.
+
+> Progreso sesion 2: Fase 3 tiene migracion base versionada para `users`, `organizations`, `memberships` y `branches`, restricciones tenant-scoped, RLS forzado, cliente Drizzle con contexto transaccional y prueba de aislamiento preparada para PostgreSQL real. La API sigue usando el adaptador en memoria hasta completar el corte de repositories.
 
 ## Fase 4 — Órdenes y flujo transaccional
 

@@ -4,7 +4,7 @@ Operations Hub B2B para organizaciones con múltiples sucursales. El proyecto pr
 
 ## Estado
 
-Fase 0 y 1 están cerradas. La Fase 2 tiene implementado el vertical slice de identidad, organizaciones, subdominios, RBAC y auditoría; la persistencia PostgreSQL/RLS queda para la Fase 3. El roadmap completo, los criterios de salida y los escenarios de fallo están en [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md).
+Fase 0 y 1 estan cerradas. La Fase 2 tiene implementado el vertical slice de identidad, organizaciones, subdominios, RBAC y auditoria. La Fase 3 ya incluye la migracion base PostgreSQL, RLS y el limite transaccional de tenant; el corte completo de la API a repositories persistentes sigue en la siguiente iteracion. El roadmap completo esta en [IMPLEMENTATION_PLAN.md](./IMPLEMENTATION_PLAN.md).
 
 ## Requisitos locales
 
@@ -42,6 +42,15 @@ pnpm test                # suite disponible por workspace
 pnpm format:check        # formato reproducible
 ```
 
+### PostgreSQL y aislamiento
+
+```bash
+pnpm --filter @platform/db migrate
+RUN_DB_INTEGRATION=1 pnpm --filter @platform/db test:integration
+```
+
+El runner toma `DATABASE_URL`, usa un advisory lock y registra cada archivo en `schema_migrations`. En local `DATABASE_ROLE=platform_app` hace que la aplicacion use el rol NOLOGIN creado por la migracion; en produccion debe enlazarse a un login gestionado sin privilegios de superusuario.
+
 ## Estructura
 
 ```text
@@ -63,7 +72,7 @@ infra/         Configuración local y futura infraestructura declarativa
 
 1. El contexto autenticado es la única fuente válida de `tenant_id`.
 2. Los repositories tenant-scoped reciben contexto explícito; no hay búsquedas globales por ID.
-3. PostgreSQL será una segunda barrera mediante RLS cuando se incorpore la persistencia.
+3. PostgreSQL aplica una segunda barrera mediante RLS dentro de transacciones con `app.tenant_id`.
 4. Toda operación con efectos repetibles debe definir idempotencia antes de entrar a producción.
 5. Un cambio que no tiene prueba de fallo, observabilidad y documentación no está terminado.
 
