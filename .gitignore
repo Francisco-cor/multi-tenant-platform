@@ -1,0 +1,44 @@
+# Dependencies and package-manager state
+node_modules/
+.pnpm-store/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.local
+*.pem
+*.key
+
+# Build, test and tool output
+.next/
+dist/
+coverage/
+.nyc_output/
+playwright-report/
+test-results/
+.turbo/
+.vite/
+*.log
+
+# Local service data
+docker-data/
+postgres-data/
+redis-data/
+minio-data/
+
+# Terraform state and working directory
+infra/terraform/.terraform/
+infra/terraform/*.tfstate*
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Project documentation is intentionally versioned.
+!IMPLEMENTATION_PLAN.md
+!docs/**/*.md

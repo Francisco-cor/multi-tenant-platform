@@ -1,0 +1,4 @@
+* @platform-maintainers
+/infra/ @platform-infrastructure
+/packages/db/ @platform-data
+/docs/adr/ @platform-architecture
