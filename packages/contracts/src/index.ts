@@ -12,6 +12,8 @@ export const ErrorCodeSchema = z.enum([
   'VALIDATION_ERROR',
   'RATE_LIMITED',
   'DEPENDENCY_UNAVAILABLE',
+  'TENANT_REQUIRED',
+  'ORGANIZATION_SELECTION_REQUIRED',
   'INTERNAL_ERROR',
 ]);
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;

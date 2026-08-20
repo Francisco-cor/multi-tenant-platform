@@ -32,18 +32,27 @@ importers:
 
   apps/api:
     dependencies:
+      '@platform/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
       '@platform/config':
         specifier: workspace:*
         version: link:../../packages/config
       '@platform/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
+      '@platform/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
       '@platform/observability':
         specifier: workspace:*
         version: link:../../packages/observability
       fastify:
         specifier: ^5.4.0
         version: 5.12.1
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
     devDependencies:
       '@types/node':
         specifier: ^24.3.0

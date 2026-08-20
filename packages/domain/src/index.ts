@@ -119,3 +119,7 @@ export const RESOURCES = [
   'billing',
 ] as const;
 export type Resource = (typeof RESOURCES)[number];
+
+export function rolesHavePermission(roles: readonly Role[], permission: Permission): boolean {
+  return roles.some((role) => roleHasPermission(role, permission));
+}
