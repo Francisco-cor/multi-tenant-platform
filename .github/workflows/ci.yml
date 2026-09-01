@@ -45,3 +45,57 @@ jobs:
 
       - name: Unit tests
         run: pnpm test
+
+      - name: OpenAPI drift
+        run: pnpm openapi:check
+
+  migrate-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: platform
+          POSTGRES_USER: platform
+          POSTGRES_PASSWORD: platform
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U platform -d platform"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Migrate (ephemeral)
+        run: pnpm --filter @platform/db migrate
+        env:
+          DATABASE_URL: postgresql://platform:platform@localhost:5432/platform
+
+      - name: Migrate idempotence (second run must skip)
+        run: pnpm --filter @platform/db migrate
+        env:
+          DATABASE_URL: postgresql://platform:platform@localhost:5432/platform
+
+      - name: Isolation integration (RLS + pool 50)
+        run: pnpm --filter @platform/db test:integration
+        env:
+          DATABASE_URL: postgresql://platform:platform@localhost:5432/platform
+          RUN_DB_INTEGRATION: '1'
