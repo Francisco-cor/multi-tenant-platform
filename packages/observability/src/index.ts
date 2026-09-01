@@ -11,3 +11,5 @@ export function correlationHeaders(context: CorrelationContext): Record<string, 
     ...(context.traceId ? { 'x-trace-id': context.traceId } : {}),
   };
 }
+
+export * from './metrics.js';

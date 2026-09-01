@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { sql } from '@platform/db';
+import { sql, writeOutboxEvent } from '@platform/db';
 import { createDatabase, withTenantTransaction, type DatabaseHandle } from '@platform/db';
 import type { StoreTenantContext } from './identity-store.js';
 
@@ -113,6 +113,15 @@ export class InMemoryFileStore implements FileStore {
     return `${tenantId}:${fileId}`;
   }
 
+  // In-memory outbox for transactional demo without DB
+  private readonly outbox: Array<{
+    tenantId: string;
+    aggregateId: string;
+    eventType: string;
+    payload: unknown;
+    correlationId?: string;
+  }> = [];
+
   async createPending(context: StoreTenantContext, input: CreateFileInput): Promise<FileRecord> {
     validateCreateInput(input);
     const id = randomUUID();
@@ -134,6 +143,19 @@ export class InMemoryFileStore implements FileStore {
       expiresAt: now + PENDING_EXPIRY_MS,
     };
     this.files.set(this.toKey(context.tenantId, id), record);
+    // Transactional outbox simulation: same logical tx
+    this.outbox.push({
+      tenantId: context.tenantId,
+      aggregateId: id,
+      eventType: 'file.created',
+      payload: {
+        fileId: id,
+        filename: input.filename,
+        contentType: input.contentType,
+        size: input.sizeExpected,
+      },
+      correlationId: context.requestId,
+    });
     return record;
   }
 
@@ -292,6 +314,20 @@ export class PersistentFileStore implements FileStore {
       `);
       const row = rows[0];
       if (!row) throw new Error('file_create_failed');
+      // Transactional outbox: same tx as file insert — no dual write
+      await writeOutboxEvent(tx, {
+        tenantId: context.tenantId,
+        aggregateType: 'file',
+        aggregateId: id,
+        eventType: 'file.created',
+        payload: {
+          fileId: id,
+          filename: input.filename,
+          contentType: input.contentType,
+          size: input.sizeExpected,
+        },
+        correlationId: context.requestId,
+      });
       return {
         id: row.id,
         tenantId: row.tenant_id,

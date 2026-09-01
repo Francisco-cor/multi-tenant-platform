@@ -26,9 +26,7 @@ export interface S3Service {
     expiresSeconds?: number;
   }): Promise<PresignedUpload>;
   generateDownloadUrl(input: { key: string; expiresSeconds?: number }): Promise<PresignedDownload>;
-  headObject(
-    key: string,
-  ): Promise<{
+  headObject(key: string): Promise<{
     contentLength: number;
     contentType?: string | undefined;
     etag?: string | undefined;
@@ -96,9 +94,7 @@ export class FakeS3Service implements S3Service {
     return { url, expiresAt: nowMs() + expires * 1000, key: input.key };
   }
 
-  async headObject(
-    key: string,
-  ): Promise<{
+  async headObject(key: string): Promise<{
     contentLength: number;
     contentType?: string | undefined;
     etag?: string | undefined;

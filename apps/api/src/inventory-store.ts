@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { sql } from '@platform/db';
+import { sql, writeOutboxEvent } from '@platform/db';
 import { createDatabase, withTenantTransaction, type DatabaseHandle } from '@platform/db';
 import type { StoreTenantContext } from './identity-store.js';
 
@@ -194,6 +194,14 @@ export class InMemoryInventoryStore implements InventoryStore {
     return { items, nextCursor };
   }
 
+  // In-memory outbox for demo (mirrors Persistent transactional outbox)
+  private readonly outbox: Array<{
+    tenantId: string;
+    aggregateId: string;
+    eventType: string;
+    payload: unknown;
+  }> = [];
+
   async reserve(context: StoreTenantContext, input: ReserveInput): Promise<ReservationRecord> {
     if (input.quantity <= 0) throw new Error('quantity_invalid');
     // Validate product belongs to tenant
@@ -222,6 +230,16 @@ export class InMemoryInventoryStore implements InventoryStore {
       correlationId: input.correlationId,
     };
     this.reservations.set(reservation.id, reservation);
+    this.outbox.push({
+      tenantId: context.tenantId,
+      aggregateId: reservation.id,
+      eventType: 'inventory.reserved',
+      payload: {
+        reservationId: reservation.id,
+        productId: input.productId,
+        quantity: input.quantity,
+      },
+    });
     return reservation;
   }
 
@@ -406,6 +424,20 @@ export class PersistentInventoryStore implements InventoryStore {
         insert into inventory_movements (tenant_id, branch_id, product_id, delta, reason, correlation_id, created_by)
         values (${context.tenantId}::uuid, ${input.branchId}::uuid, ${input.productId}::uuid, ${-input.quantity}, 'reserve', ${correlationId}, ${input.createdBy}::uuid)
       `);
+
+      await writeOutboxEvent(tx, {
+        tenantId: context.tenantId,
+        aggregateType: 'inventory',
+        aggregateId: reservationId,
+        eventType: 'inventory.reserved',
+        payload: {
+          reservationId,
+          productId: input.productId,
+          branchId: input.branchId,
+          quantity: input.quantity,
+        },
+        correlationId,
+      });
 
       return {
         id: row.id,
