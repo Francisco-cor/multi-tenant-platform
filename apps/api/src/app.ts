@@ -25,11 +25,13 @@ import {
   type SessionRecord,
   type UserRecord,
 } from './identity-store.js';
+import { registerSecurity } from './plugins/security.js';
 
 const SESSION_COOKIE = 'platform_session';
 const OIDC_STATE_COOKIE = 'oidc_state';
 const DEFAULT_BASE_DOMAIN = 'app.localhost';
 const DEFAULT_OIDC_REDIRECT_URI = 'http://api.localhost:4000/v1/auth/callback';
+const SMALL_BODY_LIMIT = 256 * 1024;
 
 const DevLoginSchema = z.object({ userId: z.string().min(1) });
 const OrganizationCreateSchema = z.object({
@@ -213,6 +215,13 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   const app = Fastify({
     logger: { level: process.env.LOG_LEVEL ?? 'info' },
     bodyLimit: 1024 * 1024,
+    trustProxy: true,
+  });
+
+  registerSecurity(app, {
+    baseDomain,
+    webPublicUrl: process.env.WEB_PUBLIC_URL ?? 'http://app.localhost:3000',
+    allowDevOrigins: process.env.NODE_ENV !== 'production',
   });
 
   app.addHook('onClose', async () => {
@@ -374,7 +383,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     return reply.redirect(process.env.WEB_PUBLIC_URL ?? 'http://app.localhost:3000');
   });
 
-  app.post('/v1/auth/dev-login', async (request, reply) => {
+  app.post('/v1/auth/dev-login', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
     if (!allowDevLogin) throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
     const body = parseOrThrow(DevLoginSchema, request.body);
     const user = await store.getUser(body.userId);
@@ -410,7 +419,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     };
   });
 
-  app.post('/v1/auth/logout', async (request, reply) => {
+  app.post('/v1/auth/logout', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
     const token = requestToken(request);
     if (token) {
       const session = await store.getSession(token);
@@ -427,7 +436,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     return { status: 'ok' };
   });
 
-  app.post('/v1/auth/switch-organization', async (request) => {
+  app.post('/v1/auth/switch-organization', { bodyLimit: SMALL_BODY_LIMIT }, async (request) => {
     const auth = await requireSession(request);
     const body = parseOrThrow(TenantSwitchSchema, request.body);
     const organization = await store.getOrganizationBySlug(body.slug);
@@ -454,7 +463,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     };
   });
 
-  app.post('/v1/organizations', async (request, reply) => {
+  app.post('/v1/organizations', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
     const auth = await requireSession(request);
     const body = parseOrThrow(OrganizationCreateSchema, request.body);
     let organization: OrganizationRecord;
@@ -529,7 +538,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     };
   });
 
-  app.post('/v1/members/invitations', async (request, reply) => {
+  app.post('/v1/members/invitations', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
     const context = await requireTenantContext(request);
     requirePermission(context, 'members:invite');
     const body = parseOrThrow(InvitationCreateSchema, request.body);
@@ -567,7 +576,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     });
   });
 
-  app.post('/v1/members/invitations/:token/accept', async (request) => {
+  app.post('/v1/members/invitations/:token/accept', { bodyLimit: SMALL_BODY_LIMIT }, async (request) => {
     const auth = await requireSession(request);
     const resolution = resolveTenantFromHost(request.headers.host, baseDomain, '');
     if (!resolution)
@@ -620,7 +629,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     return { membership: membership ? await membershipView(membership, store) : null };
   });
 
-  app.patch('/v1/members/:membershipId', async (request) => {
+  app.patch('/v1/members/:membershipId', { bodyLimit: SMALL_BODY_LIMIT }, async (request) => {
     const context = await requireTenantContext(request);
     requirePermission(context, 'members:update_role');
     const params = request.params as { membershipId?: string };
