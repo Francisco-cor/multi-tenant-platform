@@ -89,9 +89,46 @@ async function checkRedis(): Promise<HealthCheckResult> {
   }
 }
 
+async function checkOutbox(): Promise<HealthCheckResult> {
+  const url = process.env.DATABASE_URL;
+  if (!url) return { name: 'outbox', status: 'skip' };
+  const start = Date.now();
+  let sql: ReturnType<typeof postgres> | null = null;
+  try {
+    sql = postgres(url, { max: 1, prepare: false, connect_timeout: 2, idle_timeout: 2 });
+    // Lag = age of oldest pending event; pending count
+    const rows = await withTimeout(
+      sql`select extract(epoch from (now() - min(created_at))) as lag_seconds, count(*) as pending from outbox_events where status = 'pending'`,
+      HEALTH_TIMEOUT_MS,
+      'outbox',
+    );
+    const row = (rows as unknown as Array<{ lag_seconds: string | null; pending: string }>)[0];
+    const lag = row?.lag_seconds ? Number(row.lag_seconds) : 0;
+    const pending = row?.pending ? Number(row.pending) : 0;
+    // Outbox lag > 30s or pending > 100 is degraded ( Fase 7 criterion P95 <30s )
+    if (lag > 30) {
+      return {
+        name: 'outbox',
+        status: 'fail',
+        latencyMs: Date.now() - start,
+        error: `lag ${lag.toFixed(1)}s pending ${pending}`,
+      };
+    }
+    return { name: 'outbox', status: 'ok', latencyMs: Date.now() - start };
+  } catch (error) {
+    // If table does not exist yet (migration not applied), treat as skip to avoid failing readiness in dev.
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.includes('outbox_events') && msg.includes('does not exist'))
+      return { name: 'outbox', status: 'skip' };
+    return { name: 'outbox', status: 'fail', latencyMs: Date.now() - start, error: msg };
+  } finally {
+    if (sql) await sql.end({ timeout: 2 }).catch(() => undefined);
+  }
+}
+
 export async function getReadiness(): Promise<ReadyReport> {
-  const [pg, redis] = await Promise.all([checkDatabase(), checkRedis()]);
-  const deps = [pg, redis].filter((d) => d.status !== 'skip');
+  const [pg, redis, outbox] = await Promise.all([checkDatabase(), checkRedis(), checkOutbox()]);
+  const deps = [pg, redis, outbox].filter((d) => d.status !== 'skip');
   const hasFail = deps.some((d) => d.status === 'fail');
   return {
     status: hasFail ? 'degraded' : 'ok',

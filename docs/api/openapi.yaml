@@ -336,6 +336,90 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+  /metrics:
+    get:
+      tags: [Health]
+      operationId: getMetrics
+      responses:
+        '200':
+          description: Prometheus metrics (outbox_lag_seconds, dlq_size).
+          content:
+            text/plain:
+              schema: { type: string }
+  /v1/dlq:
+    get:
+      tags: [Health]
+      operationId: listDlq
+      security: [{ oidc: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: DLQ tenant-scoped.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DlqPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/dlq/{dlqId}/replay:
+    post:
+      tags: [Health]
+      operationId: replayDlq
+      security: [{ oidc: [] }]
+      parameters:
+        - name: dlqId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: DLQ replayed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DlqReplayResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/admin/dlq:
+    get:
+      tags: [Health]
+      operationId: listAdminDlq
+      security: [{ oidc: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: DLQ admin tenant-scoped (owner/admin).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DlqPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/admin/dlq/{dlqId}/replay:
+    post:
+      tags: [Health]
+      operationId: replayAdminDlq
+      security: [{ oidc: [] }]
+      parameters:
+        - name: dlqId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: DLQ replayed (admin).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DlqReplayResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /v1/webhooks/{webhookId}/replay:
     post:
       tags: [Webhooks]
@@ -562,6 +646,28 @@ components:
       properties:
         sizeActual: { type: integer, minimum: 1, maximum: 52428800 }
         checksum: { type: string, maxLength: 128 }
+    DlqEntry:
+      type: object
+      required: [id, jobId, queue, cause, attempts, status]
+      properties:
+        id: { type: string, format: uuid }
+        jobId: { type: string }
+        queue: { type: string }
+        cause: { type: string }
+        attempts: { type: integer }
+        status: { type: string, enum: [pending, replayed, discarded, dead_letter] }
+        createdAt: { type: integer }
+    DlqPage:
+      type: object
+      required: [data]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/DlqEntry' } }
+    DlqReplayResponse:
+      type: object
+      required: [jobId, status]
+      properties:
+        jobId: { type: string }
+        status: { type: string, enum: [replayed] }
     CursorPage:
       type: object
       required: [data, nextCursor, hasMore]

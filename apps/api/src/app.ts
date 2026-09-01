@@ -42,6 +42,8 @@ import {
 } from './file-store.js';
 import { getDefaultS3Service } from './s3.js';
 import { registerSecurity } from './plugins/security.js';
+import { metrics } from '@platform/observability';
+import { InMemoryDlqStore, PersistentDlqStore, type DlqStore } from './dlq-store.js';
 
 const SESSION_COOKIE = 'platform_session';
 const OIDC_STATE_COOKIE = 'oidc_state';
@@ -133,6 +135,7 @@ interface AppOptions {
   store?: IdentityStore;
   inventoryStore?: InventoryStore;
   fileStore?: FileStore;
+  dlqStore?: DlqStore;
   baseDomain?: string;
   allowDevLogin?: boolean;
   oidc?: {
@@ -256,6 +259,14 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           process.env.DATABASE_ROLE ?? 'platform_app',
         )
       : new InMemoryFileStore());
+  const dlqStore: DlqStore =
+    options.dlqStore ??
+    (process.env.DATABASE_URL
+      ? PersistentDlqStore.fromConnectionString(
+          process.env.DATABASE_URL,
+          process.env.DATABASE_ROLE ?? 'platform_app',
+        )
+      : new InMemoryDlqStore());
   const stateStore = new InMemoryOidcStateStore();
   const baseDomain = options.baseDomain ?? process.env.TENANT_BASE_DOMAIN ?? DEFAULT_BASE_DOMAIN;
   const allowDevLogin = options.allowDevLogin ?? process.env.ALLOW_DEV_LOGIN === '1';
@@ -409,6 +420,10 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       return reply.status(503).send(report);
     }
     return report;
+  });
+  app.get('/metrics', async (_request, reply) => {
+    reply.header('content-type', 'text/plain; version=0.0.4');
+    return metrics.toPrometheus();
   });
   app.get('/v1/meta', async () => ({ ...metaResponse, apiVersion: API_VERSION }));
 
@@ -1089,6 +1104,89 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
 
   app.get('/v1/files/:id/download', async (request) => handlePresignedDownload(request));
   app.get('/v1/files/:id/presigned-download', async (request) => handlePresignedDownload(request));
+
+  // --- DLQ admin (tenant-scoped, requires owner/admin + audit:read) ---
+  app.get('/v1/dlq', async (request) => {
+    const context = await requireTenantContext(request);
+    requirePermission(context, 'audit:read');
+    if (!['owner', 'admin'].includes(context.membership.role))
+      throw new RequestProblem(403, 'FORBIDDEN', 'Requires owner or admin');
+    const query = parseOrThrow(
+      z.object({ limit: z.coerce.number().int().min(1).max(100).default(25) }),
+      request.query,
+    );
+    const items = await dlqStore.list(
+      { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
+      query.limit,
+    );
+    return { data: items };
+  });
+
+  app.get('/v1/admin/dlq', async (request) => {
+    const context = await requireTenantContext(request);
+    requirePermission(context, 'audit:read');
+    if (!['owner', 'admin'].includes(context.membership.role))
+      throw new RequestProblem(403, 'FORBIDDEN', 'Requires owner or admin');
+    const query = parseOrThrow(
+      z.object({ limit: z.coerce.number().int().min(1).max(100).default(25) }),
+      request.query,
+    );
+    const items = await dlqStore.list(
+      { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
+      query.limit,
+    );
+    return { data: items };
+  });
+
+  async function handleDlqReplay(request: FastifyRequest): Promise<unknown> {
+    const context = await requireTenantContext(request);
+    requirePermission(context, 'audit:read');
+    if (!['owner', 'admin'].includes(context.membership.role))
+      throw new RequestProblem(403, 'FORBIDDEN', 'Requires owner or admin');
+    const params = request.params as { id?: string };
+    if (!params.id) throw new RequestProblem(400, 'BAD_REQUEST', 'DLQ id required');
+    try {
+      const result = await dlqStore.replay(
+        { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
+        params.id,
+      );
+      await store.addAudit({
+        action: 'membership.role_changed',
+        actorUserId: context.user.id,
+        tenantId: context.tenantId,
+        resourceId: params.id,
+        requestId: request.id,
+        metadata: { dlqReplay: result.jobId },
+      });
+      return { jobId: result.jobId, status: 'replayed' };
+    } catch (error) {
+      if (error instanceof Error && error.message === 'dlq_not_found')
+        throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
+      throw error;
+    }
+  }
+
+  app.post('/v1/dlq/:id/replay', async (request) => handleDlqReplay(request));
+  app.post('/v1/admin/dlq/:id/replay', async (request) => handleDlqReplay(request));
+
+  app.post('/v1/dlq/:id/discard', async (request) => {
+    const context = await requireTenantContext(request);
+    requirePermission(context, 'audit:read');
+    if (!['owner', 'admin'].includes(context.membership.role))
+      throw new RequestProblem(403, 'FORBIDDEN', 'Requires owner or admin');
+    const params = request.params as { id?: string };
+    if (!params.id) throw new RequestProblem(400, 'BAD_REQUEST', 'DLQ id required');
+    const rec = await dlqStore.get(
+      { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
+      params.id,
+    );
+    if (!rec) throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
+    await dlqStore.discard(
+      { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
+      params.id,
+    );
+    return { status: 'discarded' };
+  });
 
   app.get('/v1/audit', async (request) => {
     const context = await requireTenantContext(request);

@@ -1,0 +1,39 @@
+{
+  "title": "Worker / Outbox",
+  "uid": "worker-outbox",
+  "panels": [
+    {
+      "title": "Outbox lag (s)",
+      "targets": [{ "expr": "outbox_lag_seconds" }],
+      "alert": {
+        "conditions": [
+          {
+            "evaluator": { "params": [30], "type": "gt" },
+            "query": { "params": ["A", "5m", "now"] }
+          }
+        ],
+        "name": "OutboxLagHigh"
+      }
+    },
+    {
+      "title": "Outbox pending",
+      "targets": [{ "expr": "outbox_pending" }]
+    },
+    {
+      "title": "DLQ size",
+      "targets": [{ "expr": "dlq_size" }],
+      "alert": {
+        "conditions": [{ "evaluator": { "params": [0], "type": "gt" } }],
+        "name": "DLQNonEmpty"
+      }
+    },
+    {
+      "title": "Job retries",
+      "targets": [{ "expr": "sum(job_retries_total) by (queue)" }]
+    },
+    {
+      "title": "Job p95 duration",
+      "targets": [{ "expr": "histogram_quantile(0.95, job_duration_bucket)" }]
+    }
+  ]
+}
