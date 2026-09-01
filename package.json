@@ -21,6 +21,8 @@
   "devDependencies": {
     "@eslint/js": "^9.35.0",
     "eslint": "^9.35.0",
+    "eslint-import-resolver-typescript": "^4.4.5",
+    "eslint-plugin-import": "^2.32.0",
     "prettier": "^3.6.2",
     "tsx": "^4.19.2",
     "turbo": "^2.5.6",
