@@ -22,3 +22,4 @@ export {
   type OrganizationRecord,
 } from './repositories.js';
 export * from './schema.js';
+export * from './outbox.js';

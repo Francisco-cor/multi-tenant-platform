@@ -209,6 +209,70 @@ export const files = pgTable(
   ],
 );
 
+export const outboxEvents = pgTable(
+  'outbox_events',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    aggregateType: text('aggregate_type').notNull(),
+    aggregateId: uuid('aggregate_id').notNull(),
+    eventType: text('event_type').notNull(),
+    payload: text('payload').notNull(),
+    payloadVersion: integer('payload_version').notNull().default(1),
+    status: text('status').notNull().default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+    lastError: text('last_error'),
+    correlationId: text('correlation_id'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    publishedAt: timestamp('published_at', { withTimezone: true }),
+  },
+  (table) => [
+    index('outbox_tenant_status_next_idx')
+      .on(table.tenantId, table.status, table.nextAttemptAt)
+      .where(sql`status = 'pending'`),
+    index('outbox_aggregate_idx').on(table.tenantId, table.aggregateType, table.aggregateId),
+    index('outbox_created_idx').on(table.createdAt),
+  ],
+);
+
+export const processedJobs = pgTable(
+  'processed_jobs',
+  {
+    jobId: text('job_id').primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    queue: text('queue').notNull(),
+    result: text('result'),
+    processedAt: timestamp('processed_at', { withTimezone: true }).notNull().defaultNow(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('processed_jobs_tenant_idx').on(table.tenantId, table.queue)],
+);
+
+export const dlqJobs = pgTable(
+  'dlq_jobs',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    jobId: text('job_id').notNull(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    queue: text('queue').notNull(),
+    payload: text('payload').notNull(),
+    cause: text('cause').notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    status: text('status').notNull().default('pending'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index('dlq_tenant_queue_idx').on(table.tenantId, table.queue, table.status)],
+);
+
 export const schema = {
   users,
   organizations,
@@ -219,6 +283,9 @@ export const schema = {
   inventoryReservations,
   inventoryMovements,
   files,
+  outboxEvents,
+  processedJobs,
+  dlqJobs,
 };
 
 export type Organization = typeof organizations.$inferSelect;
