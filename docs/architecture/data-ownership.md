@@ -10,3 +10,7 @@
 Toda tabla nueva debe declarar su clasificacion en la migracion y en este documento. Los objetos S3 siguen la misma clasificacion aunque no sean filas de PostgreSQL.
 
 La migracion base de Fase 3 implementa `users`, `organizations`, `memberships` y `branches`. Las columnas `created_by` conservan trazabilidad sin convertir al usuario global en un tenant.
+
+Fase 5 añade `products` (tenant-scoped, unique `(tenant_id, sku)`), `stock_per_branch` (`PRIMARY KEY (tenant_id, branch_id, product_id)`, `CHECK available>=0`), `inventory_reservations` (`status active|released|consumed|expired`, `expires_at`, índice parcial `WHERE status='active'`) y `inventory_movements` append-only. Todas `FORCE RLS` con `tenant_id = current_setting('app.tenant_id')`.
+
+Fase 6 añade `files` (tenant-scoped, `key UNIQUE tenants/{tenantId}/{uuid}`, `status pending|ready|expired|deleted`, `size_expected 1..50MiB`, `filename !~ [/\\]`, `expires_at now()+24h`, índices `tenant_id,status` y parcial `WHERE status='pending'`) y objetos S3 con prefijo `tenants/{tenantId}/` (`FORCE RLS`, `GRANT platform_app`). El GC de huérfanos usa `FOR UPDATE SKIP LOCKED`.

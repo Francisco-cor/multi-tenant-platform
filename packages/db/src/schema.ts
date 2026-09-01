@@ -1,5 +1,14 @@
 import { sql } from 'drizzle-orm';
-import { boolean, index, integer, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import {
+  boolean,
+  index,
+  integer,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from 'drizzle-orm/pg-core';
 
 export const users = pgTable(
   'users',
@@ -106,9 +115,7 @@ export const stockPerBranch = pgTable(
     available: integer('available').notNull().default(0),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [
-    index('stock_per_branch_product_idx').on(table.tenantId, table.productId),
-  ],
+  (table) => [index('stock_per_branch_product_idx').on(table.tenantId, table.productId)],
 );
 
 export const inventoryReservations = pgTable(
@@ -173,7 +180,46 @@ export const inventoryMovements = pgTable(
   ],
 );
 
-export const schema = { users, organizations, memberships, branches, products, stockPerBranch, inventoryReservations, inventoryMovements };
+export const files = pgTable(
+  'files',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    ownerId: uuid('owner_id').references(() => users.id, { onDelete: 'set null' }),
+    key: text('key').notNull(),
+    filename: text('filename').notNull(),
+    contentType: text('content_type').notNull(),
+    sizeExpected: integer('size_expected').notNull(),
+    sizeActual: integer('size_actual'),
+    status: text('status').notNull().default('pending'),
+    checksum: text('checksum'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex('files_key_unique').on(table.key),
+    index('files_tenant_status_idx').on(table.tenantId, table.status),
+    index('files_tenant_owner_idx').on(table.tenantId, table.ownerId),
+    index('files_tenant_expires_idx')
+      .on(table.tenantId, table.expiresAt)
+      .where(sql`status = 'pending'`),
+  ],
+);
+
+export const schema = {
+  users,
+  organizations,
+  memberships,
+  branches,
+  products,
+  stockPerBranch,
+  inventoryReservations,
+  inventoryMovements,
+  files,
+};
 
 export type Organization = typeof organizations.$inferSelect;
 export type NewOrganization = typeof organizations.$inferInsert;
