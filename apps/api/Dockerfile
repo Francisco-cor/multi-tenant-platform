@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1.7
-ARG NODE_VERSION=24-alpine
+# Pinned 2026-09-01 — update via: docker buildx imagetools inspect node:24-alpine
+ARG NODE_VERSION=24-alpine@sha256:e67514e5d0f6c46656005e1b693b2ec9d52e80b641307de684d4a015ba7a4eaf
 
 FROM node:${NODE_VERSION} AS base
 RUN corepack enable

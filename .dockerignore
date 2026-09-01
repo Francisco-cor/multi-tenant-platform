@@ -1,0 +1,55 @@
+# Git and local env
+.git
+.gitignore
+.env
+.env.*
+*.local
+*.pem
+*.key
+
+# Dependencies
+node_modules
+.pnpm-store
+.pnpm-debug.log
+npm-debug.log*
+
+# Build outputs
+.next
+dist
+coverage
+.nyc_output
+playwright-report
+test-results
+.turbo
+.vite
+*.log
+.artifacts
+.turbo
+out
+
+# Local service data
+docker-data
+postgres-data
+redis-data
+minio-data
+grafana-data
+prometheus-data
+
+# Editor
+.DS_Store
+Thumbs.db
+.idea
+.vscode
+
+# Docker itself (do not ignore nested Dockerfiles: use -f flag)
+.dockerignore
+docker-compose.override.yml
+
+# Infra terraform state
+infra/terraform/.terraform
+infra/terraform/*.tfstate*
+
+# Misc
+README.md
+docs
+infra
