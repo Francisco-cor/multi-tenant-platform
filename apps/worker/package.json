@@ -13,8 +13,9 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
-    "bullmq": "^5.58.0",
-    "@platform/config": "workspace:*"
+    "@platform/config": "workspace:*",
+    "@platform/db": "workspace:*",
+    "bullmq": "^5.58.0"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",
