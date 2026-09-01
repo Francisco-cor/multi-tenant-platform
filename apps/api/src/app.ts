@@ -450,6 +450,14 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     return { status: 'ok' };
   });
 
+  app.post('/v1/auth/refresh', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
+    const auth = await requireSession(request);
+    const refreshed = await store.refreshSession(auth.token);
+    if (!refreshed) throw new RequestProblem(401, 'UNAUTHORIZED', 'Authentication required');
+    reply.header('set-cookie', sessionCookie(auth.token, secureCookies));
+    return { status: 'ok', expiresAt: refreshed.expiresAt };
+  });
+
   app.post('/v1/auth/switch-organization', { bodyLimit: SMALL_BODY_LIMIT }, async (request) => {
     const auth = await requireSession(request);
     const body = parseOrThrow(TenantSwitchSchema, request.body);

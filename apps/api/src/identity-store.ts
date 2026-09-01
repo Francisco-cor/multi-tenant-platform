@@ -114,6 +114,7 @@ export interface IdentityStore {
   createSession(userId: string): string | PromiseLike<string>;
   getSession(token: string): SessionRecord | PromiseLike<SessionRecord | null> | null;
   revokeSession(token: string): void | PromiseLike<void>;
+  refreshSession(token: string): SessionRecord | PromiseLike<SessionRecord | null> | null;
   selectTenant(token: string, tenantId: string): void | PromiseLike<void>;
   getOrganizationBySlug(
     slug: string,
@@ -287,6 +288,14 @@ export class InMemoryIdentityStore {
 
   revokeSession(token: string): void {
     this.sessions.delete(hashToken(token));
+  }
+
+  refreshSession(token: string, now = Date.now()): SessionRecord | null {
+    const record = this.getSession(token, now);
+    if (!record) return null;
+    // Sliding window: extend 8h from now if session still valid
+    record.expiresAt = now + SESSION_TTL_MS;
+    return record;
   }
 
   selectTenant(token: string, tenantId: string): void {

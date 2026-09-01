@@ -172,4 +172,19 @@ describe('API bootstrap and identity boundary', () => {
     expect(response.json().error.code).toBe('NOT_FOUND');
     await app.close();
   });
+
+  it('refresh extends session and resets cookie', async () => {
+    const app = buildApp({ allowDevLogin: true });
+    const cookie = await loginAs(app, 'user-acme-only');
+    const refresh = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/refresh',
+      headers: { cookie },
+    });
+    expect(refresh.statusCode).toBe(200);
+    expect(refresh.json().status).toBe('ok');
+    expect(refresh.json().expiresAt).toBeGreaterThan(Date.now());
+    expect(refresh.headers['set-cookie']).toBeDefined();
+    await app.close();
+  });
 });

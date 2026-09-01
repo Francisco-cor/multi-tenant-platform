@@ -275,6 +275,19 @@ export class PersistentIdentityStore implements IdentityStore {
     });
   }
 
+  public async refreshSession(token: string): Promise<SessionRecord | null> {
+    return this.withApplicationTransaction(async (transaction) => {
+      const rows = await transaction.execute<SessionRow>(sql`
+        update sessions
+        set expires_at = now() + interval '8 hours'
+        where token_hash = ${hashToken(token)}
+          and expires_at > now()
+        returning token_hash, user_id, expires_at, selected_tenant_id
+      `);
+      return rows[0] ? mapSession(rows[0]) : null;
+    });
+  }
+
   public async selectTenant(token: string, tenantId: string): Promise<void> {
     await this.withApplicationTransaction(async (transaction) => {
       await transaction.execute(sql`
