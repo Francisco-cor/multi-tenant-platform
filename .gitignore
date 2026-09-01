@@ -20,6 +20,7 @@ test-results/
 .turbo/
 .vite/
 *.log
+.artifacts/
 
 # Local service data
 docker-data/
@@ -42,3 +43,6 @@ Thumbs.db
 # Project documentation is intentionally versioned.
 !IMPLEMENTATION_PLAN.md
 !docs/**/*.md
+
+# Elevation plan is session-local and not versioned.
+PLAN_ELEVACION.md

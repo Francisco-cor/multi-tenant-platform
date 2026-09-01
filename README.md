@@ -47,9 +47,11 @@ pnpm format:check        # formato reproducible
 ```bash
 pnpm --filter @platform/db migrate
 RUN_DB_INTEGRATION=1 pnpm --filter @platform/db test:integration
+pnpm --filter @platform/db backup --output .artifacts/db/platform-manual.dump
+pnpm --filter @platform/db restore:drill
 ```
 
-El runner toma `DATABASE_URL`, usa un advisory lock y registra cada archivo en `schema_migrations`. En local `DATABASE_ROLE=platform_app` hace que la aplicacion use el rol NOLOGIN creado por la migracion; en produccion debe enlazarse a un login gestionado sin privilegios de superusuario.
+El runner toma `DATABASE_URL`, usa un advisory lock y registra cada archivo en `schema_migrations`. Las migraciones se separan en `schema/`, `data/` e `indexes/`; las de indices grandes se ejecutan fuera de transaccion. El restore drill crea una base temporal, verifica filas, historial y RLS y la elimina al terminar. En local `DATABASE_ROLE=platform_app` hace que la aplicacion use el rol NOLOGIN creado por la migracion; en produccion debe enlazarse a un login gestionado sin privilegios de superusuario.
 
 ## Estructura
 

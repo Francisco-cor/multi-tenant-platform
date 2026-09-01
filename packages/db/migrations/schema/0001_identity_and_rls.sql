@@ -75,8 +75,6 @@ create policy branches_tenant_isolation on branches
   using (tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid)
   with check (tenant_id = nullif(current_setting('app.tenant_id', true), '')::uuid);
 
--- The application role is intentionally NOLOGIN. Production deploys bind it to a
--- managed login role; local integration tests can SET ROLE to it from the compose owner.
 do $$
 begin
   if not exists (select 1 from pg_roles where rolname = 'platform_app') then

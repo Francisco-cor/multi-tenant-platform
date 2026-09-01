@@ -23,3 +23,24 @@ La integracion usa el usuario local `platform` solo para preparar/limpiar datos 
 El runner ejecuta cada migracion dentro de una transaccion y libera el advisory lock al cerrar la conexion. Si falla, conservar el error, revisar `schema_migrations` y corregir con una nueva migracion compatible. No editar una migracion ya registrada ni ejecutar `git reset` para intentar reparar el esquema.
 
 El runner y los tests eliminan el query parameter `schema` si aparece en DATABASE_URL, porque `postgres` lo interpreta como GUC; el esquema activo es `public` por defecto.
+
+## Clases de migracion
+
+- `schema/` contiene cambios de esquema, RLS y funciones; cada archivo es transaccional.
+- `data/` contiene backfills o transformaciones de datos reanudables; no se mezclan con DDL de la aplicacion.
+- `indexes/` contiene indices grandes o sensibles a locks; se ejecutan fuera de transaccion y usan `CREATE INDEX CONCURRENTLY`.
+
+Los archivos que ya existian como `0001_identity_and_rls.sql` y
+`0002_persistent_identity.sql` se reconocen como aliases historicos despues
+de moverse a `migrations/schema/`. No se editan una vez aplicados.
+
+## Backups y restore
+
+El procedimiento completo esta en `docs/runbooks/database-restore.md`. El
+comando reproducible es:
+
+    pnpm --filter @platform/db restore:drill
+
+El drill restaura en una base temporal, compara filas e historial, comprueba
+RLS forzado y reejecuta el runner. La evidencia queda en `.artifacts/db/` y
+la base temporal se elimina al terminar, salvo `--keep-target`.

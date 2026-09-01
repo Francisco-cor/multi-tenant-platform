@@ -1,5 +1,5 @@
--- Fase 3: persistir sesiones, invitaciones y auditoría sin quitar la barrera RLS.
--- Esta migración es expand-only; los consumidores antiguos siguen leyendo las tablas base.
+-- Phase 3: persistent sessions, invitations and audit log.
+-- This is expand-only; older consumers can keep reading the base tables.
 
 alter table organizations drop constraint if exists organizations_status_check;
 alter table organizations add constraint organizations_status_check
@@ -69,8 +69,6 @@ create policy audit_log_tenant_isolation on audit_log
   );
 
 grant select, insert, update, delete on sessions, invitations, audit_log to platform_app;
-
-
 
 create or replace function platform_resolve_organization_by_slug(input_slug text)
 returns table (id uuid, slug text, name text, status text)
