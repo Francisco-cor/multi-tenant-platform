@@ -12,5 +12,6 @@ export {
   assertTenantId,
   type TenantRepositoryContext,
 } from './tenant-context.js';
+export { TenantRepository } from './tenant-repository.js';
 export { TenantOrganizationRepository, type OrganizationRecord } from './repositories.js';
 export * from './schema.js';
