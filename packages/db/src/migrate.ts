@@ -129,6 +129,8 @@ export async function runMigrations(connectionString: string): Promise<Migration
         ', ' +
         'add column if not exists checksum text',
     );
+    await client.unsafe('alter table schema_migrations add column if not exists duration_ms integer');
+    await client.unsafe('alter table schema_migrations add column if not exists applied_by text default current_user');
 
     for (const migration of migrationFiles) {
       const status = await migrationIsApplied(client, migration);
@@ -143,11 +145,13 @@ export async function runMigrations(connectionString: string): Promise<Migration
       }
 
       const migrationSql = await readFile(migration.path, 'utf8');
+      const migrationStart = Date.now();
       const apply = async (executor: MigrationExecutor) => {
         await executor.unsafe(migrationSql);
+        const durationMs = Date.now() - migrationStart;
         await executor.unsafe(
-          'insert into schema_migrations (id, kind, checksum) values ($1, $2, $3)',
-          [migration.id, migration.kind, migration.checksum],
+          'insert into schema_migrations (id, kind, checksum, duration_ms) values ($1, $2, $3, $4)',
+          [migration.id, migration.kind, migration.checksum, durationMs],
         );
       };
 
@@ -156,6 +160,7 @@ export async function runMigrations(connectionString: string): Promise<Migration
       } else {
         await apply(client);
       }
+      const durationMsLog = Date.now() - migrationStart;
       applied.push(migration.id);
       console.log(
         'Applied ' +
@@ -163,6 +168,7 @@ export async function runMigrations(connectionString: string): Promise<Migration
           ' (' +
           migration.kind +
           (migration.transactional ? '' : ', non-transactional') +
+          `, ${durationMsLog}ms` +
           ')',
       );
     }
