@@ -46,10 +46,24 @@ export interface ReserveInput {
   expiresInMs?: number;
 }
 
+export interface StockListItem {
+  [key: string]: unknown;
+  productId: string;
+  sku: string;
+  name: string;
+  branchId: string;
+  available: number;
+}
+
 export interface InventoryStore {
   reserve(context: StoreTenantContext, input: ReserveInput): Promise<ReservationRecord>;
   getStock(context: StoreTenantContext, branchId: string, productId: string): Promise<StockRecord | null>;
   listReservations(context: StoreTenantContext): Promise<ReservationRecord[]>;
+  listStock(
+    context: StoreTenantContext,
+    branchId: string,
+    options?: { q?: string | undefined; limit?: number | undefined; cursor?: string | undefined },
+  ): Promise<{ items: StockListItem[]; nextCursor: string | null }>;
   // helpers for tests/seed
   upsertProduct(product: ProductRecord): Promise<void> | void;
   setStock(record: StockRecord): Promise<void> | void;
@@ -123,6 +137,51 @@ export class InMemoryInventoryStore implements InventoryStore {
 
   async listReservations(context: StoreTenantContext): Promise<ReservationRecord[]> {
     return [...this.reservations.values()].filter((r) => r.tenantId === context.tenantId);
+  }
+
+  async listStock(
+    context: StoreTenantContext,
+    branchId: string,
+    options: { q?: string | undefined; limit?: number | undefined; cursor?: string | undefined } = {},
+  ): Promise<{ items: StockListItem[]; nextCursor: string | null }> {
+    const q = options.q?.trim().toLowerCase();
+    const limit = Math.min(Math.max(options.limit ?? 25, 1), 100);
+    const all = [...this.stock.values()].filter((s) => s.tenantId === context.tenantId && s.branchId === branchId);
+    const filtered = all
+      .map((s) => {
+        const product = this.products.get(s.productId);
+        return product ? { stock: s, product } : null;
+      })
+      .filter((x): x is { stock: StockRecord; product: ProductRecord } => x !== null)
+      .filter((x) => {
+        if (!q) return true;
+        return x.product.sku.toLowerCase().includes(q) || x.product.name.toLowerCase().includes(q);
+      })
+      .sort((a, b) => a.product.sku.localeCompare(b.product.sku));
+    // Simple cursor: base64 of last sku
+    let start = 0;
+    if (options.cursor) {
+      try {
+        const decoded = Buffer.from(options.cursor, 'base64url').toString('utf8');
+        const idx = filtered.findIndex((x) => x.product.sku === decoded);
+        if (idx >= 0) start = idx + 1;
+      } catch {
+        // ignore
+      }
+    }
+    const slice = filtered.slice(start, start + limit);
+    const items: StockListItem[] = slice.map((x) => ({
+      productId: x.product.id,
+      sku: x.product.sku,
+      name: x.product.name,
+      branchId: x.stock.branchId,
+      available: x.stock.available,
+    }));
+    const nextCursor =
+      start + limit < filtered.length
+        ? Buffer.from(filtered[start + limit - 1]!.product.sku).toString('base64url')
+        : null;
+    return { items, nextCursor };
   }
 
   async reserve(context: StoreTenantContext, input: ReserveInput): Promise<ReservationRecord> {
@@ -237,6 +296,42 @@ export class PersistentInventoryStore implements InventoryStore {
         order by created_at desc limit 100
       `);
       return rows as unknown as ReservationRecord[];
+    });
+  }
+
+  async listStock(
+    context: StoreTenantContext,
+    branchId: string,
+    options: { q?: string | undefined; limit?: number | undefined; cursor?: string | undefined } = {},
+  ): Promise<{ items: StockListItem[]; nextCursor: string | null }> {
+    const limit = Math.min(Math.max(options.limit ?? 25, 1), 100);
+    const q = options.q?.trim() ?? null;
+    let cursorSku: string | null = null;
+    if (options.cursor) {
+      try {
+        cursorSku = Buffer.from(options.cursor, 'base64url').toString('utf8');
+      } catch {
+        cursorSku = null;
+      }
+    }
+    return withTenantTransaction(this.db, context, async (tx) => {
+      // Use ILIKE for simple, GIN-trgm index will accelerate. For FTS we could use to_tsvector, but keep ILIKE for simplicity.
+      const rows = await tx.execute<StockListItem>(sql`
+        select p.id as "productId", p.sku as sku, p.name as name, s.branch_id as "branchId", s.available as available
+        from stock_per_branch s
+        join products p on p.id = s.product_id and p.tenant_id = s.tenant_id
+        where s.tenant_id = ${context.tenantId}::uuid
+          and s.branch_id = ${branchId}::uuid
+          and (${q}::text is null or p.sku ilike '%' || ${q} || '%' or p.name ilike '%' || ${q} || '%')
+          and (${cursorSku}::text is null or p.sku > ${cursorSku})
+        order by p.sku
+        limit ${limit + 1}
+      `);
+      const hasMore = rows.length > limit;
+      const items = hasMore ? (rows.slice(0, limit) as StockListItem[]) : (rows as StockListItem[]);
+      const nextCursor =
+        hasMore && items.length > 0 ? Buffer.from(items[items.length - 1]!.sku).toString('base64url') : null;
+      return { items, nextCursor };
     });
   }
 

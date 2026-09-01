@@ -60,6 +60,12 @@ const ReserveSchema = z.object({
   productId: z.string().min(1).max(100),
   quantity: z.number().int().min(1).max(1000),
 });
+const InventoryListQuery = z.object({
+  branchId: z.string().min(1).max(100),
+  q: z.string().max(100).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+  cursor: z.string().min(1).optional(),
+});
 const CallbackQuerySchema = z.object({
   code: z.string().min(1).optional(),
   state: z.string().min(1).optional(),
@@ -769,6 +775,18 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       userId: context.user.id,
     });
     return { data: reservations };
+  });
+
+  app.get('/v1/inventory', async (request) => {
+    const context = await requireTenantContext(request);
+    requirePermission(context, 'inventory:read');
+    const query = parseOrThrow(InventoryListQuery, request.query);
+    const result = await inventoryStore.listStock(
+      { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
+      query.branchId,
+      { q: query.q, limit: query.limit, cursor: query.cursor },
+    );
+    return result;
   });
 
   app.get('/v1/audit', async (request) => {
