@@ -22,4 +22,10 @@ export default [
     ...config,
     files: typedFiles,
   })),
+  {
+    files: ['**/next-env.d.ts'],
+    rules: {
+      '@typescript-eslint/triple-slash-reference': 'off',
+    },
+  },
 ];

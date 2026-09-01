@@ -21,6 +21,7 @@ test-results/
 .vite/
 *.log
 .artifacts/
+*.tsbuildinfo
 
 # Local service data
 docker-data/
