@@ -192,7 +192,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   const store: IdentityStore = options.store ?? new InMemoryIdentityStore(true);
   const stateStore = new InMemoryOidcStateStore();
   const baseDomain = options.baseDomain ?? process.env.TENANT_BASE_DOMAIN ?? DEFAULT_BASE_DOMAIN;
-  const allowDevLogin = options.allowDevLogin ?? process.env.NODE_ENV !== 'production';
+  const allowDevLogin = options.allowDevLogin ?? process.env.ALLOW_DEV_LOGIN === '1';
   const oidc = options.oidc ?? {
     issuer: process.env.OIDC_ISSUER_URL ?? '',
     clientId: process.env.OIDC_CLIENT_ID ?? '',

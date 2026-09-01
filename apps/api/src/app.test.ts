@@ -160,4 +160,16 @@ describe('API bootstrap and identity boundary', () => {
 
     await app.close();
   });
+
+  it('blocks dev-login when ALLOW_DEV_LOGIN is not enabled', async () => {
+    const app = buildApp({ allowDevLogin: false });
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/dev-login',
+      payload: { userId: 'user-acme-only' },
+    });
+    expect(response.statusCode).toBe(404);
+    expect(response.json().error.code).toBe('NOT_FOUND');
+    await app.close();
+  });
 });

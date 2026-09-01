@@ -31,6 +31,7 @@ export const environmentSchema = z.object({
   OTEL_SERVICE_NAME: z.string().default('platform-api'),
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
+  ALLOW_DEV_LOGIN: z.string().default('0'),
 });
 
 export type Environment = z.infer<typeof environmentSchema>;
