@@ -25,6 +25,7 @@ import {
   type SessionRecord,
   type UserRecord,
 } from './identity-store.js';
+import { getLiveness, getReadiness, getStartup } from './health.js';
 import { registerSecurity } from './plugins/security.js';
 
 const SESSION_COOKIE = 'platform_session';
@@ -328,8 +329,21 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     reply.header('x-request-id', request.id);
   });
 
-  app.get('/health/live', async () => ({ status: 'ok', service: 'api' }));
-  app.get('/health/ready', async () => ({ status: 'ok', service: 'api', dependencies: [] }));
+  app.get('/health/live', async () => getLiveness());
+  app.get('/health/ready', async (_request, reply) => {
+    const report = await getReadiness();
+    if (report.status !== 'ok') {
+      return reply.status(503).send(report);
+    }
+    return report;
+  });
+  app.get('/health/startup', async (_request, reply) => {
+    const report = await getStartup();
+    if (report.status !== 'ok') {
+      return reply.status(503).send(report);
+    }
+    return report;
+  });
   app.get('/v1/meta', async () => ({ ...metaResponse, apiVersion: API_VERSION }));
 
   app.get('/v1/auth/login', async (_request, reply) => {

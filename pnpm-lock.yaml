@@ -68,6 +68,12 @@ importers:
       fastify:
         specifier: ^5.4.0
         version: 5.12.1
+      ioredis:
+        specifier: ^5.11.1
+        version: 5.11.1(supports-color@7.2.0)
+      postgres:
+        specifier: ^3.4.9
+        version: 3.4.9
       zod:
         specifier: ^3.25.76
         version: 3.25.76
@@ -75,9 +81,6 @@ importers:
       '@types/node':
         specifier: ^24.3.0
         version: 24.13.3
-      postgres:
-        specifier: ^3.4.7
-        version: 3.4.9
       tsx:
         specifier: ^4.19.2
         version: 4.23.12
