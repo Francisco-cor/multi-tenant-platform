@@ -320,22 +320,24 @@ Las fases se ejecutan en orden, pero una fase puede tener trabajo paralelo cuand
 
 ### Tareas
 
-- [ ] Crear tabla `outbox_events` con aggregate, event type, payload versionado, attempts y timestamps.
-- [ ] Escribir negocio + outbox en la misma transacción.
-- [ ] Implementar relay polling/claiming seguro y publicación a BullMQ.
-- [ ] Definir job IDs deterministas para operaciones naturalmente idempotentes.
-- [ ] Configurar backoff exponencial con jitter, límites, timeout y concurrencia por cola.
-- [ ] Implementar dedupe en consumidor mediante `processed_jobs` o clave de efecto equivalente.
-- [ ] Crear DLQ separada con causa, payload mínimo seguro y procedimiento de replay.
-- [ ] Añadir graceful shutdown: dejar de aceptar jobs, esperar los activos y liberar locks.
-- [ ] Añadir health/readiness separados para API, worker, DB, Redis y proveedor externo.
-- [ ] Añadir métricas de lag de outbox, edad del job, reintentos, DLQ y duración.
+- [x] Crear tabla `outbox_events` con aggregate, event type, payload versionado, attempts y timestamps.
+- [x] Escribir negocio + outbox en la misma transacción.
+- [x] Implementar relay polling/claiming seguro y publicación a BullMQ.
+- [x] Definir job IDs deterministas para operaciones naturalmente idempotentes.
+- [x] Configurar backoff exponencial con jitter, límites, timeout y concurrencia por cola.
+- [x] Implementar dedupe en consumidor mediante `processed_jobs` o clave de efecto equivalente.
+- [x] Crear DLQ separada con causa, payload mínimo seguro y procedimiento de replay.
+- [x] Añadir graceful shutdown: dejar de aceptar jobs, esperar los activos y liberar locks.
+- [x] Añadir health/readiness separados para API, worker, DB, Redis y proveedor externo.
+- [x] Añadir métricas de lag de outbox, edad del job, reintentos, DLQ y duración.
 
 ### Criterios de salida
 
-- Si el proceso muere antes o después de publicar, el evento termina procesándose sin perderse ni duplicar efectos.
-- Un job en DLQ puede inspeccionarse, corregirse y reintentarse de forma controlada.
-- Un deploy no corta trabajos activos sin que el sistema los pueda recuperar.
+- [x] Si el proceso muere antes o después de publicar, el evento termina procesándose sin perderse ni duplicar efectos.
+- [x] Un job en DLQ puede inspeccionarse, corregirse y reintentarse de forma controlada.
+- [x] Un deploy no corta trabajos activos sin que el sistema los pueda recuperar.
+
+> Progreso sesión 6: Fase 7 cerrada — `migrations/schema/0008_outbox.sql` `outbox_events` + `processed_jobs` + `dlq_jobs` `FORCE RLS` + `schema.ts`, `outbox.ts` `deterministicJobId` sha256 + `writeOutboxEvent` en `files` e `inventory` misma tx, `relay/outboxRelay.ts` `FOR UPDATE SKIP LOCKED LIMIT 100` con `jobId` y backoff 1s→60s jitter 0.2 + dead_letter tras 5, `queues.ts` `InMemoryQueue` dedupe + `createBullMqFactory` `QUEUE_CONFIG` concurrency 10, `processor.ts` `withDedup` + timeout 10s + `metrics`, `main.ts` graceful 30s, `health.ts` `checkOutbox` lag >30s degraded, `GET /metrics` + `GET /v1/dlq|/admin/dlq` + `POST /replay` tenant-scoped `owner/admin` + audit, `ADR-004` + `runbooks/dlq-replay.md` + `failure/outbox-dedupe.md` + `worker.json` dashboard, `outbox.dedupe.test.ts` + `dlq.test.ts` 19 api + 7 worker tests, `openapi.yaml` 21 paths `.openapi.hash 4d1372859ed4`.
 
 ## Fase 8 — Pagos y escenario de fallo crítico
 
