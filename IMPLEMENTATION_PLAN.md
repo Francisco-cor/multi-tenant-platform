@@ -297,20 +297,22 @@ Las fases se ejecutan en orden, pero una fase puede tener trabajo paralelo cuand
 
 ### Tareas
 
-- [ ] Crear metadata de archivo tenant-scoped: owner, tamaño esperado, content type permitido, estado y object key.
-- [ ] Generar presigned upload URLs de corta duración y con límites.
-- [ ] Usar object keys no adivinables y prefijadas por tenant.
-- [ ] Validar que el callback/finalize pertenece al tenant y al upload pendiente.
-- [ ] Añadir antivirus/validación de contenido como job si el caso lo requiere.
-- [ ] Generar presigned download URLs solo después de autorizar el recurso.
-- [ ] Implementar limpieza de uploads incompletos y archivos huérfanos.
-- [ ] Evitar loggear contenido, URLs completas o tokens.
+- [x] Crear metadata de archivo tenant-scoped: owner, tamaño esperado, content type permitido, estado y object key.
+- [x] Generar presigned upload URLs de corta duración y con límites.
+- [x] Usar object keys no adivinables y prefijadas por tenant.
+- [x] Validar que el callback/finalize pertenece al tenant y al upload pendiente.
+- [x] Añadir antivirus/validación de contenido como job si el caso lo requiere.
+- [x] Generar presigned download URLs solo después de autorizar el recurso.
+- [x] Implementar limpieza de uploads incompletos y archivos huérfanos.
+- [x] Evitar loggear contenido, URLs completas o tokens.
 
 ### Criterios de salida
 
-- Un usuario de A no puede obtener metadata, URL o contenido de B aunque conozca el ID.
-- Los archivos incompletos y huérfanos tienen una política de retención.
-- Se prueban expiración, content type inválido y tenant incorrecto.
+- [x] Un usuario de A no puede obtener metadata, URL o contenido de B aunque conozca el ID.
+- [x] Los archivos incompletos y huérfanos tienen una política de retención.
+- [x] Se prueban expiración, content type inválido y tenant incorrecto.
+
+> Progreso sesión 5: Fase 6 cerrada — `migrations/schema/0007_files.sql` + `schema.ts files` con RLS `FORCE` y `CHECK` filename/size, `S3Service` con keys `tenants/{tenantId}/{uuid}` TTL 300s/60s, `POST /v1/files/presigned-upload` + `/v1/files/:id/finalize` + `GET /v1/files/:id` + `GET /v1/files/:id/download|presigned-download` tenant-scoped, `gcFiles` con `SKIP LOCKED`, `files.test.ts` 5 suites cross-tenant 404/409/410 + GC, `ADR-007` + `runbooks/files.md` + `openapi.yaml` actualizado y `.openapi.hash` c9e46e0747eb.
 
 ## Fase 7 — Outbox, BullMQ y workers
 

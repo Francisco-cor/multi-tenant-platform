@@ -4,7 +4,7 @@ Operations Hub B2B para organizaciones con múltiples sucursales. El proyecto pr
 
 ## Estado
 
-Fase 0 y 1 estan cerradas (bootstrap + contratos). La **Fase 1 de elevación** también cerrada: `apps/api`/`worker` emiten `dist/`, `apps/web` soporta `standalone` (STANDALONE=1), Dockerfiles multi-stage con base `node:24-alpine` pinnada, `.dockerignore`, validación estricta `TENANT_BASE_DOMAIN`, lint `import/no-cycle` + boundaries y helpers `testcontainers` para integración. La Fase 2 mantiene el vertical slice de identidad y RBAC con store en memoria para tests unitarios. La Fase 3 ya incluye migraciones PostgreSQL, RLS real, contexto transaccional y API conectada al adaptador persistente tenant-scoped.
+Fase 0 y 1 estan cerradas (bootstrap + contratos). La **Fase 1 de elevación** también cerrada: `apps/api`/`worker` emiten `dist/`, `apps/web` soporta `standalone` (STANDALONE=1), Dockerfiles multi-stage con base `node:24-alpine` pinnada, `.dockerignore`, validación estricta `TENANT_BASE_DOMAIN`, lint `import/no-cycle` + boundaries y helpers `testcontainers` para integración. La Fase 2 mantiene el vertical slice de identidad y RBAC con store en memoria para tests unitarios. La Fase 3 ya incluye migraciones PostgreSQL, RLS real, contexto transaccional y API conectada al adaptador persistente tenant-scoped. **Fase 5 (inventario concurrente)** cerrada: reserva temporal 15m + `UPDATE WHERE available>=qty` atómico, `expireReservations` con `SKIP LOCKED`, tests 50 concurrent stock 1 + k6. **Fase 6 (archivos S3)** cerrada: `files` tenant-scoped + RLS, keys `tenants/{tenantId}/{uuid}` TTL 300s/60s, flujo presigned → finalize → download, GC huérfanos 24h, tests cross-tenant 404/409/410.
 
 ## Requisitos locales
 

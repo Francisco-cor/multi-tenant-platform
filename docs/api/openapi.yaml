@@ -161,10 +161,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
-  /v1/files/presign:
+  /v1/files/presigned-upload:
     post:
       tags: [Files]
-      operationId: createUploadUrl
+      operationId: createPresignedUpload
       security: [{ oidc: [] }]
       requestBody:
         required: true
@@ -174,7 +174,168 @@ paths:
               $ref: '#/components/schemas/PresignRequest'
       responses:
         '201':
-          description: Presigned upload URL.
+          description: Presigned upload URL. Key is tenants/{tenantId}/{uuid}, TTL 300s.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PresignedUploadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /v1/files/presign:
+    post:
+      tags: [Files]
+      operationId: createUploadUrlLegacy
+      deprecated: true
+      security: [{ oidc: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PresignRequest'
+      responses:
+        '201':
+          description: Presigned upload URL (legacy alias).
+  /v1/files:
+    get:
+      tags: [Files]
+      operationId: listFiles
+      security: [{ oidc: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Files for the tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FilePage'
+  /v1/files/{fileId}:
+    get:
+      tags: [Files]
+      operationId: getFile
+      security: [{ oidc: [] }]
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: File metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          description: Upload expired.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+    post:
+      tags: [Files]
+      operationId: finalizeFile
+      security: [{ oidc: [] }]
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FinalizeFileRequest'
+      responses:
+        '200':
+          description: File ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          description: Upload expired.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+  /v1/files/{fileId}/finalize:
+    post:
+      tags: [Files]
+      operationId: finalizeFileById
+      security: [{ oidc: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FinalizeFileRequest'
+      responses:
+        '200':
+          description: File ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          description: Upload expired.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
+  /v1/files/{fileId}/download:
+    get:
+      tags: [Files]
+      operationId: getPresignedDownload
+      security: [{ oidc: [] }]
+      parameters:
+        - name: fileId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Presigned download URL, TTL 60s.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PresignedDownloadResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /v1/files/{fileId}/presigned-download:
+    get:
+      tags: [Files]
+      operationId: getPresignedDownloadAlias
+      security: [{ oidc: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Presigned download URL alias, TTL 60s.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PresignedDownloadResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
   /v1/webhooks/{webhookId}/replay:
     post:
       tags: [Webhooks]
@@ -227,6 +388,16 @@ components:
           schema: { $ref: '#/components/schemas/ApiError' }
     Conflict:
       description: Request conflicts with current state or idempotency record.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ApiError' }
+    BadRequest:
+      description: Invalid request.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ApiError' }
+    NotFound:
+      description: Resource not found or not visible in this tenant.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ApiError' }
@@ -337,9 +508,60 @@ components:
       type: object
       required: [filename, contentType, size]
       properties:
+        filename: { type: string, minLength: 1, maxLength: 255, pattern: '^[^/\\]+$' }
+        contentType: { type: string, minLength: 3, maxLength: 127 }
+        size: { type: integer, minimum: 1, maximum: 52428800 }
+    File:
+      type: object
+      required: [id, filename, contentType, sizeExpected, status]
+      properties:
+        id: { type: string, format: uuid }
         filename: { type: string }
         contentType: { type: string }
-        size: { type: integer, minimum: 1 }
+        sizeExpected: { type: integer, minimum: 1 }
+        sizeActual: { type: integer, nullable: true }
+        status: { type: string, enum: [pending, ready, expired, deleted] }
+        createdAt: { type: integer }
+        expiresAt: { type: integer }
+    FileResponse:
+      type: object
+      required: [file]
+      properties:
+        file: { $ref: '#/components/schemas/File' }
+    FilePage:
+      allOf:
+        - $ref: '#/components/schemas/CursorPage'
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/File' } }
+    PresignedUploadResponse:
+      type: object
+      required: [file, upload]
+      properties:
+        file: { $ref: '#/components/schemas/File' }
+        upload:
+          type: object
+          required: [url, expiresAt]
+          properties:
+            url: { type: string, format: uri }
+            expiresAt: { type: integer }
+            headers: { type: object, additionalProperties: { type: string } }
+            key: { type: string }
+    PresignedDownloadResponse:
+      type: object
+      required: [file, download]
+      properties:
+        file: { $ref: '#/components/schemas/File' }
+        download:
+          type: object
+          required: [url, expiresAt]
+          properties:
+            url: { type: string, format: uri }
+            expiresAt: { type: integer }
+    FinalizeFileRequest:
+      type: object
+      properties:
+        sizeActual: { type: integer, minimum: 1, maximum: 52428800 }
+        checksum: { type: string, maxLength: 128 }
     CursorPage:
       type: object
       required: [data, nextCursor, hasMore]
