@@ -187,4 +187,50 @@ describe('API bootstrap and identity boundary', () => {
     expect(refresh.headers['set-cookie']).toBeDefined();
     await app.close();
   });
+
+  it('reserves inventory atomically and rejects out of stock', async () => {
+    const app = buildApp({ allowDevLogin: true });
+    const cookie = await loginAs(app, 'user-acme-only');
+    // Need to ensure tenant context: use acme host, operator has reserve permission
+    const reserveOk = await app.inject({
+      method: 'POST',
+      url: '/v1/inventory/reserve',
+      headers: { host: 'acme.app.localhost', cookie },
+      payload: {
+        branchId: 'branch-acme-main',
+        productId: 'product-acme-1',
+        quantity: 2,
+      },
+    });
+    expect(reserveOk.statusCode).toBe(201);
+    expect(reserveOk.json().reservation.quantity).toBe(2);
+
+    // Try to reserve more than remaining (initial 10 -2 =8, try 9 => 409)
+    const over = await app.inject({
+      method: 'POST',
+      url: '/v1/inventory/reserve',
+      headers: { host: 'acme.app.localhost', cookie },
+      payload: {
+        branchId: 'branch-acme-main',
+        productId: 'product-acme-1',
+        quantity: 9,
+      },
+    });
+    expect(over.statusCode).toBe(409);
+
+    // Cross-tenant: acme user trying to use contoso product should 404
+    const cross = await app.inject({
+      method: 'POST',
+      url: '/v1/inventory/reserve',
+      headers: { host: 'acme.app.localhost', cookie },
+      payload: {
+        branchId: 'branch-acme-main',
+        productId: 'product-contoso-1',
+        quantity: 1,
+      },
+    });
+    expect(cross.statusCode).toBe(404);
+
+    await app.close();
+  });
 });

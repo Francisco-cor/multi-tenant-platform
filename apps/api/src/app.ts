@@ -26,6 +26,11 @@ import {
   type UserRecord,
 } from './identity-store.js';
 import { getLiveness, getReadiness, getStartup } from './health.js';
+import {
+  InMemoryInventoryStore,
+  PersistentInventoryStore,
+  type InventoryStore,
+} from './inventory-store.js';
 import { registerSecurity } from './plugins/security.js';
 
 const SESSION_COOKIE = 'platform_session';
@@ -50,6 +55,11 @@ const RoleUpdateSchema = z.object({
   role: z.enum(['owner', 'admin', 'manager', 'operator', 'auditor']),
 });
 const TenantSwitchSchema = z.object({ slug: z.string().min(1).max(63) });
+const ReserveSchema = z.object({
+  branchId: z.string().min(1).max(100),
+  productId: z.string().min(1).max(100),
+  quantity: z.number().int().min(1).max(1000),
+});
 const CallbackQuerySchema = z.object({
   code: z.string().min(1).optional(),
   state: z.string().min(1).optional(),
@@ -83,6 +93,7 @@ interface TenantContext extends SessionAuth {
 
 interface AppOptions {
   store?: IdentityStore;
+  inventoryStore?: InventoryStore;
   baseDomain?: string;
   allowDevLogin?: boolean;
   oidc?: {
@@ -190,6 +201,14 @@ async function membershipView(
 
 export function buildApp(options: AppOptions = {}): FastifyInstance {
   const store: IdentityStore = options.store ?? new InMemoryIdentityStore(true);
+  const inventoryStore: InventoryStore =
+    options.inventoryStore ??
+    (process.env.DATABASE_URL
+      ? PersistentInventoryStore.fromConnectionString(
+          process.env.DATABASE_URL,
+          process.env.DATABASE_ROLE ?? 'platform_app',
+        )
+      : new InMemoryInventoryStore(true));
   const stateStore = new InMemoryOidcStateStore();
   const baseDomain = options.baseDomain ?? process.env.TENANT_BASE_DOMAIN ?? DEFAULT_BASE_DOMAIN;
   const allowDevLogin = options.allowDevLogin ?? process.env.ALLOW_DEV_LOGIN === '1';
@@ -707,6 +726,49 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       }
       throw error;
     }
+  });
+
+  app.post('/v1/inventory/reserve', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
+    const context = await requireTenantContext(request);
+    requirePermission(context, 'inventory:reserve');
+    const body = parseOrThrow(ReserveSchema, request.body);
+    try {
+      const reservation = await inventoryStore.reserve(
+        { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
+        {
+          branchId: body.branchId,
+          productId: body.productId,
+          quantity: body.quantity,
+          correlationId: request.id,
+          createdBy: context.user.id,
+        },
+      );
+      return reply.status(201).send({ reservation });
+    } catch (error) {
+      if (error instanceof Error) {
+        if (error.message === 'out_of_stock') {
+          throw new RequestProblem(409, 'CONFLICT', 'Insufficient stock');
+        }
+        if (error.message === 'stock_not_found' || error.message === 'product_not_found') {
+          throw new RequestProblem(404, 'NOT_FOUND', 'Product or stock not found');
+        }
+        if (error.message === 'quantity_invalid') {
+          throw new RequestProblem(400, 'BAD_REQUEST', 'Quantity must be positive');
+        }
+      }
+      throw error;
+    }
+  });
+
+  app.get('/v1/inventory/reservations', async (request) => {
+    const context = await requireTenantContext(request);
+    requirePermission(context, 'inventory:read');
+    const reservations = await inventoryStore.listReservations({
+      tenantId: context.tenantId,
+      requestId: request.id,
+      userId: context.user.id,
+    });
+    return { data: reservations };
   });
 
   app.get('/v1/audit', async (request) => {
