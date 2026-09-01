@@ -4,7 +4,7 @@ Operations Hub B2B para organizaciones con múltiples sucursales. El proyecto pr
 
 ## Estado
 
-Fase 0 y 1 estan cerradas. La Fase 2 mantiene el vertical slice de identidad y RBAC con store en memoria para tests unitarios. La Fase 3 ya incluye migraciones PostgreSQL, RLS real, contexto transaccional y API conectada al adaptador persistente tenant-scoped.
+Fase 0 y 1 estan cerradas (bootstrap + contratos). La **Fase 1 de elevación** también cerrada: `apps/api`/`worker` emiten `dist/`, `apps/web` soporta `standalone` (STANDALONE=1), Dockerfiles multi-stage con base `node:24-alpine` pinnada, `.dockerignore`, validación estricta `TENANT_BASE_DOMAIN`, lint `import/no-cycle` + boundaries y helpers `testcontainers` para integración. La Fase 2 mantiene el vertical slice de identidad y RBAC con store en memoria para tests unitarios. La Fase 3 ya incluye migraciones PostgreSQL, RLS real, contexto transaccional y API conectada al adaptador persistente tenant-scoped.
 
 ## Requisitos locales
 
@@ -35,11 +35,22 @@ La primera versión de Compose levanta infraestructura de desarrollo; los servic
 ## Comandos
 
 ```bash
-pnpm dev                 # web, API y worker
+pnpm dev                 # web, API y worker (tsx watch)
+pnpm build               # emite dist/ (api/worker) y .next/ (web)
 pnpm typecheck           # TypeScript en todos los paquetes
-pnpm lint                # checks de ESLint
+pnpm lint                # ESLint + import/no-cycle + boundaries
 pnpm test                # suite disponible por workspace
 pnpm format:check        # formato reproducible
+pnpm openapi:check       # valida docs/api/openapi.yaml y hash drift (.openapi.hash)
+```
+
+### Docker (builds reproducibles)
+
+```bash
+docker build -f apps/api/Dockerfile -t platform-api:local .
+docker build -f apps/web/Dockerfile -t platform-web:local .
+docker build -f apps/worker/Dockerfile -t platform-worker:local .
+# web standalone requiere STANDALONE=1 (ya seteado en Dockerfile)
 ```
 
 ### PostgreSQL y aislamiento
@@ -49,6 +60,8 @@ pnpm --filter @platform/db migrate
 RUN_DB_INTEGRATION=1 pnpm --filter @platform/db test:integration
 pnpm --filter @platform/db backup --output .artifacts/db/platform-manual.dump
 pnpm --filter @platform/db restore:drill
+# Integración con containers efímeros (requiere Docker)
+pnpm --filter @platform/testing exec vitest --run  # usa withPostgres() helper si TESTCONTAINERS_DISABLED!=1
 ```
 
 El runner toma `DATABASE_URL`, usa un advisory lock y registra cada archivo en `schema_migrations`. Las migraciones se separan en `schema/`, `data/` e `indexes/`; las de indices grandes se ejecutan fuera de transaccion. El restore drill crea una base temporal, verifica filas, historial y RLS y la elimina al terminar. En local `DATABASE_ROLE=platform_app` hace que la aplicacion use el rol NOLOGIN creado por la migracion; en produccion debe enlazarse a un login gestionado sin privilegios de superusuario.
