@@ -14,23 +14,29 @@
 ## Inyección
 
 **In-memory (unit, sin Docker):**
+
 ```bash
 pnpm --filter @platform/api test src/inventory.concurrent.test.ts
 ```
+
 - 50 promesas `store.reserve(ctx, {quantity:1})` con `Promise.all`, `tenant=tenant-conc-mem`, `branch=branch-1`, `product=prod-1`, `available=1` inicial.
 
 **Postgres real (integración, requiere Docker):**
+
 ```bash
 RUN_DB_INTEGRATION=1 pnpm --filter @platform/api test src/inventory.concurrent.test.ts
 ```
+
 - Crea `tenant`/`branch`/`product` efímeros con `available=1`, dispara 50 `PersistentInventoryStore.reserve` concurrentes (cada uno en su `withTenantTransaction` con `maxConnections=5` para forzar reuse de conexiones), mismo `UPDATE ... WHERE available >=` en `inventory-store.ts:306`.
 
 **Carga (k6):**
+
 ```bash
 k6 run k6/inventory-stock1.js   # 50 VUs, 50 iter, dev-login + POST /v1/inventory/reserve
 # O con stock real:
 BRANCH_ID=<uuid> PRODUCT_ID=<uuid> TENANT_HOST=acme.app.localhost API_URL=http://localhost:4000 k6 run k6/inventory-stock1.js
 ```
+
 - `k6/inventory-stock1.js:10` thresholds `http_req_failed <0.02`, `p(95)<500`, `checks 201|409`.
 
 ## Señal esperada
@@ -47,21 +53,26 @@ BRANCH_ID=<uuid> PRODUCT_ID=<uuid> TENANT_HOST=acme.app.localhost API_URL=http:/
 ## Evidencia 2026-09-01
 
 **In-memory (CI sin DB):**
+
 ```
 ✓ inventory concurrent — in-memory > with stock 1, exactly one of 50 reserves wins (12ms)
   successes=1, outs=49, available=0
 ```
+
 `pnpm --filter @platform/api test` → 12 passed (3 files), `inventory.concurrent.test.ts` 1 passed.
 
 **Postgres (manual con Docker, 2026-09-01):**
+
 - Preparado: `docker compose up -d postgres` + `pnpm --filter @platform/db migrate` (aplica `0006_inventory.sql`).
 - Ejecutado: `RUN_DB_INTEGRATION=1 pnpm --filter @platform/api test src/inventory.concurrent.test.ts --reporter=verbose`
 - Resultado: `✓ inventory concurrent — postgres (stock 1, 50 workers) > exactly one succeeds via persistent store (342ms)` — se documenta con `stock.available=0` y `movements delta=-1`.
 
 **k6 (local, InMemory stock 10 → 50 VUs):**
+
 ```
 http_reqs: 50, http_req_failed: 0.00, http_req_duration p95: 312ms, checks_passed: 50
 ```
+
 Con stock 1 el comportamiento es idéntico pero 49× `409`; el test unitario ya cubre la propiedad. La prueba de carga con stock real se ejecuta en staging con `BRANCH_ID`/`PRODUCT_ID` reales.
 
 ## Aprendizaje
@@ -79,4 +90,3 @@ Con stock 1 el comportamiento es idéntico pero 49× `409`; el test unitario ya 
 - [x] Test 50 concurrent stock 1 in-memory + postgres, k6 script.
 - [x] `GET /v1/inventory` con `GIN trgm` y `tenant_id` en índice, `q` no filtra otro tenant.
 - [x] Este runbook con evidencia y métricas.
-

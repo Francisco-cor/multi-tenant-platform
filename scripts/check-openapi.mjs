@@ -21,7 +21,9 @@ async function main() {
   try {
     raw = await readFile(openApiPath, 'utf8');
   } catch {
-    fail(`docs/api/openapi.yaml not found at ${openApiPath}. Run pnpm openapi:generate or create the file.`);
+    fail(
+      `docs/api/openapi.yaml not found at ${openApiPath}. Run pnpm openapi:generate or create the file.`,
+    );
   }
 
   let doc;
@@ -51,7 +53,9 @@ async function main() {
   ok(`required paths present: ${requiredPaths.join(', ')}`);
 
   // Tenant-aware paths should require security or tenant context
-  const tenantPaths = Object.keys(doc.paths).filter((p) => p.startsWith('/v1/') && p !== '/v1/meta');
+  const tenantPaths = Object.keys(doc.paths).filter(
+    (p) => p.startsWith('/v1/') && p !== '/v1/meta',
+  );
   for (const p of tenantPaths) {
     const methods = doc.paths[p];
     for (const [method, op] of Object.entries(methods)) {
@@ -61,10 +65,15 @@ async function main() {
         // At least one of security or Idempotency-Key documented
         const hasSecurity = Array.isArray(op.security);
         const hasIdempotency =
-          Array.isArray(op.parameters) && op.parameters.some((param) => param?.$ref?.includes('Idempotency') || param?.name === 'Idempotency-Key');
+          Array.isArray(op.parameters) &&
+          op.parameters.some(
+            (param) => param?.$ref?.includes('Idempotency') || param?.name === 'Idempotency-Key',
+          );
         // Not failing, just warn for coverage
         if (!hasSecurity && !hasIdempotency && p !== '/v1/meta') {
-          console.warn(`[openapi:check] WARN: ${method.toUpperCase()} ${p} has no security/Idempotency-Key — consider documenting tenant auth`);
+          console.warn(
+            `[openapi:check] WARN: ${method.toUpperCase()} ${p} has no security/Idempotency-Key — consider documenting tenant auth`,
+          );
         }
       }
     }
@@ -100,12 +109,16 @@ async function main() {
   try {
     const expected = (await readFile(hashFile, 'utf8')).trim();
     if (expected && expected !== hash) {
-      fail(`drift detected: expected hash ${expected} but got ${hash}. Update docs/api/openapi.yaml and run: echo ${hash} > docs/api/.openapi.hash`);
+      fail(
+        `drift detected: expected hash ${expected} but got ${hash}. Update docs/api/openapi.yaml and run: echo ${hash} > docs/api/.openapi.hash`,
+      );
     }
     if (expected) ok(`hash matches .openapi.hash (${expected})`);
   } catch {
     // No hash file yet — not strict; just warn
-    console.warn(`[openapi:check] WARN: docs/api/.openapi.hash missing — create with: echo ${hash} > docs/api/.openapi.hash for strict drift check`);
+    console.warn(
+      `[openapi:check] WARN: docs/api/.openapi.hash missing — create with: echo ${hash} > docs/api/.openapi.hash for strict drift check`,
+    );
   }
 
   console.log('[openapi:check] All checks passed');

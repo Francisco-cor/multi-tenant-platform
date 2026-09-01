@@ -4,7 +4,9 @@ import { PersistentInventoryStore } from './inventory-store.js';
 import { InMemoryInventoryStore } from './inventory-store.js';
 
 const runIntegration = process.env.RUN_DB_INTEGRATION === '1';
-const connStr = process.env.DATABASE_URL ? new URL(process.env.DATABASE_URL).toString().replace('?schema=public', '') : null;
+const connStr = process.env.DATABASE_URL
+  ? new URL(process.env.DATABASE_URL).toString().replace('?schema=public', '')
+  : null;
 
 // In-memory concurrent check (single thread but logical)
 describe('inventory concurrent — in-memory', () => {
@@ -13,7 +15,13 @@ describe('inventory concurrent — in-memory', () => {
     const tenant = 'tenant-conc-mem';
     const branch = 'branch-1';
     const product = 'prod-1';
-    await store.upsertProduct({ id: product, tenantId: tenant, sku: 'SKU-TEST', name: 'Test', active: true });
+    await store.upsertProduct({
+      id: product,
+      tenantId: tenant,
+      sku: 'SKU-TEST',
+      name: 'Test',
+      active: true,
+    });
     await store.setStock({ tenantId: tenant, branchId: branch, productId: product, available: 1 });
 
     const ctx = { tenantId: tenant, requestId: 'test', userId: 'user-1' };
@@ -77,9 +85,15 @@ suiteDb('inventory concurrent — postgres (stock 1, 50 workers)', () => {
 
   afterAll(async () => {
     if (!admin) return;
-    await admin`delete from inventory_movements where tenant_id = ${tenant}::uuid`.catch(() => undefined);
-    await admin`delete from inventory_reservations where tenant_id = ${tenant}::uuid`.catch(() => undefined);
-    await admin`delete from stock_per_branch where tenant_id = ${tenant}::uuid`.catch(() => undefined);
+    await admin`delete from inventory_movements where tenant_id = ${tenant}::uuid`.catch(
+      () => undefined,
+    );
+    await admin`delete from inventory_reservations where tenant_id = ${tenant}::uuid`.catch(
+      () => undefined,
+    );
+    await admin`delete from stock_per_branch where tenant_id = ${tenant}::uuid`.catch(
+      () => undefined,
+    );
     await admin`delete from products where tenant_id = ${tenant}::uuid`.catch(() => undefined);
     await admin`delete from branches where tenant_id = ${tenant}::uuid`.catch(() => undefined);
     await admin`delete from organizations where id = ${tenant}::uuid`.catch(() => undefined);
@@ -118,7 +132,7 @@ suiteDb('inventory concurrent — postgres (stock 1, 50 workers)', () => {
 
     // Check movements: one reserve movement
     const rawMovements = await admin.unsafe(
-      "select delta, reason from inventory_movements where tenant_id = $1::uuid and product_id = $2::uuid",
+      'select delta, reason from inventory_movements where tenant_id = $1::uuid and product_id = $2::uuid',
       [tenant, product],
     );
     const movements = rawMovements as unknown as { delta: number; reason: string }[];

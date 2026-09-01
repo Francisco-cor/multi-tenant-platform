@@ -1,10 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { sql } from '@platform/db';
-import {
-  createDatabase,
-  withTenantTransaction,
-  type DatabaseHandle,
-} from '@platform/db';
+import { createDatabase, withTenantTransaction, type DatabaseHandle } from '@platform/db';
 import type { StoreTenantContext } from './identity-store.js';
 
 export interface ProductRecord {
@@ -57,7 +53,11 @@ export interface StockListItem {
 
 export interface InventoryStore {
   reserve(context: StoreTenantContext, input: ReserveInput): Promise<ReservationRecord>;
-  getStock(context: StoreTenantContext, branchId: string, productId: string): Promise<StockRecord | null>;
+  getStock(
+    context: StoreTenantContext,
+    branchId: string,
+    productId: string,
+  ): Promise<StockRecord | null>;
   listReservations(context: StoreTenantContext): Promise<ReservationRecord[]>;
   listStock(
     context: StoreTenantContext,
@@ -128,7 +128,11 @@ export class InMemoryInventoryStore implements InventoryStore {
     this.stock.set(this.key(record.tenantId, record.branchId, record.productId), record);
   }
 
-  async getStock(context: StoreTenantContext, branchId: string, productId: string): Promise<StockRecord | null> {
+  async getStock(
+    context: StoreTenantContext,
+    branchId: string,
+    productId: string,
+  ): Promise<StockRecord | null> {
     if (context.tenantId.includes('-') === false) {
       // simple check, but we allow
     }
@@ -142,11 +146,17 @@ export class InMemoryInventoryStore implements InventoryStore {
   async listStock(
     context: StoreTenantContext,
     branchId: string,
-    options: { q?: string | undefined; limit?: number | undefined; cursor?: string | undefined } = {},
+    options: {
+      q?: string | undefined;
+      limit?: number | undefined;
+      cursor?: string | undefined;
+    } = {},
   ): Promise<{ items: StockListItem[]; nextCursor: string | null }> {
     const q = options.q?.trim().toLowerCase();
     const limit = Math.min(Math.max(options.limit ?? 25, 1), 100);
-    const all = [...this.stock.values()].filter((s) => s.tenantId === context.tenantId && s.branchId === branchId);
+    const all = [...this.stock.values()].filter(
+      (s) => s.tenantId === context.tenantId && s.branchId === branchId,
+    );
     const filtered = all
       .map((s) => {
         const product = this.products.get(s.productId);
@@ -240,7 +250,10 @@ export class PersistentInventoryStore implements InventoryStore {
     if (!db.role) throw new Error('database_role_required');
   }
 
-  static fromConnectionString(connectionString: string, role = 'platform_app'): PersistentInventoryStore {
+  static fromConnectionString(
+    connectionString: string,
+    role = 'platform_app',
+  ): PersistentInventoryStore {
     return new PersistentInventoryStore(createDatabase(connectionString, { role }));
   }
 
@@ -273,7 +286,11 @@ export class PersistentInventoryStore implements InventoryStore {
     );
   }
 
-  async getStock(context: StoreTenantContext, branchId: string, productId: string): Promise<StockRecord | null> {
+  async getStock(
+    context: StoreTenantContext,
+    branchId: string,
+    productId: string,
+  ): Promise<StockRecord | null> {
     return withTenantTransaction(this.db, context, async (tx) => {
       const rows = await tx.execute<StockRecord>(sql`
         select tenant_id as "tenantId", branch_id as "branchId", product_id as "productId", available
@@ -302,7 +319,11 @@ export class PersistentInventoryStore implements InventoryStore {
   async listStock(
     context: StoreTenantContext,
     branchId: string,
-    options: { q?: string | undefined; limit?: number | undefined; cursor?: string | undefined } = {},
+    options: {
+      q?: string | undefined;
+      limit?: number | undefined;
+      cursor?: string | undefined;
+    } = {},
   ): Promise<{ items: StockListItem[]; nextCursor: string | null }> {
     const limit = Math.min(Math.max(options.limit ?? 25, 1), 100);
     const q = options.q?.trim() ?? null;
@@ -330,7 +351,9 @@ export class PersistentInventoryStore implements InventoryStore {
       const hasMore = rows.length > limit;
       const items = hasMore ? (rows.slice(0, limit) as StockListItem[]) : (rows as StockListItem[]);
       const nextCursor =
-        hasMore && items.length > 0 ? Buffer.from(items[items.length - 1]!.sku).toString('base64url') : null;
+        hasMore && items.length > 0
+          ? Buffer.from(items[items.length - 1]!.sku).toString('base64url')
+          : null;
       return { items, nextCursor };
     });
   }

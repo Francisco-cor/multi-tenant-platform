@@ -129,8 +129,12 @@ export async function runMigrations(connectionString: string): Promise<Migration
         ', ' +
         'add column if not exists checksum text',
     );
-    await client.unsafe('alter table schema_migrations add column if not exists duration_ms integer');
-    await client.unsafe('alter table schema_migrations add column if not exists applied_by text default current_user');
+    await client.unsafe(
+      'alter table schema_migrations add column if not exists duration_ms integer',
+    );
+    await client.unsafe(
+      'alter table schema_migrations add column if not exists applied_by text default current_user',
+    );
 
     for (const migration of migrationFiles) {
       const status = await migrationIsApplied(client, migration);

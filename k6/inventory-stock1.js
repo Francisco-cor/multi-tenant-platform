@@ -20,11 +20,9 @@ const PRODUCT_ID = __ENV.PRODUCT_ID || 'product-acme-1';
 const DEV_USER = __ENV.DEV_USER || 'user-acme-only';
 
 function login() {
-  const res = http.post(
-    `${BASE_URL}/v1/auth/dev-login`,
-    JSON.stringify({ userId: DEV_USER }),
-    { headers: { 'Content-Type': 'application/json' } },
-  );
+  const res = http.post(`${BASE_URL}/v1/auth/dev-login`, JSON.stringify({ userId: DEV_USER }), {
+    headers: { 'Content-Type': 'application/json' },
+  });
   check(res, { 'login 200': (r) => r.status === 200 });
   const cookies = res.cookies[`platform_session`];
   // Fallback to Set-Cookie header parsing

@@ -40,8 +40,12 @@ suite('postgres tenant isolation — pool stickiness 50 concurrent', () => {
 
   afterAll(async () => {
     if (admin) {
-      await admin`delete from branches where tenant_id = ${tenantA} or tenant_id = ${tenantB}`.catch(() => undefined);
-      await admin`delete from organizations where id = ${tenantA} or id = ${tenantB}`.catch(() => undefined);
+      await admin`delete from branches where tenant_id = ${tenantA} or tenant_id = ${tenantB}`.catch(
+        () => undefined,
+      );
+      await admin`delete from organizations where id = ${tenantA} or id = ${tenantB}`.catch(
+        () => undefined,
+      );
       await admin.end({ timeout: 5 });
     }
     if (dbHandle) await dbHandle.close();
@@ -61,7 +65,9 @@ suite('postgres tenant isolation — pool stickiness 50 concurrent', () => {
       tasks.push(
         withTenantTransaction(dbHandle, context, async (tx) => {
           // 1) Verify app.tenant_id is exactly the transaction's tenant
-          const [setting] = await tx.execute<{ tenant: string }>(sql`select current_setting('app.tenant_id', true) as tenant`);
+          const [setting] = await tx.execute<{ tenant: string }>(
+            sql`select current_setting('app.tenant_id', true) as tenant`,
+          );
           expect(setting?.tenant).toBe(tenantId);
 
           // 2) Repository findById respects tenant filter
@@ -74,11 +80,15 @@ suite('postgres tenant isolation — pool stickiness 50 concurrent', () => {
           expect(cross).toBeNull();
 
           // 3) Direct query without explicit filter must still be blocked by RLS (since app.tenant_id is set)
-          const direct = await tx.execute<{ id: string }>(sql`select id from organizations where id = ${otherTenant}`);
+          const direct = await tx.execute<{ id: string }>(
+            sql`select id from organizations where id = ${otherTenant}`,
+          );
           expect(direct.length).toBe(0);
 
           // 4) Branches RLS hides other tenant even with same slug
-          const branches = await tx.execute<{ tenant_id: string }>(sql`select tenant_id from branches where slug = 'same-branch'`);
+          const branches = await tx.execute<{ tenant_id: string }>(
+            sql`select tenant_id from branches where slug = 'same-branch'`,
+          );
           // Should only see own tenant branch
           expect(branches.length).toBe(1);
           expect(branches[0]?.tenant_id).toBe(tenantId);
@@ -94,11 +104,15 @@ suite('postgres tenant isolation — pool stickiness 50 concurrent', () => {
     const contextA: TenantRepositoryContext = { tenantId: tenantA, requestId: 'leak-check-a' };
     const contextB: TenantRepositoryContext = { tenantId: tenantB, requestId: 'leak-check-b' };
     await withTenantTransaction(dbHandle, contextA, async (tx) => {
-      const [setting] = await tx.execute<{ tenant: string }>(sql`select current_setting('app.tenant_id', true) as tenant`);
+      const [setting] = await tx.execute<{ tenant: string }>(
+        sql`select current_setting('app.tenant_id', true) as tenant`,
+      );
       expect(setting?.tenant).toBe(tenantA);
     });
     await withTenantTransaction(dbHandle, contextB, async (tx) => {
-      const [setting] = await tx.execute<{ tenant: string }>(sql`select current_setting('app.tenant_id', true) as tenant`);
+      const [setting] = await tx.execute<{ tenant: string }>(
+        sql`select current_setting('app.tenant_id', true) as tenant`,
+      );
       expect(setting?.tenant).toBe(tenantB);
     });
   });

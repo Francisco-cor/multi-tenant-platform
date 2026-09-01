@@ -17,7 +17,10 @@ function isAllowedOrigin(origin: string | undefined, options: SecurityOptions): 
     return false;
   }
   const hostname = url.hostname.toLowerCase();
-  const base = options.baseDomain.trim().toLowerCase().replace(/^\.+|\.+$/g, '');
+  const base = options.baseDomain
+    .trim()
+    .toLowerCase()
+    .replace(/^\.+|\.+$/g, '');
   // Exact base domain treated as tenant? e.g. app.localhost is not tenant slug but allow for api.localhost
   // Allow: *.baseDomain and baseDomain itself and localhost variants
   if (hostname === base) return true;
@@ -51,7 +54,10 @@ export function registerSecurity(app: FastifyInstance, options: SecurityOptions)
       },
     },
     crossOriginEmbedderPolicy: false, // API returns JSON, not cross-origin isolation
-    hsts: process.env.NODE_ENV === 'production' ? { maxAge: 31_536_000, includeSubDomains: true, preload: true } : false,
+    hsts:
+      process.env.NODE_ENV === 'production'
+        ? { maxAge: 31_536_000, includeSubDomains: true, preload: true }
+        : false,
   });
 
   void app.register(cors, {
@@ -64,7 +70,13 @@ export function registerSecurity(app: FastifyInstance, options: SecurityOptions)
       }
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key', 'X-Request-Id', 'X-Correlation-Id'],
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'Idempotency-Key',
+      'X-Request-Id',
+      'X-Correlation-Id',
+    ],
     exposedHeaders: ['X-Request-Id', 'X-RateLimit-Limit', 'X-RateLimit-Remaining'],
     credentials: true,
     maxAge: 600,

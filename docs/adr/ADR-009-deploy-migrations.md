@@ -9,6 +9,7 @@
 Las tablas tenant-scoped (`organizations`, `memberships`, `branches`, `invitations`, `audit_log`, `sessions`) ya tienen RLS `FORCE` y filtros explícitos en `TenantRepository` (`packages/db/src/tenant-repository.ts:1`, `repositories.ts:1`). Sin disciplina de deploy, un cambio de esquema puede romper pods viejos, dejar una migración a medias sin runbook, o permitir que un `SELECT` sin `app.tenant_id` vea datos cross-tenant.
 
 Se necesita una política que garantice:
+
 1. Ningún deploy exponga datos por falta de `tenant_id`.
 2. Ninguna migración sea destructiva en la misma release que introduce la columna/tabla.
 3. Los índices grandes no bloqueen escrituras en producción.

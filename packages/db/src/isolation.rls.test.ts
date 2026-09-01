@@ -44,9 +44,15 @@ suite('postgres RLS — last barrier (platform_app without tenant)', () => {
 
   afterAll(async () => {
     if (admin) {
-      await admin`delete from memberships where tenant_id = ${tenantA} or tenant_id = ${tenantB}`.catch(() => undefined);
-      await admin`delete from branches where tenant_id = ${tenantA} or tenant_id = ${tenantB}`.catch(() => undefined);
-      await admin`delete from organizations where id = ${tenantA} or id = ${tenantB}`.catch(() => undefined);
+      await admin`delete from memberships where tenant_id = ${tenantA} or tenant_id = ${tenantB}`.catch(
+        () => undefined,
+      );
+      await admin`delete from branches where tenant_id = ${tenantA} or tenant_id = ${tenantB}`.catch(
+        () => undefined,
+      );
+      await admin`delete from organizations where id = ${tenantA} or id = ${tenantB}`.catch(
+        () => undefined,
+      );
       await admin.end({ timeout: 5 }).catch(() => undefined);
     }
     if (appClient) await appClient.end({ timeout: 5 }).catch(() => undefined);
@@ -72,25 +78,33 @@ suite('postgres RLS — last barrier (platform_app without tenant)', () => {
 
   it('enforces RLS WITH CHECK on INSERT mismatched tenant via platform_app', async () => {
     // Use withTenantTransaction with tenantA but try to insert tenantB row directly — should be blocked by RLS with check
-    await withTenantTransaction(appDb, { tenantId: tenantA, requestId: 'rls-check' }, async (tx) => {
-      // Attempt to insert a branch with tenantB while app.tenant_id == tenantA -> with check should fail
-      let threw = false;
-      try {
-        await tx.execute(sql`insert into branches (tenant_id, slug, name) values (${tenantB}::uuid, 'evil', 'Evil')`);
-      } catch (error) {
-        threw = true;
-        // Postgres error code 42501 insufficient_privilege due to RLS
-        const code = (error as unknown as { code?: string }).code;
-        expect(['42501', 'P0001']).toContain(code ?? '42501');
-      }
-      expect(threw).toBe(true);
+    await withTenantTransaction(
+      appDb,
+      { tenantId: tenantA, requestId: 'rls-check' },
+      async (tx) => {
+        // Attempt to insert a branch with tenantB while app.tenant_id == tenantA -> with check should fail
+        let threw = false;
+        try {
+          await tx.execute(
+            sql`insert into branches (tenant_id, slug, name) values (${tenantB}::uuid, 'evil', 'Evil')`,
+          );
+        } catch (error) {
+          threw = true;
+          // Postgres error code 42501 insufficient_privilege due to RLS
+          const code = (error as unknown as { code?: string }).code;
+          expect(['42501', 'P0001']).toContain(code ?? '42501');
+        }
+        expect(threw).toBe(true);
 
-      // Valid insert for own tenant should succeed (and then clean)
-      const ok = await tx.execute<{ id: string }>(sql`insert into branches (tenant_id, slug, name) values (${tenantA}::uuid, 'ok-branch', 'Ok') returning id`);
-      expect(ok.length).toBe(1);
-      // Cleanup
-      await tx.execute(sql`delete from branches where id = ${ok[0]!.id}::uuid`);
-    });
+        // Valid insert for own tenant should succeed (and then clean)
+        const ok = await tx.execute<{ id: string }>(
+          sql`insert into branches (tenant_id, slug, name) values (${tenantA}::uuid, 'ok-branch', 'Ok') returning id`,
+        );
+        expect(ok.length).toBe(1);
+        // Cleanup
+        await tx.execute(sql`delete from branches where id = ${ok[0]!.id}::uuid`);
+      },
+    );
   });
 
   it('forces RLS even for table owner via FORCE (admin cannot bypass as platform_app)', async () => {
@@ -103,9 +117,13 @@ suite('postgres RLS — last barrier (platform_app without tenant)', () => {
       expect(rows[0]?.forcerowsecurity).toBe(true);
     }
     // Also verify that withTenantTransaction with tenantA cannot see B even when using admin-like query
-    await withTenantTransaction(appDb, { tenantId: tenantA, requestId: 'force-check' }, async (tx) => {
-      const bOrg = await tx.execute(sql`select id from organizations where id = ${tenantB}`);
-      expect(bOrg.length).toBe(0);
-    });
+    await withTenantTransaction(
+      appDb,
+      { tenantId: tenantA, requestId: 'force-check' },
+      async (tx) => {
+        const bOrg = await tx.execute(sql`select id from organizations where id = ${tenantB}`);
+        expect(bOrg.length).toBe(0);
+      },
+    );
   });
 });

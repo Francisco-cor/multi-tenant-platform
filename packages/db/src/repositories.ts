@@ -103,9 +103,7 @@ export class TenantMembershipRepository extends TenantRepository {
     return rows[0] ?? null;
   }
 
-  public async listForTenant(
-    context: TenantRepositoryContext,
-  ): Promise<MembershipRecord[]> {
+  public async listForTenant(context: TenantRepositoryContext): Promise<MembershipRecord[]> {
     this.assertContext(context);
     return this.db.execute<MembershipRecord>(sql`
       select id, tenant_id as "tenantId", user_id as "userId", role, active
@@ -152,9 +150,7 @@ export class TenantBranchRepository extends TenantRepository {
     return rows[0] ?? null;
   }
 
-  public async listForTenant(
-    context: TenantRepositoryContext,
-  ): Promise<BranchRecord[]> {
+  public async listForTenant(context: TenantRepositoryContext): Promise<BranchRecord[]> {
     this.assertContext(context);
     return this.db.execute<BranchRecord>(sql`
       select id, tenant_id as "tenantId", slug, name, active

@@ -38,7 +38,8 @@ async function checkDatabase(): Promise<HealthCheckResult> {
     // Use a single connection, no prepare, quick check
     sql = postgres(url, { max: 1, prepare: false, connect_timeout: 2, idle_timeout: 2 });
     const result = await withTimeout(sql`select 1 as ok`, HEALTH_TIMEOUT_MS, 'postgres');
-    if (!Array.isArray(result) || result.length === 0) throw new Error('postgres unexpected result');
+    if (!Array.isArray(result) || result.length === 0)
+      throw new Error('postgres unexpected result');
     return { name: 'postgres', status: 'ok', latencyMs: Date.now() - start };
   } catch (error) {
     return {
@@ -61,8 +62,20 @@ async function checkRedis(): Promise<HealthCheckResult> {
   try {
     const ioredisMod = await import('ioredis').catch(() => null);
     if (!ioredisMod) return { name: 'redis', status: 'skip' };
-    const Redis = (ioredisMod as unknown as { default: new (url: string, opts: unknown) => { ping: () => Promise<string>; quit: () => Promise<void> } }).default;
-    const client = new Redis(url, { lazyConnect: true, connectTimeout: HEALTH_TIMEOUT_MS, maxRetriesPerRequest: 0, enableReadyCheck: false });
+    const Redis = (
+      ioredisMod as unknown as {
+        default: new (
+          url: string,
+          opts: unknown,
+        ) => { ping: () => Promise<string>; quit: () => Promise<void> };
+      }
+    ).default;
+    const client = new Redis(url, {
+      lazyConnect: true,
+      connectTimeout: HEALTH_TIMEOUT_MS,
+      maxRetriesPerRequest: 0,
+      enableReadyCheck: false,
+    });
     await withTimeout(client.ping(), HEALTH_TIMEOUT_MS, 'redis');
     await client.quit().catch(() => undefined);
     return { name: 'redis', status: 'ok', latencyMs: Date.now() - start };

@@ -63,13 +63,15 @@ async function assertDockerAvailable(): Promise<void> {
   void GenericContainer;
 }
 
-export function withPostgres(options: {
-  image?: string;
-  database?: string;
-  username?: string;
-  password?: string;
-  port?: number;
-} = {}): PostgresContainerHandle {
+export function withPostgres(
+  options: {
+    image?: string;
+    database?: string;
+    username?: string;
+    password?: string;
+    port?: number;
+  } = {},
+): PostgresContainerHandle {
   const image = options.image ?? process.env.TESTCONTAINERS_PG_IMAGE ?? DEFAULT_IMAGES.postgres;
   const database = options.database ?? 'platform_test';
   const username = options.username ?? 'platform';
@@ -86,7 +88,11 @@ export function withPostgres(options: {
       await assertDockerAvailable();
       const { GenericContainer, Wait } = await import('testcontainers');
       const c = await new GenericContainer(image)
-        .withEnvironment({ POSTGRES_DB: database, POSTGRES_USER: username, POSTGRES_PASSWORD: password })
+        .withEnvironment({
+          POSTGRES_DB: database,
+          POSTGRES_USER: username,
+          POSTGRES_PASSWORD: password,
+        })
         .withExposedPorts(port)
         .withWaitStrategy(Wait.forLogMessage(/database system is ready to accept connections/))
         .withStartupTimeout(120_000)
@@ -157,13 +163,15 @@ export function withRedis(options: { image?: string; port?: number } = {}): Redi
   return handle;
 }
 
-export function withMinio(options: {
-  image?: string;
-  accessKey?: string;
-  secretKey?: string;
-  apiPort?: number;
-  consolePort?: number;
-} = {}): MinioContainerHandle {
+export function withMinio(
+  options: {
+    image?: string;
+    accessKey?: string;
+    secretKey?: string;
+    apiPort?: number;
+    consolePort?: number;
+  } = {},
+): MinioContainerHandle {
   const image = options.image ?? process.env.TESTCONTAINERS_MINIO_IMAGE ?? DEFAULT_IMAGES.minio;
   const accessKey = options.accessKey ?? 'minio';
   const secretKey = options.secretKey ?? 'minio12345';
@@ -197,8 +205,12 @@ export function withMinio(options: {
       if (!endpoint) throw new Error('minio_container_not_started');
       return endpoint;
     },
-    getAccessKey() { return accessKey; },
-    getSecretKey() { return secretKey; },
+    getAccessKey() {
+      return accessKey;
+    },
+    getSecretKey() {
+      return secretKey;
+    },
     async stop() {
       if (container) {
         await container.stop({ timeout: 10_000 }).catch(() => undefined);
