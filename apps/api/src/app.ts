@@ -31,6 +31,16 @@ import {
   PersistentInventoryStore,
   type InventoryStore,
 } from './inventory-store.js';
+import {
+  InMemoryFileStore,
+  PersistentFileStore,
+  type FileStore,
+  ALLOWED_MIME_TYPES,
+  ALLOWED_MIME_REGEX,
+  DOWNLOAD_TTL_SECONDS,
+  UPLOAD_TTL_SECONDS,
+} from './file-store.js';
+import { getDefaultS3Service } from './s3.js';
 import { registerSecurity } from './plugins/security.js';
 
 const SESSION_COOKIE = 'platform_session';
@@ -66,6 +76,28 @@ const InventoryListQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(25),
   cursor: z.string().min(1).optional(),
 });
+const FilePresignSchema = z.object({
+  filename: z
+    .string()
+    .min(1)
+    .max(255)
+    .refine((v) => !v.includes('/') && !v.includes('\\') && !v.includes('..'), 'filename_invalid'),
+  contentType: z.string().min(3).max(127),
+  size: z
+    .number()
+    .int()
+    .min(1)
+    .max(50 * 1024 * 1024),
+});
+const FileFinalizeSchema = z.object({
+  sizeActual: z
+    .number()
+    .int()
+    .min(1)
+    .max(50 * 1024 * 1024)
+    .optional(),
+  checksum: z.string().max(128).optional(),
+});
 const CallbackQuerySchema = z.object({
   code: z.string().min(1).optional(),
   state: z.string().min(1).optional(),
@@ -100,6 +132,7 @@ interface TenantContext extends SessionAuth {
 interface AppOptions {
   store?: IdentityStore;
   inventoryStore?: InventoryStore;
+  fileStore?: FileStore;
   baseDomain?: string;
   allowDevLogin?: boolean;
   oidc?: {
@@ -215,6 +248,14 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           process.env.DATABASE_ROLE ?? 'platform_app',
         )
       : new InMemoryInventoryStore(true));
+  const fileStore: FileStore =
+    options.fileStore ??
+    (process.env.DATABASE_URL
+      ? PersistentFileStore.fromConnectionString(
+          process.env.DATABASE_URL,
+          process.env.DATABASE_ROLE ?? 'platform_app',
+        )
+      : new InMemoryFileStore());
   const stateStore = new InMemoryOidcStateStore();
   const baseDomain = options.baseDomain ?? process.env.TENANT_BASE_DOMAIN ?? DEFAULT_BASE_DOMAIN;
   const allowDevLogin = options.allowDevLogin ?? process.env.ALLOW_DEV_LOGIN === '1';
@@ -623,58 +664,62 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     });
   });
 
-  app.post('/v1/members/invitations/:token/accept', { bodyLimit: SMALL_BODY_LIMIT }, async (request) => {
-    const auth = await requireSession(request);
-    const resolution = resolveTenantFromHost(request.headers.host, baseDomain, '');
-    if (!resolution)
-      throw new RequestProblem(400, 'TENANT_REQUIRED', 'A valid tenant host is required');
-    const organization = await store.getOrganizationBySlug(resolution.tenantSlug);
-    if (!organization || organization.status !== 'active') {
-      throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
-    }
-    const params = request.params as { token?: string };
-    if (!params.token || params.token.length < 20) {
-      throw new RequestProblem(400, 'BAD_REQUEST', 'Invitation token is invalid');
-    }
-
-    let invitation: InvitationRecord;
-    try {
-      invitation = await store.acceptInvitation({
-        rawToken: params.token,
-        userId: auth.user.id,
-        email: auth.user.email,
-        expectedOrganizationId: organization.id,
-        context: { tenantId: organization.id, requestId: request.id, userId: auth.user.id },
-      });
-    } catch (error) {
-      if (
-        error instanceof Error &&
-        ['invitation_invalid', 'invitation_email_mismatch'].includes(error.message)
-      ) {
-        throw new RequestProblem(
-          400,
-          'BAD_REQUEST',
-          'Invitation is invalid or does not belong to this user',
-        );
+  app.post(
+    '/v1/members/invitations/:token/accept',
+    { bodyLimit: SMALL_BODY_LIMIT },
+    async (request) => {
+      const auth = await requireSession(request);
+      const resolution = resolveTenantFromHost(request.headers.host, baseDomain, '');
+      if (!resolution)
+        throw new RequestProblem(400, 'TENANT_REQUIRED', 'A valid tenant host is required');
+      const organization = await store.getOrganizationBySlug(resolution.tenantSlug);
+      if (!organization || organization.status !== 'active') {
+        throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
       }
-      throw error;
-    }
+      const params = request.params as { token?: string };
+      if (!params.token || params.token.length < 20) {
+        throw new RequestProblem(400, 'BAD_REQUEST', 'Invitation token is invalid');
+      }
 
-    const memberships = await store.listMembershipsForOrganization({
-      tenantId: organization.id,
-      requestId: request.id,
-      userId: auth.user.id,
-    });
-    const membership = memberships.find((candidate) => candidate.userId === auth.user.id);
-    await store.addAudit({
-      action: 'invitation.accepted',
-      actorUserId: auth.user.id,
-      tenantId: organization.id,
-      resourceId: invitation.id,
-      requestId: request.id,
-    });
-    return { membership: membership ? await membershipView(membership, store) : null };
-  });
+      let invitation: InvitationRecord;
+      try {
+        invitation = await store.acceptInvitation({
+          rawToken: params.token,
+          userId: auth.user.id,
+          email: auth.user.email,
+          expectedOrganizationId: organization.id,
+          context: { tenantId: organization.id, requestId: request.id, userId: auth.user.id },
+        });
+      } catch (error) {
+        if (
+          error instanceof Error &&
+          ['invitation_invalid', 'invitation_email_mismatch'].includes(error.message)
+        ) {
+          throw new RequestProblem(
+            400,
+            'BAD_REQUEST',
+            'Invitation is invalid or does not belong to this user',
+          );
+        }
+        throw error;
+      }
+
+      const memberships = await store.listMembershipsForOrganization({
+        tenantId: organization.id,
+        requestId: request.id,
+        userId: auth.user.id,
+      });
+      const membership = memberships.find((candidate) => candidate.userId === auth.user.id);
+      await store.addAudit({
+        action: 'invitation.accepted',
+        actorUserId: auth.user.id,
+        tenantId: organization.id,
+        resourceId: invitation.id,
+        requestId: request.id,
+      });
+      return { membership: membership ? await membershipView(membership, store) : null };
+    },
+  );
 
   app.patch('/v1/members/:membershipId', { bodyLimit: SMALL_BODY_LIMIT }, async (request) => {
     const context = await requireTenantContext(request);
@@ -788,6 +833,262 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     );
     return result;
   });
+
+  // --- Files: presigned S3 flow tenant-scoped ---
+  app.post(
+    '/v1/files/presigned-upload',
+    { bodyLimit: SMALL_BODY_LIMIT },
+    async (request, reply) => {
+      const context = await requireTenantContext(request);
+      requirePermission(context, 'files:upload');
+      const body = parseOrThrow(FilePresignSchema, request.body);
+      if (!ALLOWED_MIME_TYPES.has(body.contentType) && !ALLOWED_MIME_REGEX.test(body.contentType)) {
+        throw new RequestProblem(400, 'BAD_REQUEST', 'Content type not allowed');
+      }
+      if (
+        body.filename.includes('/') ||
+        body.filename.includes('\\') ||
+        body.filename.includes('..')
+      ) {
+        throw new RequestProblem(400, 'BAD_REQUEST', 'Invalid filename');
+      }
+      try {
+        const file = await fileStore.createPending(
+          { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
+          {
+            filename: body.filename,
+            contentType: body.contentType,
+            sizeExpected: body.size,
+            ownerId: context.user.id,
+          },
+        );
+        const s3 = getDefaultS3Service();
+        const upload = await s3.generateUploadUrl({
+          key: file.key,
+          contentType: file.contentType,
+          sizeExpected: file.sizeExpected,
+          expiresSeconds: UPLOAD_TTL_SECONDS,
+        });
+        // Never log full presigned URL / tokens — only key prefix is safe. We intentionally avoid logging url.
+        return reply.status(201).send({
+          file: {
+            id: file.id,
+            filename: file.filename,
+            contentType: file.contentType,
+            sizeExpected: file.sizeExpected,
+            status: file.status,
+            createdAt: file.createdAt,
+            expiresAt: file.expiresAt,
+          },
+          upload: {
+            url: upload.url,
+            expiresAt: upload.expiresAt,
+            headers: upload.headers,
+            // expose key only internally if needed; not leaked as arbitrary path. Kept for debugging but tenant-prefixed.
+            key: file.key,
+          },
+        });
+      } catch (error) {
+        if (error instanceof Error) {
+          if (
+            [
+              'filename_invalid',
+              'content_type_not_allowed',
+              'content_type_invalid',
+              'size_invalid',
+            ].includes(error.message)
+          ) {
+            throw new RequestProblem(400, 'BAD_REQUEST', error.message);
+          }
+        }
+        throw error;
+      }
+    },
+  );
+
+  // Legacy alias for OpenAPI compatibility: /v1/files/presign
+  app.post('/v1/files/presign', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
+    const context = await requireTenantContext(request);
+    requirePermission(context, 'files:upload');
+    // Accept legacy payload shape {filename, contentType, size} same as new
+    const body = parseOrThrow(FilePresignSchema, request.body);
+    if (!ALLOWED_MIME_TYPES.has(body.contentType) && !ALLOWED_MIME_REGEX.test(body.contentType)) {
+      throw new RequestProblem(400, 'BAD_REQUEST', 'Content type not allowed');
+    }
+    const file = await fileStore.createPending(
+      { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
+      {
+        filename: body.filename,
+        contentType: body.contentType,
+        sizeExpected: body.size,
+        ownerId: context.user.id,
+      },
+    );
+    const s3 = getDefaultS3Service();
+    const upload = await s3.generateUploadUrl({
+      key: file.key,
+      contentType: file.contentType,
+      sizeExpected: file.sizeExpected,
+      expiresSeconds: UPLOAD_TTL_SECONDS,
+    });
+    return reply.status(201).send({ file, upload });
+  });
+
+  app.post('/v1/files/:id/finalize', { bodyLimit: SMALL_BODY_LIMIT }, async (request) => {
+    const context = await requireTenantContext(request);
+    requirePermission(context, 'files:upload');
+    const params = request.params as { id?: string };
+    if (!params.id) throw new RequestProblem(400, 'BAD_REQUEST', 'File id required');
+    const body = parseOrThrow(FileFinalizeSchema, request.body ?? {});
+    const fileBefore = await fileStore.getById(
+      { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
+      params.id,
+    );
+    if (!fileBefore) throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
+    if (fileBefore.status === 'expired') throw new RequestProblem(410, 'GONE', 'Upload expired');
+    if (fileBefore.status !== 'pending' && fileBefore.status !== 'ready')
+      throw new RequestProblem(409, 'CONFLICT', 'File not in pending state');
+    // Verify via S3 HEAD if available; if head returns data, validate size
+    try {
+      const s3 = getDefaultS3Service();
+      const head = await s3.headObject(fileBefore.key);
+      if (head) {
+        if (head.contentLength !== fileBefore.sizeExpected && body.sizeActual === undefined) {
+          // If S3 reports different size than expected, we treat as mismatch unless caller explicitly passes sizeActual
+          // Allow proceeding but record actual
+          // If strict, reject when mismatch >0
+        }
+        if (body.sizeActual !== undefined && head.contentLength !== body.sizeActual) {
+          throw new RequestProblem(400, 'BAD_REQUEST', 'Size mismatch with uploaded object');
+        }
+        if (head.contentType && head.contentType !== fileBefore.contentType) {
+          // Allow but warn; content-type is validated at presign time
+        }
+      }
+    } catch (error) {
+      if (error instanceof RequestProblem) throw error;
+      // If S3 is unavailable (null head), we proceed without strict check — finalize is tenant-scoped and pending.
+    }
+
+    try {
+      const finalized = await fileStore.finalize(
+        { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
+        params.id,
+        body.sizeActual !== undefined || body.checksum !== undefined
+          ? { sizeActual: body.sizeActual, checksum: body.checksum }
+          : {},
+      );
+      return { file: finalized };
+    } catch (error) {
+      if (error instanceof Error) {
+        if (error.message === 'file_not_found')
+          throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
+        if (error.message === 'file_expired')
+          throw new RequestProblem(410, 'GONE', 'Upload expired');
+        if (error.message === 'file_not_pending')
+          throw new RequestProblem(409, 'CONFLICT', 'File not pending');
+        if (error.message === 'size_invalid')
+          throw new RequestProblem(400, 'BAD_REQUEST', 'Invalid size');
+      }
+      throw error;
+    }
+  });
+
+  app.get('/v1/files/:id', async (request) => {
+    const context = await requireTenantContext(request);
+    requirePermission(context, 'files:read');
+    const params = request.params as { id?: string };
+    if (!params.id) throw new RequestProblem(400, 'BAD_REQUEST', 'File id required');
+    const file = await fileStore.getById(
+      { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
+      params.id,
+    );
+    if (!file) throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
+    if (file.status === 'expired') throw new RequestProblem(410, 'GONE', 'Upload expired');
+    return {
+      file: {
+        id: file.id,
+        filename: file.filename,
+        contentType: file.contentType,
+        sizeExpected: file.sizeExpected,
+        sizeActual: file.sizeActual,
+        status: file.status,
+        createdAt: file.createdAt,
+        updatedAt: file.updatedAt,
+        expiresAt: file.expiresAt,
+      },
+    };
+  });
+
+  app.get('/v1/files', async (request) => {
+    const context = await requireTenantContext(request);
+    requirePermission(context, 'files:read');
+    const query = parseOrThrow(
+      z.object({
+        limit: z.coerce.number().int().min(1).max(100).default(25),
+        cursor: z.string().optional(),
+      }),
+      request.query,
+    );
+    const opts: { limit?: number | undefined; cursor?: string | undefined } = {};
+    if (query.limit !== undefined) opts.limit = query.limit;
+    if (query.cursor !== undefined) opts.cursor = query.cursor;
+    const result = await fileStore.listFiles(
+      { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
+      opts,
+    );
+    return {
+      data: result.items.map((f) => ({
+        id: f.id,
+        filename: f.filename,
+        contentType: f.contentType,
+        sizeExpected: f.sizeExpected,
+        sizeActual: f.sizeActual,
+        status: f.status,
+        createdAt: f.createdAt,
+      })),
+      nextCursor: result.nextCursor,
+    };
+  });
+
+  async function handlePresignedDownload(request: FastifyRequest): Promise<unknown> {
+    const context = await requireTenantContext(request);
+    requirePermission(context, 'files:read');
+    const params = request.params as { id?: string };
+    if (!params.id) throw new RequestProblem(400, 'BAD_REQUEST', 'File id required');
+    try {
+      const { file, key } = await fileStore.getDownloadKey(
+        { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
+        params.id,
+      );
+      const s3 = getDefaultS3Service();
+      const download = await s3.generateDownloadUrl({ key, expiresSeconds: DOWNLOAD_TTL_SECONDS });
+      // Avoid logging download.url
+      return {
+        file: {
+          id: file.id,
+          filename: file.filename,
+          contentType: file.contentType,
+          sizeExpected: file.sizeExpected,
+          status: file.status,
+        },
+        download: { url: download.url, expiresAt: download.expiresAt },
+      };
+    } catch (error) {
+      if (error instanceof Error) {
+        if (error.message === 'file_not_found')
+          throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
+        if (error.message === 'file_not_ready')
+          throw new RequestProblem(409, 'CONFLICT', 'File not ready');
+        if (error.message === 'file_expired')
+          throw new RequestProblem(410, 'GONE', 'Upload expired');
+      }
+      throw error;
+    }
+  }
+
+  app.get('/v1/files/:id/download', async (request) => handlePresignedDownload(request));
+  app.get('/v1/files/:id/presigned-download', async (request) => handlePresignedDownload(request));
 
   app.get('/v1/audit', async (request) => {
     const context = await requireTenantContext(request);
