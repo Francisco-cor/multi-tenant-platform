@@ -524,6 +524,268 @@ paths:
           description: Replay job accepted.
         '403':
           $ref: '#/components/responses/Forbidden'
+  /v1/webhooks/endpoints:
+    get:
+      tags: [Webhooks]
+      operationId: listWebhookEndpoints
+      security: [{ oidc: [] }]
+      responses:
+        '200':
+          description: Endpoints tenant-scoped.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpointPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Webhooks]
+      operationId: createWebhookEndpoint
+      security: [{ oidc: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWebhookEndpointRequest'
+      responses:
+        '201':
+          description: Endpoint created, secret returned once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpointResponse'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /v1/webhooks/endpoints/{endpointId}:
+    get:
+      tags: [Webhooks]
+      operationId: getWebhookEndpoint
+      security: [{ oidc: [] }]
+      parameters:
+        - name: endpointId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Endpoint tenant-scoped.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpointResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Webhooks]
+      operationId: updateWebhookEndpoint
+      security: [{ oidc: [] }]
+      parameters:
+        - name: endpointId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateWebhookEndpointRequest'
+      responses:
+        '200':
+          description: Endpoint updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpointResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Webhooks]
+      operationId: deleteWebhookEndpoint
+      security: [{ oidc: [] }]
+      parameters:
+        - name: endpointId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Endpoint deleted.
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/webhooks/deliveries:
+    get:
+      tags: [Webhooks]
+      operationId: listWebhookDeliveries
+      security: [{ oidc: [] }]
+      parameters:
+        - name: endpointId
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Deliveries tenant-scoped.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookDeliveryPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/webhooks/deliveries/{deliveryId}:
+    get:
+      tags: [Webhooks]
+      operationId: getWebhookDelivery
+      security: [{ oidc: [] }]
+      parameters:
+        - name: deliveryId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Delivery tenant-scoped.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookDelivery'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/webhooks/deliveries/{deliveryId}/replay:
+    post:
+      tags: [Webhooks]
+      operationId: replayWebhookDelivery
+      security: [{ oidc: [] }]
+      parameters:
+        - name: deliveryId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Delivery replayed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookDelivery'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/webhooks/inbound:
+    post:
+      tags: [Webhooks]
+      parameters:
+        - name: X-Webhook-Timestamp
+          in: header
+          required: true
+          schema: { type: string }
+        - name: X-Webhook-Signature
+          in: header
+          required: true
+          schema: { type: string }
+        - name: X-Tenant-Id
+          in: header
+          required: false
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InboundWebhookRequest'
+      responses:
+        '200':
+          description: Inbound webhook processed or already_processed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InboundWebhookResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /v1/api-keys:
+    get:
+      tags: [Webhooks]
+      operationId: listApiKeys
+      security: [{ oidc: [] }]
+      responses:
+        '200':
+          description: Api keys tenant-scoped.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Webhooks]
+      operationId: createApiKey
+      security: [{ oidc: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateApiKeyRequest'
+      responses:
+        '201':
+          description: Api key created, raw returned once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/api-keys/{apiKeyId}:
+    delete:
+      tags: [Webhooks]
+      operationId: revokeApiKey
+      security: [{ oidc: [] }]
+      parameters:
+        - name: apiKeyId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Api key revoked.
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/automations:
+    get:
+      tags: [Webhooks]
+      operationId: listAutomations
+      security: [{ oidc: [] }]
+      responses:
+        '200':
+          description: Automations tenant-scoped.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AutomationPage'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Webhooks]
+      operationId: createAutomation
+      security: [{ oidc: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateAutomationRequest'
+      responses:
+        '201':
+          description: Automation created (versioned, no eval).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Automation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
 components:
   securitySchemes:
     oidc:
@@ -807,3 +1069,117 @@ components:
         data: { type: array, items: {} }
         nextCursor: { type: string, nullable: true }
         hasMore: { type: boolean }
+    WebhookEndpoint:
+      type: object
+      required: [id, url, events, status, version]
+      properties:
+        id: { type: string, format: uuid }
+        url: { type: string, format: uri, pattern: '^https://' }
+        events: { type: array, items: { type: string } }
+        status: { type: string, enum: [active, disabled, dead_letter] }
+        version: { type: integer, minimum: 1 }
+    CreateWebhookEndpointRequest:
+      type: object
+      required: [url, events]
+      properties:
+        url: { type: string, format: uri, pattern: '^https://' }
+        secret: { type: string, minLength: 8, maxLength: 128 }
+        events: { type: array, items: { type: string }, minItems: 1 }
+    UpdateWebhookEndpointRequest:
+      type: object
+      properties:
+        url: { type: string, format: uri, pattern: '^https://' }
+        events: { type: array, items: { type: string }, minItems: 1 }
+        status: { type: string, enum: [active, disabled, dead_letter] }
+    WebhookEndpointResponse:
+      type: object
+      required: [endpoint]
+      properties:
+        endpoint: { $ref: '#/components/schemas/WebhookEndpoint' }
+        secret: { type: string }
+    WebhookEndpointPage:
+      type: object
+      required: [data]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/WebhookEndpoint' } }
+    WebhookDelivery:
+      type: object
+      required: [id, endpointId, eventId, eventType, status, attempts]
+      properties:
+        id: { type: string, format: uuid }
+        endpointId: { type: string, format: uuid }
+        eventId: { type: string }
+        eventType: { type: string }
+        payload: { type: object, additionalProperties: true }
+        status: { type: string, enum: [pending, retrying, delivered, failed, dead_letter, disabled] }
+        attempts: { type: integer, minimum: 0 }
+        lastError: { type: string, nullable: true }
+        nextAttemptAt: { type: integer }
+    WebhookDeliveryPage:
+      type: object
+      required: [data]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/WebhookDelivery' } }
+    InboundWebhookRequest:
+      type: object
+      required: [eventId]
+      properties:
+        eventId: { type: string, minLength: 8, maxLength: 128 }
+        source: { type: string }
+        payload: { type: object, additionalProperties: true }
+        tenantId: { type: string }
+    InboundWebhookResponse:
+      type: object
+      required: [status, eventId]
+      properties:
+        status: { type: string, enum: [processed, already_processed] }
+        eventId: { type: string }
+    ApiKey:
+      type: object
+      required: [id, prefix, name, scopes]
+      properties:
+        id: { type: string, format: uuid }
+        prefix: { type: string }
+        name: { type: string }
+        scopes: { type: array, items: { type: string } }
+        expiresAt: { type: integer, nullable: true }
+    CreateApiKeyRequest:
+      type: object
+      required: [name, scopes]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        scopes: { type: array, items: { type: string }, minItems: 1 }
+        expiresInMs: { type: integer, minimum: 60000 }
+    ApiKeyResponse:
+      type: object
+      required: [apiKey, raw]
+      properties:
+        apiKey: { $ref: '#/components/schemas/ApiKey' }
+        raw: { type: string }
+    ApiKeyPage:
+      type: object
+      required: [data]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/ApiKey' } }
+    Automation:
+      type: object
+      required: [id, trigger, action, version, enabled]
+      properties:
+        id: { type: string, format: uuid }
+        trigger: { type: string, enum: [order.created, order.paid, order.failed, payment.paid, payment.failed, file.ready, inventory.reserved] }
+        action: { type: object, additionalProperties: true }
+        version: { type: integer, minimum: 1 }
+        enabled: { type: boolean }
+    CreateAutomationRequest:
+      type: object
+      required: [trigger, action]
+      properties:
+        trigger: { type: string, enum: [order.created, order.paid, order.failed, payment.paid, payment.failed, file.ready, inventory.reserved] }
+        action: { type: object, properties: { type: { type: string, enum: [webhook, log, noop] }, params: { type: object, additionalProperties: true } }, required: [type] }
+        version: { type: integer, minimum: 1 }
+        enabled: { type: boolean }
+    AutomationPage:
+      type: object
+      required: [data]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/Automation' } }

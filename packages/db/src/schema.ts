@@ -349,6 +349,128 @@ export const inboundPaymentEvents = pgTable(
   ],
 );
 
+export const webhookEndpoints = pgTable(
+  'webhook_endpoints',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    url: text('url').notNull(),
+    secretHash: text('secret_hash').notNull(),
+    events: text('events').notNull(),
+    status: text('status').notNull().default('active'),
+    version: integer('version').notNull().default(1),
+    failureCount: integer('failure_count').notNull().default(0),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+    lastDeliveryAt: timestamp('last_delivery_at', { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex('webhook_url_tenant_unique').on(table.tenantId, table.url),
+    index('webhook_tenant_status_idx').on(table.tenantId, table.status),
+    index('webhook_tenant_created_idx').on(table.tenantId, table.createdAt),
+  ],
+);
+
+export const webhookDeliveries = pgTable(
+  'webhook_deliveries',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    endpointId: uuid('endpoint_id')
+      .notNull()
+      .references(() => webhookEndpoints.id, { onDelete: 'cascade' }),
+    eventId: text('event_id').notNull(),
+    eventType: text('event_type').notNull(),
+    payload: text('payload').notNull(),
+    status: text('status').notNull().default('pending'),
+    attempts: integer('attempts').notNull().default(0),
+    lastError: text('last_error'),
+    nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+    deliveredAt: timestamp('delivered_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('webhook_delivery_endpoint_event_unique').on(table.endpointId, table.eventId),
+    index('webhook_deliveries_tenant_status_next_idx')
+      .on(table.tenantId, table.status, table.nextAttemptAt)
+      .where(sql`status in ('pending','retrying')`),
+    index('webhook_deliveries_endpoint_idx').on(table.tenantId, table.endpointId, table.createdAt),
+    index('webhook_deliveries_event_idx').on(table.tenantId, table.eventId),
+  ],
+);
+
+export const inboundWebhookEvents = pgTable(
+  'inbound_webhook_events',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    eventId: text('event_id').notNull(),
+    source: text('source').notNull().default('external'),
+    payload: text('payload').notNull(),
+    processedAt: timestamp('processed_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('inbound_webhook_tenant_event_unique').on(table.tenantId, table.eventId),
+    index('inbound_webhook_tenant_created_idx').on(table.tenantId, table.createdAt),
+  ],
+);
+
+export const apiKeys = pgTable(
+  'api_keys',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    prefix: text('prefix').notNull(),
+    hash: text('hash').notNull(),
+    scopes: text('scopes').notNull(),
+    name: text('name').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('api_key_prefix_unique').on(table.prefix),
+    index('api_keys_tenant_prefix_idx').on(table.tenantId, table.prefix),
+    index('api_keys_tenant_created_idx').on(table.tenantId, table.createdAt),
+  ],
+);
+
+export const automations = pgTable(
+  'automations',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    trigger: text('trigger').notNull(),
+    action: text('action').notNull(),
+    version: integer('version').notNull().default(1),
+    enabled: boolean('enabled').notNull().default(true),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('automations_tenant_trigger_idx')
+      .on(table.tenantId, table.trigger)
+      .where(sql`enabled = true`),
+    index('automations_tenant_created_idx').on(table.tenantId, table.createdAt),
+  ],
+);
+
 export const schema = {
   users,
   organizations,
@@ -365,6 +487,11 @@ export const schema = {
   orders,
   paymentAttempts,
   inboundPaymentEvents,
+  webhookEndpoints,
+  webhookDeliveries,
+  inboundWebhookEvents,
+  apiKeys,
+  automations,
 };
 
 export type Organization = typeof organizations.$inferSelect;

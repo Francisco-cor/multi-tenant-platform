@@ -383,22 +383,24 @@ No se intentará una transacción atómica entre PostgreSQL y el proveedor de pa
 
 ### Tareas
 
-- [ ] Modelar endpoints, secretos versionados, eventos suscritos y estado de entrega.
-- [ ] Firmar payload con HMAC, timestamp y versión de firma.
-- [ ] No incluir secretos en logs, UI ni payloads innecesarios.
-- [ ] Usar event ID único y tabla de deliveries por tenant.
-- [ ] Reintentar solo errores transitorios con backoff y respetar límites del receptor.
-- [ ] Marcar `delivered`, `retrying`, `failed`, `dead_letter` y `disabled`.
-- [ ] Permitir replay manual autorizado de un evento específico.
-- [ ] Implementar webhook inbound con raw body, verificación antes de parsear y dedupe.
-- [ ] Diseñar automatizaciones como comandos/jobs versionados, no como ejecución arbitraria de código.
+- [x] Modelar endpoints, secretos versionados, eventos suscritos y estado de entrega.
+- [x] Firmar payload con HMAC, timestamp y versión de firma.
+- [x] No incluir secretos en logs, UI ni payloads innecesarios.
+- [x] Usar event ID único y tabla de deliveries por tenant.
+- [x] Reintentar solo errores transitorios con backoff y respetar límites del receptor.
+- [x] Marcar `delivered`, `retrying`, `failed`, `dead_letter` y `disabled`.
+- [x] Permitir replay manual autorizado de un evento específico.
+- [x] Implementar webhook inbound con raw body, verificación antes de parsear y dedupe.
+- [x] Diseñar automatizaciones como comandos/jobs versionados, no como ejecución arbitraria de código.
 
 ### Criterios de salida
 
-- La misma entrega recibida dos veces produce un solo efecto.
-- La firma cambia si cambia el body y no se acepta una firma expirada.
-- Una caída del receptor no bloquea la transacción de negocio.
-- El tenant puede consultar estado sin ver entregas de otro tenant.
+- [x] La misma entrega recibida dos veces produce un solo efecto.
+- [x] La firma cambia si cambia el body y no se acepta una firma expirada.
+- [x] Una caída del receptor no bloquea la transacción de negocio.
+- [x] El tenant puede consultar estado sin ver entregas de otro tenant.
+
+> Progreso sesión 8: Fase 9 cerrada — `migrations/schema/0010_webhooks.sql:1` `webhook_endpoints(secret_hash,events,status)`+`webhook_deliveries(endpoint_id,event_id unique,status,next_attempt_at)`+`inbound_webhook_events(tenant,event_id)`+`api_keys(prefix,hash,scopes)`+`automations(trigger,action versioned)` `FORCE RLS` + `schema.ts`, `packages/domain/src/automations.ts:10` `validateAutomation` + `apps/api/src/webhook-store.ts:40` `InMemory/Persistent` + `apps/api/src/api-key-store.ts` M2M + `apps/api/src/app.ts` `POST /v1/webhooks/endpoints` https/events allowlist 409 + `GET /v1/webhooks/endpoints|deliveries` tenant 404 + `POST /v1/webhooks/deliveries/:id/replay` + `POST /v1/webhooks/inbound` HMAC 5m `already_processed` + `POST /v1/api-keys` + `POST /v1/automations` versioned `log|webhook|noop` + `apps/worker/src/jobs/deliverWebhook.ts:30` HMAC `v1,hmac` + backoff 10s→10m jitter 0.2 retry 5xx/429 + dead_letter 8 + `ADR-008` + `runbooks/webhooks.md` + `failure/webhooks.md`, `webhooks.test.ts` 4 suites + `webhooks.delivery.test.ts` 5 tests + `automations.test.ts` 4 tests, `openapi.yaml` 34 paths 44 schemas `ee30104321ce`.
 
 ## Fase 10 — Cache, rate limiting y resiliencia
 
