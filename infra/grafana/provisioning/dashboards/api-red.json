@@ -1,0 +1,92 @@
+{
+  "title": "API RED — Rate/Errors/Duration",
+  "uid": "api-red",
+  "tags": ["api", "red"],
+  "timezone": "browser",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Request Rate (req/s) by route",
+      "type": "timeseries",
+      "targets": [{ "expr": "sum(rate(http_requests_total[1m])) by (route)" }],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 2,
+      "title": "Error Rate — 5xx / total",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum(rate(http_errors_total[5m])) / sum(rate(http_requests_total[5m]))",
+          "legendFormat": "5xx rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "yellow", "value": 0.01 },
+              { "color": "red", "value": 0.05 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "P95 Duration by route",
+      "type": "timeseries",
+      "targets": [{ "expr": "http_request_duration_p95_seconds" }],
+      "fieldConfig": { "defaults": { "unit": "s" } },
+      "description": "Alert: P95 /v1/orders >0.3s (Phase 12 criterion)"
+    },
+    {
+      "id": 4,
+      "title": "P95 vs SLO 300ms orders",
+      "type": "stat",
+      "targets": [{ "expr": "http_request_duration_p95_seconds{route=\"/v1/orders\"}" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "yellow", "value": 0.3 },
+              { "color": "red", "value": 0.5 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Cache HIT/MISS",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "rate(cache_hits_total[1m])", "legendFormat": "hits" },
+        { "expr": "rate(cache_misses_total[1m])", "legendFormat": "misses" },
+        { "expr": "rate(cache_stampede_fallback_total[1m])", "legendFormat": "stampede fallback" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Rate Limit Hits",
+      "type": "timeseries",
+      "targets": [{ "expr": "sum(rate(rate_limit_hits_total[5m])) by (key)" }]
+    },
+    {
+      "id": 7,
+      "title": "Circuit Breaker State (0 CLOSED 1 HALF 2 OPEN)",
+      "type": "timeseries",
+      "targets": [{ "expr": "circuit_state" }]
+    },
+    {
+      "id": 8,
+      "title": "Audit Events rate",
+      "type": "timeseries",
+      "targets": [{ "expr": "sum(rate(audit_events_total[1m])) by (action)" }]
+    }
+  ]
+}

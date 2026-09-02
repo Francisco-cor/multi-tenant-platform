@@ -1,11 +1,16 @@
 /**
- * Simple in-memory metrics for outbox and queues.
- * In production these would be Prometheus counters/gauges/histograms via prom-client
- * and exposed on /metrics. For now we keep counters that can be asserted in tests
- * and scraped by Grafana via a /metrics endpoint stub.
+ * In-memory metrics with Prometheus exposition.
+ * RED (Rate/Errors/Duration) + business metrics.
+ * Labels are low-cardinality: method, route, status. Tenant hashed not used as label to avoid cardinality explosion.
  */
 
-export interface Metrics {
+export interface HttpMetric {
+  count: number;
+  errors: number;
+  durations: number[]; // ms
+}
+
+export interface MetricsSnapshot {
   outboxLagSeconds: number;
   outboxPending: number;
   jobDurationMs: Map<string, number[]>;
@@ -21,6 +26,7 @@ export interface Metrics {
   circuitOpens: Map<string, number>;
   circuitRejects: Map<string, number>;
   circuitState: Map<string, string>;
+  httpRequests: Map<string, HttpMetric>;
 }
 
 class InMemoryMetrics {
@@ -39,6 +45,12 @@ class InMemoryMetrics {
   public circuitOpens = new Map<string, number>();
   public circuitRejects = new Map<string, number>();
   public circuitState = new Map<string, string>();
+  // RED metrics: key = `${method}:${route}:${status}`
+  public httpRequests = new Map<string, HttpMetric>();
+  // tenant isolation violations (should always be 0)
+  public isolationViolations = 0;
+  // audit events
+  public auditEvents = new Map<string, number>();
 
   recordOutboxLag(lagSeconds: number, pending: number): void {
     this.outboxLagSeconds = lagSeconds;
@@ -100,6 +112,41 @@ class InMemoryMetrics {
     this.circuitState.set(name, state);
   }
 
+  recordHttpRequest(method: string, route: string, statusCode: number, durationMs: number): void {
+    const statusClass = `${Math.floor(statusCode / 100)}xx`;
+    const key = `${method}:${route}:${statusCode}`;
+    const existing = this.httpRequests.get(key) ?? {
+      count: 0,
+      errors: 0,
+      durations: [],
+    };
+    existing.count += 1;
+    if (statusCode >= 500) existing.errors += 1;
+    existing.durations.push(durationMs);
+    if (existing.durations.length > 1000) existing.durations.shift();
+    this.httpRequests.set(key, existing);
+    // also aggregate by class for alerting
+    const classKey = `${method}:${route}:${statusClass}`;
+    if (classKey !== key) {
+      const classMetric = this.httpRequests.get(classKey) ?? {
+        count: 0,
+        errors: 0,
+        durations: [],
+      };
+      classMetric.count += 1;
+      if (statusCode >= 500) classMetric.errors += 1;
+      this.httpRequests.set(classKey, classMetric);
+    }
+  }
+
+  recordIsolationViolation(): void {
+    this.isolationViolations += 1;
+  }
+
+  recordAudit(action: string): void {
+    this.auditEvents.set(action, (this.auditEvents.get(action) ?? 0) + 1);
+  }
+
   p95(queue: string): number {
     const arr = this.jobDurationMs.get(queue) ?? [];
     if (arr.length === 0) return 0;
@@ -108,8 +155,56 @@ class InMemoryMetrics {
     return sorted[idx] ?? 0;
   }
 
+  httpP95(route: string): number {
+    // aggregate durations across methods/status for route
+    const all: number[] = [];
+    for (const [k, v] of this.httpRequests) {
+      if (k.includes(`:${route}:`)) all.push(...v.durations);
+    }
+    if (all.length === 0) return 0;
+    const sorted = [...all].sort((a, b) => a - b);
+    const idx = Math.floor(0.95 * (sorted.length - 1));
+    return sorted[idx] ?? 0;
+  }
+
   toPrometheus(): string {
     const lines: string[] = [];
+    // RED
+    lines.push(`# HELP http_requests_total Total HTTP requests`);
+    lines.push(`# TYPE http_requests_total counter`);
+    for (const [k, v] of this.httpRequests) {
+      const [method, route, status] = k.split(':');
+      // only expose detailed status, not class
+      if (status?.endsWith('xx')) continue;
+      lines.push(
+        `http_requests_total{method="${method}",route="${route}",status="${status}"} ${v.count}`,
+      );
+    }
+    lines.push(`# HELP http_errors_total Total HTTP 5xx`);
+    lines.push(`# TYPE http_errors_total counter`);
+    for (const [k, v] of this.httpRequests) {
+      const [method, route, status] = k.split(':');
+      if (status?.endsWith('xx')) continue;
+      if (v.errors === 0) continue;
+      lines.push(
+        `http_errors_total{method="${method}",route="${route}",status="${status}"} ${v.errors}`,
+      );
+    }
+    lines.push(`# HELP http_request_duration_seconds HTTP request duration`);
+    lines.push(`# TYPE http_request_duration_seconds histogram`);
+    // Expose p95 as gauge
+    lines.push(`# HELP http_request_duration_p95_seconds P95 duration per route`);
+    lines.push(`# TYPE http_request_duration_p95_seconds gauge`);
+    const routes = new Set<string>();
+    for (const k of this.httpRequests.keys()) {
+      const [, route] = k.split(':');
+      if (route) routes.add(route);
+    }
+    for (const route of routes) {
+      const p95 = this.httpP95(route);
+      lines.push(`http_request_duration_p95_seconds{route="${route}"} ${(p95 / 1000).toFixed(3)}`);
+    }
+    // existing business metrics
     lines.push(`# HELP outbox_lag_seconds Age of oldest pending outbox event`);
     lines.push(`# TYPE outbox_lag_seconds gauge`);
     lines.push(`outbox_lag_seconds ${this.outboxLagSeconds}`);
@@ -125,8 +220,15 @@ class InMemoryMetrics {
     lines.push(`# HELP payment_pending payment_attempts in pending state`);
     lines.push(`# TYPE payment_pending gauge`);
     lines.push(`payment_pending ${this.paymentPending}`);
+    lines.push(`# HELP isolation_violations_total tenant isolation violations (must be 0)`);
+    lines.push(`# TYPE isolation_violations_total counter`);
+    lines.push(`isolation_violations_total ${this.isolationViolations}`);
     for (const [q, c] of this.jobRetries) {
       lines.push(`job_retries_total{queue="${q}"} ${c}`);
+    }
+    for (const [q] of this.jobDurationMs) {
+      const p95 = this.p95(q);
+      lines.push(`job_duration_p95_seconds{queue="${q}"} ${(p95 / 1000).toFixed(3)}`);
     }
     lines.push(`# HELP cache_hits_total cache hits`);
     lines.push(`# TYPE cache_hits_total counter`);
@@ -153,6 +255,9 @@ class InMemoryMetrics {
       const v = s === 'CLOSED' ? 0 : s === 'HALF_OPEN' ? 1 : 2;
       lines.push(`circuit_state{breaker="${k}"} ${v}`);
     }
+    for (const [action, c] of this.auditEvents) {
+      lines.push(`audit_events_total{action="${action}"} ${c}`);
+    }
     return lines.join('\n');
   }
 
@@ -172,6 +277,30 @@ class InMemoryMetrics {
     this.circuitOpens.clear();
     this.circuitRejects.clear();
     this.circuitState.clear();
+    this.httpRequests.clear();
+    this.isolationViolations = 0;
+    this.auditEvents.clear();
+  }
+
+  snapshot(): MetricsSnapshot {
+    return {
+      outboxLagSeconds: this.outboxLagSeconds,
+      outboxPending: this.outboxPending,
+      jobDurationMs: new Map(this.jobDurationMs),
+      jobRetries: new Map(this.jobRetries),
+      dlqSize: this.dlqSize,
+      paymentUnknown: this.paymentUnknown,
+      paymentPending: this.paymentPending,
+      cacheHits: this.cacheHits,
+      cacheMisses: this.cacheMisses,
+      cacheInvalidations: this.cacheInvalidations,
+      cacheStampedeFallbacks: this.cacheStampedeFallbacks,
+      rateLimitHits: new Map(this.rateLimitHits),
+      circuitOpens: new Map(this.circuitOpens),
+      circuitRejects: new Map(this.circuitRejects),
+      circuitState: new Map(this.circuitState),
+      httpRequests: new Map(this.httpRequests),
+    };
   }
 }
 

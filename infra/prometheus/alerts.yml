@@ -1,0 +1,142 @@
+groups:
+  - name: api
+    interval: 30s
+    rules:
+      - alert: ErrorRateHigh
+        expr: |
+          (
+            sum(rate(http_errors_total[5m]))
+            /
+            sum(rate(http_requests_total[5m]))
+          ) > 0.01
+        for: 5m
+        labels:
+          severity: critical
+          owner: platform-api
+          runbook: docs/runbooks/observability.md#error-rate
+        annotations:
+          summary: 'API 5xx >1% for 5m'
+          description: 'http_errors_total / http_requests_total >0.01. Check logs with traceId, DLQ, outbox lag.'
+
+      - alert: P95High
+        expr: http_request_duration_p95_seconds{route="/v1/orders"} > 0.3
+        for: 5m
+        labels:
+          severity: warning
+          owner: platform-api
+          runbook: docs/runbooks/observability.md#p95
+        annotations:
+          summary: 'P95 /v1/orders >300ms'
+          description: 'Check DB pool saturation, cache misses, Redis.'
+
+      - alert: PoolSaturation
+        expr: pg_stat_activity_count{state="active"} > 45
+        for: 5m
+        labels:
+          severity: warning
+          owner: platform-db
+        annotations:
+          summary: 'DB pool saturated'
+          description: 'Check outbox relay SKIP LOCKED, long transactions, pg_stat_statements.'
+
+  - name: outbox
+    interval: 30s
+    rules:
+      - alert: OutboxLag
+        expr: outbox_lag_seconds > 30
+        for: 2m
+        labels:
+          severity: critical
+          owner: platform-worker
+          runbook: docs/runbooks/dlq-replay.md
+        annotations:
+          summary: 'Outbox lag >30s'
+          description: 'Relay or BullMQ down. Check worker logs traceId, queue depth, Redis.'
+
+      - alert: OutboxPendingHigh
+        expr: outbox_pending > 100
+        for: 5m
+        labels:
+          severity: warning
+          owner: platform-worker
+        annotations:
+          summary: 'Outbox pending >100'
+          description: 'Jobs not draining. Check worker concurrency, DLQ.'
+
+      - alert: DLQNonEmpty
+        expr: dlq_size > 0
+        for: 5m
+        labels:
+          severity: warning
+          owner: platform-worker
+          runbook: docs/runbooks/dlq-replay.md
+        annotations:
+          summary: 'DLQ has jobs'
+          description: 'Inspect GET /v1/dlq, replay via POST /v1/dlq/:id/replay (owner/admin).'
+
+      - alert: PaymentUnknown
+        expr: payment_unknown > 0
+        for: 10m
+        labels:
+          severity: critical
+          owner: platform-payments
+          runbook: docs/runbooks/payment-unknown.md
+        annotations:
+          summary: 'payment_attempts unknown >0 for 10m'
+          description: 'Reconciler may be stuck. Check worker/jobs/reconcilePayments, provider getStatus, metrics payment_unknown.'
+
+  - name: cache
+    interval: 30s
+    rules:
+      - alert: CacheStampedeFallbackHigh
+        expr: rate(cache_stampede_fallback_total[5m]) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          owner: platform-cache
+        annotations:
+          summary: 'Cache stampede fallback high'
+          description: 'Hot key expirado. Check TTL, lock SET NX, invalidations.'
+
+      - alert: RateLimitHotTenant
+        expr: sum(rate(rate_limit_hits_total[5m])) by (key) > 5
+        for: 5m
+        labels:
+          severity: info
+          owner: platform-rate-limit
+        annotations:
+          summary: 'Hot tenant rate limited'
+          description: 'Check tenant 1000/min, IP 100/min, endpoint limits.'
+
+  - name: system
+    interval: 30s
+    rules:
+      - alert: DiskSpaceLow
+        expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) < 0.15
+        for: 5m
+        labels:
+          severity: critical
+          owner: platform-infra
+        annotations:
+          summary: 'Disk <15% avail'
+          description: 'Check pg_wal, S3 audit-archive, logs.'
+
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          owner: platform-infra
+        annotations:
+          summary: 'Redis down'
+          description: 'API degraded but OK (cache miss, rate limiter InMemory fallback). Check health /metrics.'
+
+      - alert: CircuitOpen
+        expr: circuit_state == 2
+        for: 5m
+        labels:
+          severity: warning
+          owner: platform-resilience
+        annotations:
+          summary: 'Circuit breaker OPEN'
+          description: 'Check s3/oidc/payment breaker: 5 fails 30s, requestTimeout 2s, fallback 503.'

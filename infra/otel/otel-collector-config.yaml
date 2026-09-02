@@ -7,26 +7,67 @@ receivers:
         endpoint: 0.0.0.0:4318
 
 processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
   batch:
+    send_batch_size: 512
+    timeout: 5s
+  attributes/redact:
+    actions:
+      - key: http.request.header.authorization
+        action: delete
+      - key: http.request.header.cookie
+        action: delete
+      - key: db.statement
+        action: hash
+  probabilistic_sampler:
+    sampling_percentage: 10
+  resource:
+    attributes:
+      - key: service.version
+        value: '0.1.0'
+        action: upsert
 
 exporters:
   debug:
     verbosity: basic
+    sampling_initial: 5
+    sampling_thereafter: 50
   prometheus:
     endpoint: 0.0.0.0:8889
+    send_timestamps: true
+  logging:
+    loglevel: warn
+  # In production, add:
+  # otlp/jaeger:
+  #   endpoint: jaeger:4317
+  #   tls:
+  #     insecure: true
+  # otlp/tempo:
+  #   endpoint: tempo:4317
 
 extensions:
   health_check:
     endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+  zpages:
+    endpoint: 0.0.0.0:55679
 
 service:
-  extensions: [health_check]
+  extensions: [health_check, pprof, zpages]
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [batch]
-      exporters: [debug]
+      processors: [memory_limiter, attributes/redact, probabilistic_sampler, batch]
+      exporters: [debug, logging]
     metrics:
       receivers: [otlp]
-      processors: [batch]
-      exporters: [prometheus]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus, logging]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/redact, batch]
+      exporters: [logging, debug]

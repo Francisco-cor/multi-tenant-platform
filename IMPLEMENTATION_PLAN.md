@@ -455,20 +455,22 @@ No se intentará una transacción atómica entre PostgreSQL y el proveedor de pa
 
 ### Tareas
 
-- [ ] Instrumentar API, DB, Redis, BullMQ, llamadas HTTP y jobs con OpenTelemetry.
-- [ ] Propagar `traceparent`, `request_id` y `correlation_id` entre API, outbox, worker y webhook.
-- [ ] Usar logs estructurados con tenant redacted/hashed cuando sea posible.
-- [ ] Definir RED metrics (rate, errors, duration) y métricas de negocio.
-- [ ] Crear dashboards de API, DB, Redis, colas, pagos, webhooks y aislamiento.
-- [ ] Crear alertas accionables: error rate, p95, pool saturation, outbox lag, DLQ, payment unknown, disk y expiraciones.
-- [ ] Añadir health checks liveness/readiness/startup sin marcar healthy por una dependencia opcional.
-- [ ] Documentar qué señales se revisan primero durante un incidente.
+- [x] Instrumentar API, DB, Redis, BullMQ, llamadas HTTP y jobs con OpenTelemetry.
+- [x] Propagar `traceparent`, `request_id` y `correlation_id` entre API, outbox, worker y webhook.
+- [x] Usar logs estructurados con tenant redacted/hashed cuando sea posible.
+- [x] Definir RED metrics (rate, errors, duration) y métricas de negocio.
+- [x] Crear dashboards de API, DB, Redis, colas, pagos, webhooks y aislamiento.
+- [x] Crear alertas accionables: error rate, p95, pool saturation, outbox lag, DLQ, payment unknown, disk y expiraciones.
+- [x] Añadir health checks liveness/readiness/startup sin marcar healthy por una dependencia opcional.
+- [x] Documentar qué señales se revisan primero durante un incidente.
 
 ### Criterios de salida
 
-- Un test E2E puede correlacionarse con logs, trace y job.
-- Cada alerta tiene severidad, owner, umbral y runbook.
-- No se envían tokens, secretos ni datos sensibles a observabilidad.
+- [x] Un test E2E puede correlacionarse con logs, trace y job.
+- [x] Cada alerta tiene severidad, owner, umbral y runbook.
+- [x] No se envían tokens, secretos ni datos sensibles a observabilidad.
+
+> Progreso sesión 11: Fase 12 cerrada — `packages/observability/src/correlation.ts:1` `AsyncLocalStorage` + `hashTenant` + `extractCorrelation` `x-request-id/traceparent` + `packages/observability/src/tracing.ts:1` `initTracing` OTLP `probabilistic_sampler 10%` + `withSpan` + `generateTraceId` 32hex, `packages/observability/src/logger.ts:1` `createLogger` JSON `tenantHash` redact `[REDACTED]` `cookie/authorization/secret`, `packages/observability/src/metrics.ts:111` `http_requests_total` `http_request_duration_p95_seconds` `outbox_lag_seconds` `payment_unknown` `isolation_violations_total` + `toPrometheus`, `apps/api/src/app.ts:505` `onRequest` `enterCorrelation` `x-request-id/x-trace-id/traceparent` + `onResponse` `recordHttpRequest` + `setCorrelationPatch` tenant/user + `getCorrelationId` `requestId:traceId` → `outbox.correlation_id` + `audit.traceId`, `packages/db/src/database.ts:53` `application_name` `requestId:tenantHash` `set_config`, `apps/worker/src/processor.ts:24` `runWithCorrelation` per job + `apps/worker/src/main.ts:1` `initTracing` + `createLogger`, `infra/otel/otel-collector-config.yaml:10` `memory_limiter/batch/redact/probabilistic_sampler`, `infra/prometheus/prometheus.yml:1` scrape `api:4000/metrics` 10s + `alerts.yml` 13 reglas `ErrorRateHigh/P95/OutboxLag/DLQ/PaymentUnknown`, `infra/grafana/provisioning/dashboards/*.json` 5 dashboards `api-red/payments/isolation/db-redis/worker`, `docs/runbooks/observability.md` + `docs/failure-scenarios/observability-trace.md` E2E `curl traceparent` → `audit/outbox/pg_stat_activity/worker` mismo `traceId`, `apps/api/src/observability.test.ts:1` 4 tests `traceparent propagation / RED / redact / health` + `apps/api/src/app.ts` `redact` Fastify + `health.ts` no marca healthy por Redis opcional, `openapi.yaml` 40 paths hash `35eed3d17690`.
 
 ## Fase 13 — Testing, fallos deliberados y carga
 

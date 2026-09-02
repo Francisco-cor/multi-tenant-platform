@@ -1,0 +1,44 @@
+{
+  "title": "DB / Redis / Infra",
+  "uid": "db-redis",
+  "tags": ["db", "redis"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "DB pool active vs max",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "pg_stat_activity_count{state=\"active\"}" },
+        { "expr": "pg_settings_max_connections" }
+      ],
+      "description": "Pool max 10 per API/worker. Latencia p95 <300ms. Check idle_in_transaction_timeout 5s."
+    },
+    {
+      "id": 2,
+      "title": "DB statement timeout violations",
+      "type": "stat",
+      "targets": [{ "expr": "increase(pg_stat_statements_errors_total[5m])" }]
+    },
+    {
+      "id": 3,
+      "title": "Redis up / memory",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "up{job=\"redis\"}" },
+        { "expr": "redis_memory_used_bytes" },
+        { "expr": "redis_connected_clients" }
+      ],
+      "description": "Cache reconstruible, nunca fuente de verdad. Fail-open si Redis caído: degraded pero no down."
+    },
+    {
+      "id": 4,
+      "title": "BullMQ queues depth",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "bullmq_queue_depth{queue=\"orders\"}" },
+        { "expr": "bullmq_queue_depth{queue=\"webhooks\"}" },
+        { "expr": "bullmq_queue_depth{queue=\"files\"}" }
+      ]
+    }
+  ]
+}

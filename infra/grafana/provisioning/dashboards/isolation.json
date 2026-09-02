@@ -1,0 +1,47 @@
+{
+  "title": "Tenant Isolation — 6 capas",
+  "uid": "tenant-isolation",
+  "tags": ["isolation", "tenant"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Cache tenant keys HIT/MISS per tenantHash (hashed, no PII)",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "sum(rate(cache_hits_total[5m]))", "legendFormat": "hits" },
+        { "expr": "sum(rate(cache_misses_total[5m]))", "legendFormat": "misses" }
+      ],
+      "description": "Keys tenant:{id}:v1:{resource}:hash16 — nunca global. Test: acme vs contoso HIT aislado."
+    },
+    {
+      "id": 2,
+      "title": "DB pg_stat_activity by application_name (requestId:tenantHash)",
+      "type": "table",
+      "targets": [{ "expr": "pg_stat_activity{application_name=~\".*:.*\"}" }],
+      "description": "application_name = requestId:tenantHash via withTenantTransaction. Verifica pool sticky no filtra."
+    },
+    {
+      "id": 3,
+      "title": "Outbox per-tenant lag",
+      "type": "timeseries",
+      "targets": [{ "expr": "outbox_pending" }],
+      "description": "Outbox relay FOR UPDATE SKIP LOCKED — lag p95 <30s por tenant."
+    },
+    {
+      "id": 4,
+      "title": "S3 keys prefix violations (should 0)",
+      "type": "stat",
+      "targets": [{ "expr": "isolation_violations_total" }],
+      "description": "Key debe ser tenants/{tenantId}/{uuid}. Job payload y S3 presigned siempre tenant-scoped."
+    },
+    {
+      "id": 5,
+      "title": "Audit append-only violations (trigger 45000)",
+      "type": "stat",
+      "targets": [
+        { "expr": "increase(audit_events_total{action=\"prevent_audit_mutation\"}[1h])" }
+      ],
+      "description": "REVOKE UPDATE,DELETE + trigger. Intento UPDATE audit_log -> 45000."
+    }
+  ]
+}

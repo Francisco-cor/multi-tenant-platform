@@ -1,7 +1,46 @@
 global:
   scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+  external_labels:
+    monitor: platform
+
+rule_files:
+  - /etc/prometheus/alerts.yml
 
 scrape_configs:
+  - job_name: api
+    static_configs:
+      - targets: ['api:4000']
+    metrics_path: /metrics
+    scrape_interval: 10s
+    scrape_timeout: 5s
+    honor_labels: true
+
   - job_name: otel-collector
     static_configs:
       - targets: ['otel-collector:8889']
+    scrape_interval: 15s
+
+  - job_name: postgres
+    static_configs:
+      - targets: ['postgres:5432']
+    metrics_path: /metrics
+    scrape_interval: 30s
+    # via postgres_exporter sidecar in prod; stub for local
+
+  - job_name: redis
+    static_configs:
+      - targets: ['redis:9121']
+    scrape_interval: 30s
+    # via redis_exporter in prod
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+      # In local, no alertmanager; in prod set alertmanager:9093

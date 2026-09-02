@@ -1,7 +1,16 @@
 import { createDatabase } from '@platform/db';
-import { metrics } from '@platform/observability';
+import { metrics, createLogger, initTracing } from '@platform/observability';
 import { InMemoryQueueFactory } from './queues.js';
 import { OutboxRelay } from './relay/outboxRelay.js';
+
+const logger = createLogger({ service: process.env.OTEL_SERVICE_NAME ?? 'worker' });
+
+await initTracing({
+  serviceName: process.env.OTEL_SERVICE_NAME ?? 'worker',
+  ...(process.env.OTEL_EXPORTER_OTLP_ENDPOINT
+    ? { exporterEndpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT }
+    : {}),
+});
 
 let shuttingDown = false;
 let relay: OutboxRelay | null = null;
@@ -10,25 +19,16 @@ let queueFactory: import('./queues.js').QueueFactory | null = null;
 const shutdown = async (signal: string) => {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.info(JSON.stringify({ event: 'worker_shutdown_started', signal }));
+  logger.info({ signal }, 'worker_shutdown_started');
   const deadline = Date.now() + 30000;
   try {
     if (relay) await relay.stop();
     if (queueFactory) await queueFactory.closeAll();
-    console.info(
-      JSON.stringify({
-        event: 'worker_shutdown_completed',
-        signal,
-        durationMs: Date.now() - (Date.now() - 0),
-      }),
-    );
+    logger.info({ signal }, 'worker_shutdown_completed');
   } catch (error) {
-    console.error(
-      JSON.stringify({
-        event: 'worker_shutdown_error',
-        signal,
-        error: error instanceof Error ? error.message : String(error),
-      }),
+    logger.error(
+      { signal, error: error instanceof Error ? error.message : String(error) },
+      'worker_shutdown_error',
     );
   } finally {
     const remaining = deadline - Date.now();
@@ -42,9 +42,7 @@ async function bootstrap(): Promise<void> {
   const dbUrl = process.env.DATABASE_URL;
   const redisUrl = process.env.REDIS_URL;
   if (!dbUrl) {
-    console.info(
-      JSON.stringify({ event: 'worker_started', status: 'idle', reason: 'no DATABASE_URL' }),
-    );
+    logger.info({ status: 'idle', reason: 'no DATABASE_URL' }, 'worker_started');
     return;
   }
 
@@ -61,33 +59,24 @@ async function bootstrap(): Promise<void> {
       if (bullFactory) {
         await queueFactory.closeAll();
         queueFactory = bullFactory;
-        console.info(
-          JSON.stringify({
-            event: 'worker_queues',
-            mode: 'bullmq',
-            redisUrl: redisUrl.replace(/:\/\/.*@/, '://***@'),
-          }),
+        logger.info(
+          { mode: 'bullmq', redisUrl: redisUrl.replace(/:\/\/.*@/, '://***@') },
+          'worker_queues',
         );
       } else {
-        console.info(
-          JSON.stringify({
-            event: 'worker_queues',
-            mode: 'in-memory',
-            reason: 'bullmq_unavailable',
-          }),
-        );
+        logger.info({ mode: 'in-memory', reason: 'bullmq_unavailable' }, 'worker_queues');
       }
     } catch (error) {
-      console.info(
-        JSON.stringify({
-          event: 'worker_queues',
+      logger.info(
+        {
           mode: 'in-memory',
           reason: error instanceof Error ? error.message : String(error),
-        }),
+        },
+        'worker_queues',
       );
     }
   } else {
-    console.info(JSON.stringify({ event: 'worker_queues', mode: 'in-memory' }));
+    logger.info({ mode: 'in-memory' }, 'worker_queues');
   }
 
   relay = new OutboxRelay(db, queueFactory, { batchSize: 100, intervalMs: 2000 });
@@ -105,21 +94,20 @@ async function bootstrap(): Promise<void> {
       const lag = row?.lag ? Number(row.lag) : 0;
       const pending = row?.pending ? Number(row.pending) : 0;
       metrics.recordOutboxLag(lag, pending);
-    } catch {
-      // ignore
+      if (lag > 30) {
+        logger.warn({ lag, pending }, 'outbox lag high');
+      }
+    } catch (error) {
+      logger.error(
+        { error: error instanceof Error ? error.message : String(error) },
+        'outbox_lag_poll_failed',
+      );
     }
   }, 5000);
   // Ensure lagTimer does not prevent shutdown
   lagTimer.unref?.();
 
-  console.info(
-    JSON.stringify({
-      event: 'worker_started',
-      status: 'running',
-      relay: 'outbox',
-      queues: 'ready',
-    }),
-  );
+  logger.info({ relay: 'outbox', queues: 'ready' }, 'worker_started');
 }
 
 void bootstrap();

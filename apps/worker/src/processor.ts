@@ -1,7 +1,14 @@
 import type { DatabaseHandle } from '@platform/db';
-import { metrics } from '@platform/observability';
+import {
+  metrics,
+  runWithCorrelation,
+  generateTraceId,
+  createLogger,
+} from '@platform/observability';
 import { withDedup } from './dedup.js';
 import type { JobPayload } from './queues.js';
+
+const logger = createLogger({ service: 'worker' });
 
 /**
  * Generic job processor with dedupe, timeout, backoff and DLQ handling.
@@ -44,15 +51,56 @@ export async function processJob(
 
   const handler = options.handler ?? (async () => ({ ok: true, eventType: payload.eventType }));
 
-  const result = await withDedup(
-    db,
-    { jobId, tenantId: payload.tenantId, queue: options.queue },
-    async () => runWithTimeout(() => handler(payload, { tenantId: payload.tenantId, jobId })),
+  // Extract correlation from payload (requestId:traceId) for trace propagation
+  const correlationId = payload.correlationId ?? '';
+  const [requestId, traceId] = correlationId.includes(':')
+    ? (correlationId.split(':') as [string, string])
+    : [correlationId || jobId.slice(0, 8), undefined];
+  const effectiveTraceId = traceId || generateTraceId();
+  const effectiveRequestId = requestId || jobId.slice(0, 8);
+
+  const result = await runWithCorrelation(
+    {
+      requestId: effectiveRequestId,
+      traceId: effectiveTraceId,
+      tenantId: payload.tenantId,
+    },
+    async () =>
+      withDedup(db, { jobId, tenantId: payload.tenantId, queue: options.queue }, async () =>
+        runWithTimeout(() => handler(payload, { tenantId: payload.tenantId, jobId })),
+      ),
   );
 
   const duration = Date.now() - start;
   metrics.recordJobDuration(options.queue, duration);
-  if (result.deduped) metrics.recordRetry(options.queue);
+  if (result.deduped) {
+    metrics.recordRetry(options.queue);
+    logger.info(
+      {
+        jobId,
+        queue: options.queue,
+        tenantHash: payload.tenantId.slice(0, 8),
+        traceId: effectiveTraceId,
+        requestId: effectiveRequestId,
+        deduped: true,
+        durationMs: duration,
+      },
+      'job deduped',
+    );
+  } else {
+    logger.info(
+      {
+        jobId,
+        queue: options.queue,
+        eventType: payload.eventType,
+        tenantHash: payload.tenantId.slice(0, 8),
+        traceId: effectiveTraceId,
+        requestId: effectiveRequestId,
+        durationMs: duration,
+      },
+      'job processed',
+    );
+  }
 
   return result;
 }

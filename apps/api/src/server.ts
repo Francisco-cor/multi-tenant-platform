@@ -1,5 +1,13 @@
+import { initTracing } from '@platform/observability';
 import { buildApp } from './app.js';
 import { PersistentIdentityStore } from './persistent-identity-store.js';
+
+await initTracing({
+  serviceName: process.env.OTEL_SERVICE_NAME ?? 'api',
+  ...(process.env.OTEL_EXPORTER_OTLP_ENDPOINT
+    ? { exporterEndpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT }
+    : {}),
+});
 
 const databaseUrl = process.env.DATABASE_URL;
 const persistentStore = databaseUrl

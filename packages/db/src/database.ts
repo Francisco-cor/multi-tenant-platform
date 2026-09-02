@@ -1,8 +1,13 @@
+import { createHash } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { schema } from './schema.js';
 import { assertTenantRepositoryContext, type TenantRepositoryContext } from './tenant-context.js';
+
+function hashTenantId(tenantId: string): string {
+  return createHash('sha256').update(tenantId).digest('hex').slice(0, 8);
+}
 
 export type Database = PostgresJsDatabase<typeof schema>;
 export type DatabaseExecutor = Pick<Database, 'execute'>;
@@ -69,6 +74,17 @@ export async function withTenantTransaction<T>(
     await transaction.execute(
       sql`select set_config('app.tenant_id', ${context.tenantId}, true) as tenant_id`,
     );
+
+    // Propagate correlation to Postgres application_name for pg_stat_activity + logs
+    // Do not include PII: use requestId + short tenant hash (8 hex) if available
+    if (context.requestId) {
+      const tenantHash = context.tenantId ? hashTenantId(context.tenantId) : 'no-tenant';
+      const appName = `${context.requestId.slice(0, 16)}:${tenantHash}`;
+      // set_config with is_local=true ensures it does not leak to pooled connection
+      await transaction.execute(
+        sql`select set_config('application_name', ${appName}, true) as application_name`,
+      );
+    }
 
     return callback(transaction);
   });

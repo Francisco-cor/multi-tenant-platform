@@ -43,7 +43,15 @@ import {
 } from './file-store.js';
 import { getDefaultS3Service } from './s3.js';
 import { registerSecurity } from './plugins/security.js';
-import { metrics } from '@platform/observability';
+import {
+  metrics,
+  createLogger,
+  enterCorrelation,
+  extractCorrelation,
+  generateTraceId,
+  getCorrelation,
+  setCorrelationPatch,
+} from '@platform/observability';
 import {
   buildCacheKey,
   buildCachePrefix,
@@ -479,10 +487,38 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     ).filter((organization): organization is OrganizationRecord => organization !== null);
   };
 
+  const structuredLogger = createLogger({
+    level: (process.env.LOG_LEVEL as never) ?? 'info',
+    service: process.env.OTEL_SERVICE_NAME ?? 'api',
+  });
+
   const app = Fastify({
-    logger: { level: process.env.LOG_LEVEL ?? 'info' },
+    logger: {
+      level: (process.env.LOG_LEVEL as string) ?? 'info',
+      redact: {
+        paths: [
+          'req.headers.cookie',
+          'req.headers.authorization',
+          'req.headers["x-api-key"]',
+          'req.headers["x-webhook-signature"]',
+          '*.secret',
+          '*.password',
+          '*.token',
+          '*.authorization',
+          '*.cookie',
+          'headers.cookie',
+          'headers.authorization',
+        ],
+        censor: '[REDACTED]',
+        remove: false,
+      },
+    },
     bodyLimit: 1024 * 1024,
     trustProxy: true,
+    genReqId: (req) =>
+      (req.headers['x-request-id'] as string) ??
+      (req.headers['x-correlation-id'] as string) ??
+      randomUUID(),
   });
 
   registerSecurity(app, {
@@ -495,6 +531,60 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     await store.close?.();
     await cache.close?.();
     await (rateLimiter as unknown as { close?: () => Promise<void> }).close?.();
+  });
+
+  // --- Observability: correlation propagation + RED metrics + structured logs ---
+  const requestStart = new Map<string, number>();
+  app.addHook('onRequest', async (request, reply) => {
+    const start = Date.now();
+    requestStart.set(request.id, start);
+    const ctx = extractCorrelation(
+      request.headers as unknown as Record<string, string | string[] | undefined>,
+      request.id,
+    );
+    if (!ctx.traceId) {
+      ctx.traceId = generateTraceId();
+    }
+    enterCorrelation(ctx);
+    reply.header('x-request-id', ctx.requestId);
+    reply.header('x-trace-id', ctx.traceId);
+    reply.header(
+      'traceparent',
+      `00-${ctx.traceId.padStart(32, '0').slice(-32)}-0000000000000000-01`,
+    );
+  });
+
+  app.addHook('onResponse', async (request, reply) => {
+    const start = requestStart.get(request.id);
+    const duration = start !== undefined ? Date.now() - start : (reply.elapsedTime ?? 0);
+    requestStart.delete(request.id);
+    const route = (request.routeOptions.url as string) ?? request.url.split('?')[0] ?? 'unknown';
+    metrics.recordHttpRequest(request.method, route, reply.statusCode, duration);
+    const corr = getCorrelation();
+    if (corr?.traceId) reply.header('x-trace-id', corr.traceId);
+    if (corr?.requestId) reply.header('x-request-id', corr.requestId);
+    // Structured log with correlation (Fastify already logs, but we enrich with tenantHash)
+    const level = reply.statusCode >= 500 ? 'error' : reply.statusCode >= 400 ? 'warn' : 'info';
+    // Use structuredLogger directly; Fastify's request.log already emitted, but we emit OTel-style
+    const logFn = (
+      structuredLogger as unknown as Record<string, (obj: unknown, msg: string) => void>
+    )[level];
+    if (typeof logFn === 'function') {
+      logFn.call(
+        structuredLogger,
+        {
+          requestId: request.id,
+          traceId: corr?.traceId,
+          tenantHash: corr?.tenantHash,
+          method: request.method,
+          url: request.url,
+          route,
+          statusCode: reply.statusCode,
+          durationMs: duration,
+        },
+        'request completed',
+      );
+    }
   });
 
   // --- Rate limiting: per-IP global (fail-open with in-memory fallback) ---
@@ -567,12 +657,22 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     }
   };
 
-  const getTraceId = (request: FastifyRequest): string | undefined =>
-    (request.headers['x-trace-id'] as string) ||
-    (request.headers['traceparent'] as string) ||
-    (request.headers['x-request-id'] as string) ||
-    undefined;
+  const getTraceId = (request: FastifyRequest): string | undefined => {
+    const corr = getCorrelation();
+    if (corr?.traceId) return corr.traceId;
+    return (
+      (request.headers['x-trace-id'] as string) ||
+      (request.headers['traceparent'] as string) ||
+      (request.headers['x-request-id'] as string) ||
+      undefined
+    );
+  };
   const getClientIp = (request: FastifyRequest): string | undefined => request.ip;
+
+  const getCorrelationId = (request: FastifyRequest): string => {
+    const corr = getCorrelation();
+    return corr?.traceId ? `${request.id}:${corr.traceId}` : request.id;
+  };
 
   const auditBase = (
     request: FastifyRequest,
@@ -580,15 +680,22 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       result?: 'success' | 'failure';
     },
   ): Omit<AuditRecord, 'id' | 'at'> => {
+    const corr = getCorrelation();
     const base: Omit<AuditRecord, 'id' | 'at'> = {
       ...fields,
       requestId: request.id,
       result: fields.result ?? 'success',
     };
-    const tid = getTraceId(request);
+    const tid = corr?.traceId ?? getTraceId(request);
     if (tid !== undefined) (base as Record<string, unknown>).traceId = tid;
     const ip = getClientIp(request);
     if (ip !== undefined) (base as Record<string, unknown>).ip = ip;
+    // also record audit metric
+    try {
+      metrics.recordAudit(fields.action);
+    } catch {
+      // ignore
+    }
     return base;
   };
 
@@ -614,6 +721,8 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     if (!session) throw new RequestProblem(401, 'UNAUTHORIZED', 'Authentication required');
     const user = await store.getUser(session.userId);
     if (!user) throw new RequestProblem(401, 'UNAUTHORIZED', 'Authentication required');
+    // Enrich correlation with user for observability
+    setCorrelationPatch({ userId: user.id });
     if (user.status !== 'active') {
       throw new RequestProblem(403, 'FORBIDDEN', 'User access is suspended');
     }
@@ -630,6 +739,8 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     if (!organization || organization.status !== 'active') {
       throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
     }
+    // Propagate tenant to correlation (for logs/metrics/DB application_name)
+    setCorrelationPatch({ tenantId: organization.id, userId: auth.user.id });
     const membership = await store.getActiveMembership(
       { tenantId: organization.id, requestId: request.id, userId: auth.user.id },
       auth.user.id,
@@ -1152,7 +1263,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           branchId: body.branchId,
           productId: body.productId,
           quantity: body.quantity,
-          correlationId: request.id,
+          correlationId: getCorrelationId(request),
           createdBy: context.user.id,
         },
       );
@@ -1229,7 +1340,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           branchId: body.branchId,
           amountCents: body.amountCents,
           currency: body.currency ?? 'USD',
-          correlationId: request.id,
+          correlationId: getCorrelationId(request),
           createdBy: context.user.id,
         },
       );
@@ -1528,7 +1639,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
             aggregateId: attempt.id,
             eventType: `payment.webhook_${target}`,
             payload: outPayload,
-            correlationId: request.id,
+            correlationId: getCorrelationId(request),
           });
         });
         await db.close();

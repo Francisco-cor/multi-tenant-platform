@@ -61,6 +61,7 @@ services:
       - '--storage.tsdb.path=/prometheus'
     volumes:
       - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
     ports:
       - '9090:9090'

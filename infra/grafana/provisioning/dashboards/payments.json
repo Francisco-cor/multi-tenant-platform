@@ -1,0 +1,102 @@
+{
+  "title": "Payments Saga / Outbox / Webhooks",
+  "uid": "payments-outbox",
+  "tags": ["payments", "outbox", "webhooks"],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Outbox lag (s) — slo 30s p95",
+      "type": "timeseries",
+      "targets": [{ "expr": "outbox_lag_seconds" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "yellow", "value": 30 },
+              { "color": "red", "value": 60 }
+            ]
+          }
+        }
+      },
+      "alert": {
+        "name": "OutboxLagHigh",
+        "conditions": [{ "evaluator": { "params": [30], "type": "gt" } }]
+      }
+    },
+    {
+      "id": 2,
+      "title": "Outbox pending",
+      "type": "stat",
+      "targets": [{ "expr": "outbox_pending" }]
+    },
+    {
+      "id": 3,
+      "title": "DLQ size — must be 0",
+      "type": "stat",
+      "targets": [{ "expr": "dlq_size" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Payment pending vs unknown",
+      "type": "timeseries",
+      "targets": [
+        { "expr": "payment_pending", "legendFormat": "pending" },
+        { "expr": "payment_unknown", "legendFormat": "unknown (alert >0 10m)" }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Job retries by queue",
+      "type": "timeseries",
+      "targets": [{ "expr": "sum(job_retries_total) by (queue)" }]
+    },
+    {
+      "id": 6,
+      "title": "Job p95 duration by queue",
+      "type": "timeseries",
+      "targets": [{ "expr": "job_duration_p95_seconds" }]
+    },
+    {
+      "id": 7,
+      "title": "Webhook deliveries — HMAC valid vs deduped",
+      "type": "stat",
+      "targets": [
+        {
+          "expr": "sum(rate(http_requests_total{route=\"/v1/webhooks/payments\"}[5m]))",
+          "legendFormat": "payment webhooks rps"
+        },
+        {
+          "expr": "sum(rate(http_requests_total{route=\"/v1/webhooks/inbound\"}[5m]))",
+          "legendFormat": "inbound rps"
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "title": "Isolation violations (must 0)",
+      "type": "stat",
+      "targets": [{ "expr": "isolation_violations_total" }],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "steps": [
+              { "color": "green", "value": 0 },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
