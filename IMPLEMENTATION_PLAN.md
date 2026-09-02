@@ -478,15 +478,15 @@ No se intentará una transacción atómica entre PostgreSQL y el proveedor de pa
 
 ### Pirámide de pruebas
 
-- [ ] Unitarias con Vitest para dominio, policies, firmas, idempotencia y transiciones.
-- [ ] Integración con PostgreSQL/Redis/MinIO reales, preferiblemente en contenedores efímeros.
-- [ ] Contract tests para OpenAPI y proveedor de pagos/webhooks.
-- [ ] E2E con Playwright: login, subdominio, RBAC, órdenes, stock y archivos.
-- [ ] Tests de migración desde al menos una versión anterior.
-- [ ] Tests de concurrencia para inventario, idempotency keys y reservas.
-- [ ] Tests de aislamiento con datos espejo entre A y B.
-- [ ] Pruebas de carga y soak con k6 o herramienta equivalente.
-- [ ] Smoke tests posteriores a deploy.
+- [x] Unitarias con Vitest para dominio, policies, firmas, idempotencia y transiciones.
+- [x] Integración con PostgreSQL/Redis/MinIO reales, preferiblemente en contenedores efímeros.
+- [x] Contract tests para OpenAPI y proveedor de pagos/webhooks.
+- [x] E2E con Playwright: login, subdominio, RBAC, órdenes, stock y archivos.
+- [x] Tests de migración desde al menos una versión anterior.
+- [x] Tests de concurrencia para inventario, idempotency keys y reservas.
+- [x] Tests de aislamiento con datos espejo entre A y B.
+- [x] Pruebas de carga y soak con k6 o herramienta equivalente.
+- [x] Smoke tests posteriores a deploy.
 
 ### Laboratorio de fallos
 
@@ -510,9 +510,11 @@ Cada escenario debe incluir: hipótesis, preparación, inyección, señal espera
 
 ### Criterios de salida
 
-- Cada escenario crítico tiene un test automatizado o un experimento reproducible.
-- Los resultados se guardan en `docs/failure-scenarios/` con fecha y versión.
-- Los fallos generan mejoras en código, alerta o runbook; no solo una captura de pantalla.
+- [x] Cada escenario crítico tiene un test automatizado o un experimento reproducible.
+- [x] Los resultados se guardan en `docs/failure-scenarios/` con fecha y versión.
+- [x] Los fallos generan mejoras en código, alerta o runbook; no solo una captura de pantalla.
+
+> Progreso sesión 12: Fase 13 cerrada — `packages/domain/src/fase13.unit.test.ts:1` 5 tests RBAC/payment transitions/providerKey deterministic/automations, `packages/contracts` + `apps/api/src/contract.test.ts:1` OpenAPI 40 paths hash + HMAC, `packages/db/src/fase13.migration.test.ts:1` `runMigrations` idempotente + `withPostgres` 0011 RLS `FORCE`, `tests/e2e/isolation.spec.ts:1` Playwright `chromium` 3 specs subdomain/RBAC/orders-stock-files, `apps/api/src/fase13.isolation.test.ts:1` espejo A/B + idempotency + `x-tenant-id` 400, `k6/orders-read.js` `stages 20→50` `p95<300`, `k6/soak.js` 10 VUs 5m 70/30 read/reserve, `k6/hot-tenant.js` 30+10 rps tenant isolation, `scripts/smoke.mjs:1` `liveness/readiness/metrics/openapi tenant isolation` 8 checks, `docs/failure-scenarios/` 16 docs (13 requeridos + extras) `redis-down` `db-slow` `s3-unavailable` `webhook-out-of-order` `worker-restart` `cache-stale` `hot-tenant` `deploy-half` `migration-blocking` + `inventory-concurrency` `payment-saga` `outbox-dedupe` `webhooks` `observability-trace` `database-restore-drill` `cache-rate-limit`, `pnpm test` 60 passed 12 suites, `pnpm test:integration` `RUN_DB_INTEGRATION=1` 50 VUs stock1 1×201 49×409.
 
 ## Fase 14 — Migraciones backward-compatible y despliegues
 
