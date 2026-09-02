@@ -77,7 +77,8 @@ describe('payments saga — tenant isolation + webhook HMAC + dedupe', () => {
 
   it('webhook HMAC invalid ->401, tolerance 5m, dedupe same eventId ->1 effect', async () => {
     // Reset global dedupe
-    (globalThis as unknown as { __webhookDedupe?: Set<string> }).__webhookDedupe = new Set<string>();
+    (globalThis as unknown as { __webhookDedupe?: Set<string> }).__webhookDedupe =
+      new Set<string>();
     const paymentStore = new InMemoryPaymentStore();
     const app = buildApp({ allowDevLogin: true, paymentStore });
     const secret = 'test_webhook_secret';
@@ -144,13 +145,23 @@ describe('payments saga — tenant isolation + webhook HMAC + dedupe', () => {
         'x-tenant-id': 'tenant-acme',
         'content-type': 'application/json',
       },
-      payload: { eventId: 'evt_bad_sig', providerRef: 'prov_x', status: 'paid', tenantId: 'tenant-acme' },
+      payload: {
+        eventId: 'evt_bad_sig',
+        providerRef: 'prov_x',
+        status: 'paid',
+        tenantId: 'tenant-acme',
+      },
     });
     expect(badSig.statusCode).toBe(401);
 
     // Expired timestamp (>5m) ->401
     const oldTs = String(Math.floor(Date.now() / 1000) - 10 * 60);
-    const oldRaw = JSON.stringify({ eventId: 'evt_old', providerRef: 'prov_old', status: 'paid', tenantId: 'tenant-acme' });
+    const oldRaw = JSON.stringify({
+      eventId: 'evt_old',
+      providerRef: 'prov_old',
+      status: 'paid',
+      tenantId: 'tenant-acme',
+    });
     const oldSig = computeWebhookSignature(secret, oldTs, oldRaw);
     const expired = await app.inject({
       method: 'POST',
@@ -161,7 +172,12 @@ describe('payments saga — tenant isolation + webhook HMAC + dedupe', () => {
         'x-tenant-id': 'tenant-acme',
         'content-type': 'application/json',
       },
-      payload: { eventId: 'evt_old', providerRef: 'prov_old', status: 'paid', tenantId: 'tenant-acme' },
+      payload: {
+        eventId: 'evt_old',
+        providerRef: 'prov_old',
+        status: 'paid',
+        tenantId: 'tenant-acme',
+      },
     });
     expect(expired.statusCode).toBe(401);
 
@@ -169,7 +185,11 @@ describe('payments saga — tenant isolation + webhook HMAC + dedupe', () => {
     // The paymentAttempt belongs to tenant-acme, so using tenant-contoso header should not find it (404 or no effect but still 200? We return 200 but don't update other tenant)
     // For our InMemory path, listPaymentAttempts is tenant-scoped, so contoso's attempt list is empty
     // Verify that acme's order still exists and contoso's webhook with wrong tenant does not affect acme record count
-    const acmeAttemptsBefore = await paymentStore.listPaymentAttempts({ tenantId: 'tenant-acme', requestId: 'test', userId: 'user-acme-only' } as never);
+    const acmeAttemptsBefore = await paymentStore.listPaymentAttempts({
+      tenantId: 'tenant-acme',
+      requestId: 'test',
+      userId: 'user-acme-only',
+    } as never);
     expect(acmeAttemptsBefore.length).toBe(1);
 
     await app.close();

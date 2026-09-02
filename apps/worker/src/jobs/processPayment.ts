@@ -111,7 +111,10 @@ export async function processPayment(
       providerResult = { providerRef: `killed_${providerKey.slice(0, 8)}`, status: 'unknown' };
     } else {
       // Network/timeout → unknown (not failed definitively)
-      providerResult = { providerRef: row.provider_ref ?? `pending_${providerKey.slice(0, 8)}`, status: 'unknown' };
+      providerResult = {
+        providerRef: row.provider_ref ?? `pending_${providerKey.slice(0, 8)}`,
+        status: 'unknown',
+      };
     }
     // We will persist unknown below with last_error
     // Fall through to second tx with unknown status
@@ -124,7 +127,9 @@ export async function processPayment(
       if (!curStatus || curStatus === 'paid' || curStatus === 'failed') return;
       // Decide target status: if we already have unknown, keep unknown and record last_error
       if (curStatus === 'pending' || curStatus === 'unknown' || curStatus === 'created') {
-        const target = (providerResult.status === 'unknown' ? 'unknown' : providerResult.status) as string;
+        const target = (
+          providerResult.status === 'unknown' ? 'unknown' : providerResult.status
+        ) as string;
         if (curStatus !== target && !canTransition(curStatus as never, target as never)) {
           // Allow pending->unknown even if not in canTransition? It is allowed per domain.
           // If invalid, force unknown
@@ -143,7 +148,14 @@ export async function processPayment(
           aggregateType: 'payment',
           aggregateId: attemptId,
           eventType: `payment.${target}`,
-          payload: { attemptId, orderId, providerKey, providerRef: providerResult.providerRef, status: target, error: errMsg },
+          payload: {
+            attemptId,
+            orderId,
+            providerKey,
+            providerRef: providerResult.providerRef,
+            status: target,
+            error: errMsg,
+          },
           correlationId,
         });
       }
@@ -220,7 +232,13 @@ export async function processPayment(
       aggregateType: 'payment',
       aggregateId: attemptId,
       eventType: `payment.${targetStatus}`,
-      payload: { attemptId, orderId, providerKey, providerRef: providerResult.providerRef, status: targetStatus },
+      payload: {
+        attemptId,
+        orderId,
+        providerKey,
+        providerRef: providerResult.providerRef,
+        status: targetStatus,
+      },
       correlationId,
     });
     if (targetStatus === 'paid') {

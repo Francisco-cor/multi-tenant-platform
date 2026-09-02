@@ -26,13 +26,13 @@ Elegir (2). Redis sigue siendo reconstruible; DB permanece autoridad.
 
 ### 1. Lecturas cacheables y TTL
 
-| Recurso | Endpoint | TTL | Justificación |
-|---------|----------|-----|---------------|
-| branches | `GET /v1/branches` | 60s | lista corta, cambia selten (create org/branch) |
-| members | `GET /v1/members` | 30s | RBAC sensible pero reconstruible; invalidación inmediata en `invitation/patch/delete` |
-| inventory | `GET /v1/inventory?branch=&q=&limit=&cursor=` | 30s | catálogo por sucursal, lectura costosa (`JOIN products` + `ILIKE`), invalidación en `POST /v1/inventory/reserve` |
-| webhooks endpoints | `GET /v1/webhooks/endpoints` | 60s | config estable, invalidación en `POST/PATCH/DELETE` |
-| No cache | `GET /v1/orders*`, `GET /v1/files*`, `POST *` | — | estado transaccional o ya con validación de stock/pago; no se cachea |
+| Recurso            | Endpoint                                      | TTL | Justificación                                                                                                    |
+| ------------------ | --------------------------------------------- | --- | ---------------------------------------------------------------------------------------------------------------- |
+| branches           | `GET /v1/branches`                            | 60s | lista corta, cambia selten (create org/branch)                                                                   |
+| members            | `GET /v1/members`                             | 30s | RBAC sensible pero reconstruible; invalidación inmediata en `invitation/patch/delete`                            |
+| inventory          | `GET /v1/inventory?branch=&q=&limit=&cursor=` | 30s | catálogo por sucursal, lectura costosa (`JOIN products` + `ILIKE`), invalidación en `POST /v1/inventory/reserve` |
+| webhooks endpoints | `GET /v1/webhooks/endpoints`                  | 60s | config estable, invalidación en `POST/PATCH/DELETE`                                                              |
+| No cache           | `GET /v1/orders*`, `GET /v1/files*`, `POST *` | —   | estado transaccional o ya con validación de stock/pago; no se cachea                                             |
 
 TTL máximo 60s por recurso. Toda cache es `private` (`cache-control: private, max-age=...`) + `x-cache: HIT|MISS`.
 Nunca cachear permisos crudos sin tenant.
@@ -60,7 +60,7 @@ Ej: tenant:tenant-acme:v1:inventory:branch=main:hash=a3f9c1e2...
 ### 4. Cache-aside con stampede protection
 
 ```ts
-const {value, hit} = await cache.getOrLoad(key, ttl, loader, {lockTtlMs: 5000})
+const { value, hit } = await cache.getOrLoad(key, ttl, loader, { lockTtlMs: 5000 });
 ```
 
 - **HIT**: retorna cached sin DB.
@@ -72,17 +72,17 @@ const {value, hit} = await cache.getOrLoad(key, ttl, loader, {lockTtlMs: 5000})
 
 ```ts
 RATE_LIMITS = {
-  ip: {max:100, windowMs:60_000},       // global per-IP (abuso)
-  tenant: {max:1000, windowMs:60_000},  // hot tenant isolation
-  user: {max:200, windowMs:60_000},
+  ip: { max: 100, windowMs: 60_000 }, // global per-IP (abuso)
+  tenant: { max: 1000, windowMs: 60_000 }, // hot tenant isolation
+  user: { max: 200, windowMs: 60_000 },
   endpoints: {
-    'POST /v1/orders': {max:20, key:'tenant'},
-    'POST /v1/inventory/reserve': {max:30, key:'tenant'},
-    'POST /v1/files/presigned-upload': {max:20, key:'tenant'},
-    'POST /v1/webhooks/endpoints': {max:20, key:'tenant'},
-    'POST /v1/auth/dev-login': {max:10, key:'ip'},
-  }
-}
+    'POST /v1/orders': { max: 20, key: 'tenant' },
+    'POST /v1/inventory/reserve': { max: 30, key: 'tenant' },
+    'POST /v1/files/presigned-upload': { max: 20, key: 'tenant' },
+    'POST /v1/webhooks/endpoints': { max: 20, key: 'tenant' },
+    'POST /v1/auth/dev-login': { max: 10, key: 'ip' },
+  },
+};
 ```
 
 - Implementación: `RateLimiter` con `RateLimitStore` (`Redis incr+expire` o `InMemory Map`). Key = `rl:{kind}:{identifier}:{bucket}` donde `bucket = floor(now/windowMs)`. Fixed window.
@@ -98,11 +98,11 @@ RATE_LIMITS = {
 
 ### 7. Timeouts, circuit breakers y budgets
 
-| Proveedor | Breaker | `failureThreshold` | `timeoutMs` | `requestTimeoutMs` | Efecto OPEN |
-|-----------|---------|-------------------|-------------|-------------------|-------------|
-| s3 presigned | `s3` | 5 | 30s | 2s | `503 DEPENDENCY_UNAVAILABLE` sin bloquear worker; métrica `circuit_state{breaker="s3"}`=2 |
-| payment provider (worker) | `payment` | 5 | 30s | 3s | ya existente `payment_unknown` + breaker |
-| oidc discover | `oidc` | 3 | 60s | 2s | `503` en `/v1/auth/login|callback` |
+| Proveedor                 | Breaker   | `failureThreshold` | `timeoutMs` | `requestTimeoutMs` | Efecto OPEN                                                                               |
+| ------------------------- | --------- | ------------------ | ----------- | ------------------ | ----------------------------------------------------------------------------------------- |
+| s3 presigned              | `s3`      | 5                  | 30s         | 2s                 | `503 DEPENDENCY_UNAVAILABLE` sin bloquear worker; métrica `circuit_state{breaker="s3"}`=2 |
+| payment provider (worker) | `payment` | 5                  | 30s         | 3s                 | ya existente `payment_unknown` + breaker                                                  |
+| oidc discover             | `oidc`    | 3                  | 60s         | 2s                 | `503` en `/v1/auth/login                                                                  | callback` |
 
 - Breaker estados `CLOSED → OPEN (fail fast) → HALF_OPEN (probe) → CLOSED`. Métricas `circuit_opens_total`, `circuit_rejects_total`, `circuit_state` (0/1/2) en `/metrics`.
 - Timeouts: todo `fetch`/S3 envuelto en `withTimeout(..., requestTimeoutMs)`; evita que un pool saturado cause cascada.

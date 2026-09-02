@@ -60,15 +60,15 @@ curl -s http://localhost:4000/v1/api-keys -H 'host: acme.app.localhost' -H "cook
 
 ## Fallos y recuperación
 
-| Señal | Causa | Recuperación |
-|---|---|---|
-| `webhook_deliveries retrying` | Receptor 5xx/timeout | Worker reintenta con backoff exponencial, no bloquea tx. Ver `deliverWebhook.ts:80` logs. |
-| `dead_letter` | 8 fallos consecutivos | Inspeccionar `last_error`, corregir URL/secret, `POST /v1/webhooks/deliveries/:id/replay` auditado. |
-| `endpoint dead_letter` | 5 deliveries `failure_count` | `PATCH /v1/webhooks/endpoints/:id {status:active}` tras arreglar receptor. |
-| `401 signature_mismatch` inbound | Secret rotado o body tampered | Verificar `WEBHOOK_INBOUND_SECRET` y que `rawBody` sea bytes exactos antes de parse (en demo `JSON.stringify`). |
-| `401 timestamp_tolerance` | Clock skew >5m | Sincronizar NTP. |
-| `403 Forbidden` en `/v1/webhooks/endpoints` | Operator sin `webhooks:manage` | Asignar `manager`/`admin` vía `PATCH /v1/members/:id`. |
-| `Cross-tenant 404` | Intento de leer delivery de otro tenant | RLS + `WHERE tenant_id` → 404 idéntico a no existe, no filtra existencia. |
+| Señal                                       | Causa                                   | Recuperación                                                                                                    |
+| ------------------------------------------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `webhook_deliveries retrying`               | Receptor 5xx/timeout                    | Worker reintenta con backoff exponencial, no bloquea tx. Ver `deliverWebhook.ts:80` logs.                       |
+| `dead_letter`                               | 8 fallos consecutivos                   | Inspeccionar `last_error`, corregir URL/secret, `POST /v1/webhooks/deliveries/:id/replay` auditado.             |
+| `endpoint dead_letter`                      | 5 deliveries `failure_count`            | `PATCH /v1/webhooks/endpoints/:id {status:active}` tras arreglar receptor.                                      |
+| `401 signature_mismatch` inbound            | Secret rotado o body tampered           | Verificar `WEBHOOK_INBOUND_SECRET` y que `rawBody` sea bytes exactos antes de parse (en demo `JSON.stringify`). |
+| `401 timestamp_tolerance`                   | Clock skew >5m                          | Sincronizar NTP.                                                                                                |
+| `403 Forbidden` en `/v1/webhooks/endpoints` | Operator sin `webhooks:manage`          | Asignar `manager`/`admin` vía `PATCH /v1/members/:id`.                                                          |
+| `Cross-tenant 404`                          | Intento de leer delivery de otro tenant | RLS + `WHERE tenant_id` → 404 idéntico a no existe, no filtra existencia.                                       |
 
 ## Observabilidad
 

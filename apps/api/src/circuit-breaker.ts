@@ -83,7 +83,10 @@ export class CircuitBreaker {
     const st = this.getState();
     if (st === 'OPEN') {
       metrics.recordCircuitRejected(this.name);
-      throw Object.assign(new Error(`circuit_open:${this.name}`), { code: 'CIRCUIT_OPEN', breaker: this.name });
+      throw Object.assign(new Error(`circuit_open:${this.name}`), {
+        code: 'CIRCUIT_OPEN',
+        breaker: this.name,
+      });
     }
     try {
       const result = await withTimeout(fn(), this.requestTimeoutMs, `circuit:${this.name}`);

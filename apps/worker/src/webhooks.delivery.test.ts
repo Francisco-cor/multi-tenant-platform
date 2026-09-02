@@ -51,14 +51,21 @@ describe('webhook delivery HMAC and retry', () => {
     let status: string = 'pending';
     function simulateAttempt(isTransient: boolean): string {
       attempts++;
-      if (!isTransient) { status = 'failed'; return status; }
-      if (attempts >= maxAttempts) { status = 'dead_letter'; return status; }
+      if (!isTransient) {
+        status = 'failed';
+        return status;
+      }
+      if (attempts >= maxAttempts) {
+        status = 'dead_letter';
+        return status;
+      }
       status = 'retrying';
       return status;
     }
     for (let i = 0; i < 7; i++) expect(simulateAttempt(true)).toBe('retrying');
     expect(simulateAttempt(true)).toBe('dead_letter');
-    attempts = 0; status = 'pending';
+    attempts = 0;
+    status = 'pending';
     expect(simulateAttempt(false)).toBe('failed');
   });
 

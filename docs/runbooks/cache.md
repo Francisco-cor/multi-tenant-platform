@@ -91,14 +91,14 @@ docker compose start minio
 
 ## Fallos y recuperación
 
-| Señal | Causa | Recuperación |
-|---|---|---|
-| `x-cache: MISS` siempre | Redis down / keys no hit | Ver `docker compose logs redis`, `GET /metrics` `cache_misses_total` sube, `cache_hits 0`. API sigue 200 vía DB (p95 sube). Reiniciar `redis` no pierde datos. |
-| `429 RATE_LIMITED` burst legítimo | Cliente excede 100/min IP o 1000/min tenant | Respetar `retry-after`, usar backoff jitter. Si tenant legítimo necesita más, subir `RATE_LIMITS.tenant.max` y redeploy. |
-| `hot tenant` monopoliza | Un tenant 1000/min bloquea pero otros 200 OK | Alert `rate_limit_hits_total{key="rl:tenant:acme"}` >100/min → escalar worker `HPA` o `RATE_LIMITS.tenant` por tenant flag futuro. |
-| `circuit_state=2` (OPEN) | S3/OIDC 5 fallos 2s timeout | `docker compose logs minio`, `curl minio:9000/minio/health/live`. Breaker pasa a `HALF_OPEN` tras 30s; si `GET /metrics` `circuit_rejects_total` sigue subiendo, revisar secret/access. |
-| `cache_stampede_fallback_total` spike | Muchas VUs same hot key expirado (p.ej. k6 50 VUs inventory) | Aumentar TTL `inventory 30s → 60s` o `lockTtl 5s → 10s`, o precargar cache en worker relay. No es error, indica contención. |
-| `x-cache: HIT` stale 30s | Invalidación perdida (Redis down durante write) | TTL acota a 30s; si crítico, `curl -X POST /invalidate?` futuro o bump `CACHE_VERSION v1→v2` y redeploy. Permisos nunca stale >30s. |
+| Señal                                 | Causa                                                        | Recuperación                                                                                                                                                                            |
+| ------------------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `x-cache: MISS` siempre               | Redis down / keys no hit                                     | Ver `docker compose logs redis`, `GET /metrics` `cache_misses_total` sube, `cache_hits 0`. API sigue 200 vía DB (p95 sube). Reiniciar `redis` no pierde datos.                          |
+| `429 RATE_LIMITED` burst legítimo     | Cliente excede 100/min IP o 1000/min tenant                  | Respetar `retry-after`, usar backoff jitter. Si tenant legítimo necesita más, subir `RATE_LIMITS.tenant.max` y redeploy.                                                                |
+| `hot tenant` monopoliza               | Un tenant 1000/min bloquea pero otros 200 OK                 | Alert `rate_limit_hits_total{key="rl:tenant:acme"}` >100/min → escalar worker `HPA` o `RATE_LIMITS.tenant` por tenant flag futuro.                                                      |
+| `circuit_state=2` (OPEN)              | S3/OIDC 5 fallos 2s timeout                                  | `docker compose logs minio`, `curl minio:9000/minio/health/live`. Breaker pasa a `HALF_OPEN` tras 30s; si `GET /metrics` `circuit_rejects_total` sigue subiendo, revisar secret/access. |
+| `cache_stampede_fallback_total` spike | Muchas VUs same hot key expirado (p.ej. k6 50 VUs inventory) | Aumentar TTL `inventory 30s → 60s` o `lockTtl 5s → 10s`, o precargar cache en worker relay. No es error, indica contención.                                                             |
+| `x-cache: HIT` stale 30s              | Invalidación perdida (Redis down durante write)              | TTL acota a 30s; si crítico, `curl -X POST /invalidate?` futuro o bump `CACHE_VERSION v1→v2` y redeploy. Permisos nunca stale >30s.                                                     |
 
 ## Observabilidad
 

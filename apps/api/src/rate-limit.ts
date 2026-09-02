@@ -135,7 +135,8 @@ export async function createRateLimiter(redisUrl?: string): Promise<RateLimiter>
   try {
     const mod = await import('ioredis').catch(() => null);
     if (!mod) return new RateLimiter(new InMemoryRateLimitStore());
-    const Redis = (mod as unknown as { default: new (url: string, opts: unknown) => unknown }).default;
+    const Redis = (mod as unknown as { default: new (url: string, opts: unknown) => unknown })
+      .default;
     const client = new Redis(redisUrl, {
       lazyConnect: false,
       connectTimeout: 1000,

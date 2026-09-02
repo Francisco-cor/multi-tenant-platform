@@ -173,12 +173,18 @@ class RedisCache implements Cache {
       const raw = JSON.stringify(value);
       // Use PX for ms, NX not needed here
       // ioredis set signature varies: try PX
-      await (this.client as unknown as { set(k: string, v: string, px: string, ttlMs: number, ex2?: string, ttlSec?: number): Promise<unknown> }).set(
-        key,
-        raw,
-        'PX',
-        ttlMs,
-      );
+      await (
+        this.client as unknown as {
+          set(
+            k: string,
+            v: string,
+            px: string,
+            ttlMs: number,
+            ex2?: string,
+            ttlSec?: number,
+          ): Promise<unknown>;
+        }
+      ).set(key, raw, 'PX', ttlMs);
     } catch {
       // fail-open
     }
@@ -224,7 +230,11 @@ class RedisCache implements Cache {
     let locked = false;
     try {
       // SET NX PX
-      const res = await (this.client as unknown as { set(k: string, v: string, nx: string, px: string, ttlMs: number): Promise<string | null> }).set(lockKey, '1', 'NX', 'PX', lockTtl);
+      const res = await (
+        this.client as unknown as {
+          set(k: string, v: string, nx: string, px: string, ttlMs: number): Promise<string | null>;
+        }
+      ).set(lockKey, '1', 'NX', 'PX', lockTtl);
       locked = res === 'OK';
     } catch {
       locked = false;
@@ -266,7 +276,8 @@ export async function createCache(redisUrl?: string): Promise<Cache> {
   try {
     const mod = await import('ioredis').catch(() => null);
     if (!mod) return new InMemoryCache();
-    const Redis = (mod as unknown as { default: new (url: string, opts: unknown) => unknown }).default;
+    const Redis = (mod as unknown as { default: new (url: string, opts: unknown) => unknown })
+      .default;
     const client = new Redis(redisUrl, {
       lazyConnect: false,
       connectTimeout: 2000,
@@ -291,12 +302,9 @@ export async function createCache(redisUrl?: string): Promise<Cache> {
         throw new Error('redis unreachable');
       });
     }
-    return new RedisCache(
-      client as unknown as RedisCache['client'],
-      async () => {
-        await client.quit().catch(() => undefined);
-      },
-    );
+    return new RedisCache(client as unknown as RedisCache['client'], async () => {
+      await client.quit().catch(() => undefined);
+    });
   } catch {
     return new InMemoryCache();
   }

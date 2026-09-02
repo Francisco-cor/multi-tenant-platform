@@ -49,10 +49,19 @@ export interface PaymentStore {
     input: CreateOrderWithPaymentInput,
   ): Promise<CreateOrderWithPaymentResult>;
   getOrder(context: StoreTenantContext, orderId: string): Promise<OrderRecord | null>;
-  getPaymentAttempt(context: StoreTenantContext, attemptId: string): Promise<PaymentAttemptRecord | null>;
-  getPaymentByProviderKey(context: StoreTenantContext, providerKey: string): Promise<PaymentAttemptRecord | null>;
+  getPaymentAttempt(
+    context: StoreTenantContext,
+    attemptId: string,
+  ): Promise<PaymentAttemptRecord | null>;
+  getPaymentByProviderKey(
+    context: StoreTenantContext,
+    providerKey: string,
+  ): Promise<PaymentAttemptRecord | null>;
   listOrders(context: StoreTenantContext, opts?: { limit?: number }): Promise<OrderRecord[]>;
-  listPaymentAttempts(context: StoreTenantContext, orderId?: string): Promise<PaymentAttemptRecord[]>;
+  listPaymentAttempts(
+    context: StoreTenantContext,
+    orderId?: string,
+  ): Promise<PaymentAttemptRecord[]>;
 }
 
 export class InMemoryPaymentStore implements PaymentStore {
@@ -145,7 +154,11 @@ export class InMemoryPaymentStore implements PaymentStore {
   }
 
   // Mutators for worker simulation
-  setAttemptStatus(attemptId: string, status: PaymentAttemptRecord['status'], providerRef?: string | null): void {
+  setAttemptStatus(
+    attemptId: string,
+    status: PaymentAttemptRecord['status'],
+    providerRef?: string | null,
+  ): void {
     const a = this.attempts.get(attemptId);
     if (!a) throw new Error('attempt_not_found');
     a.status = status;
@@ -161,7 +174,10 @@ export class PersistentPaymentStore implements PaymentStore {
     if (!db.role) throw new Error('database_role_required');
   }
 
-  static fromConnectionString(connectionString: string, role = 'platform_app'): PersistentPaymentStore {
+  static fromConnectionString(
+    connectionString: string,
+    role = 'platform_app',
+  ): PersistentPaymentStore {
     return new PersistentPaymentStore(createDatabase(connectionString, { role }));
   }
 
@@ -393,7 +409,10 @@ export class PersistentPaymentStore implements PaymentStore {
     });
   }
 
-  async listOrders(context: StoreTenantContext, opts: { limit?: number } = {}): Promise<OrderRecord[]> {
+  async listOrders(
+    context: StoreTenantContext,
+    opts: { limit?: number } = {},
+  ): Promise<OrderRecord[]> {
     const limit = Math.min(Math.max(opts.limit ?? 25, 1), 100);
     return withTenantTransaction(this.db, context, async (tx) => {
       const rows = await tx.execute<{
@@ -422,7 +441,10 @@ export class PersistentPaymentStore implements PaymentStore {
     });
   }
 
-  async listPaymentAttempts(context: StoreTenantContext, orderId?: string): Promise<PaymentAttemptRecord[]> {
+  async listPaymentAttempts(
+    context: StoreTenantContext,
+    orderId?: string,
+  ): Promise<PaymentAttemptRecord[]> {
     return withTenantTransaction(this.db, context, async (tx) => {
       const rows = await tx.execute<{
         id: string;
@@ -437,9 +459,11 @@ export class PersistentPaymentStore implements PaymentStore {
         last_error: string | null;
         created_at: string;
         updated_at: string;
-      }>(orderId
-        ? sql`select id, tenant_id, order_id, provider_key, status, provider_ref, amount_cents, currency, attempts, last_error, created_at, updated_at from payment_attempts where tenant_id = ${context.tenantId}::uuid and order_id = ${orderId}::uuid order by created_at desc`
-        : sql`select id, tenant_id, order_id, provider_key, status, provider_ref, amount_cents, currency, attempts, last_error, created_at, updated_at from payment_attempts where tenant_id = ${context.tenantId}::uuid order by created_at desc limit 100`);
+      }>(
+        orderId
+          ? sql`select id, tenant_id, order_id, provider_key, status, provider_ref, amount_cents, currency, attempts, last_error, created_at, updated_at from payment_attempts where tenant_id = ${context.tenantId}::uuid and order_id = ${orderId}::uuid order by created_at desc`
+          : sql`select id, tenant_id, order_id, provider_key, status, provider_ref, amount_cents, currency, attempts, last_error, created_at, updated_at from payment_attempts where tenant_id = ${context.tenantId}::uuid order by created_at desc limit 100`,
+      );
       return rows.map((r) => ({
         id: r.id,
         tenantId: r.tenant_id,

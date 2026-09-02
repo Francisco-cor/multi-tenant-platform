@@ -1,6 +1,11 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { buildCacheKey, buildCachePrefix, createInMemoryCache, CACHE_TTLS } from './cache.js';
-import { createInMemoryRateLimiter, rateLimitKeyForEndpoint, rateLimitKeyForIp, rateLimitKeyForTenant } from './rate-limit.js';
+import {
+  createInMemoryRateLimiter,
+  rateLimitKeyForEndpoint,
+  rateLimitKeyForIp,
+  rateLimitKeyForTenant,
+} from './rate-limit.js';
 import { createCircuitBreaker } from './circuit-breaker.js';
 import { buildApp } from './app.js';
 import { metrics } from '@platform/observability';
@@ -8,7 +13,11 @@ import { metrics } from '@platform/observability';
 describe('cache keys — tenant isolation + params hash', () => {
   it('tenant in key prevents cross-tenant hit', () => {
     const kAcme = buildCacheKey('tenant-acme', 'inventory', { branchId: 'b1', q: '', limit: 25 });
-    const kContoso = buildCacheKey('tenant-contoso', 'inventory', { branchId: 'b1', q: '', limit: 25 });
+    const kContoso = buildCacheKey('tenant-contoso', 'inventory', {
+      branchId: 'b1',
+      q: '',
+      limit: 25,
+    });
     expect(kAcme).not.toBe(kContoso);
     expect(kAcme).toContain('tenant-acme');
     expect(kContoso).toContain('tenant-contoso');
@@ -22,7 +31,9 @@ describe('cache keys — tenant isolation + params hash', () => {
 
   it('prefix is tenant+resource scoped', () => {
     expect(buildCachePrefix('tenant-acme', 'inventory')).toBe('tenant:tenant-acme:v1:inventory:');
-    expect(buildCachePrefix('tenant-acme', 'branches')).not.toBe(buildCachePrefix('tenant-contoso', 'branches'));
+    expect(buildCachePrefix('tenant-acme', 'branches')).not.toBe(
+      buildCachePrefix('tenant-contoso', 'branches'),
+    );
   });
 });
 
@@ -81,7 +92,9 @@ describe('cache-aside — hit/miss + tenant isolation + invalidation', () => {
     // monkey-patch get to throw once then recover
     const origGet = cache.get.bind(cache);
     let throws = true;
-    (cache as unknown as { get: typeof cache.get }).get = async <T>(k: string): Promise<T | null> => {
+    (cache as unknown as { get: typeof cache.get }).get = async <T>(
+      k: string,
+    ): Promise<T | null> => {
       if (throws) {
         throws = false;
         throw new Error('redis down');
@@ -145,9 +158,17 @@ describe('rate limiting — fixed window + tenant isolation', () => {
 
 describe('circuit breaker — OPEN after threshold', () => {
   it('opens after 5 fails, rejects without calling fn, recovers after timeout', async () => {
-    const breaker = createCircuitBreaker('test-s3', { failureThreshold: 5, timeoutMs: 200, requestTimeoutMs: 500 });
+    const breaker = createCircuitBreaker('test-s3', {
+      failureThreshold: 5,
+      timeoutMs: 200,
+      requestTimeoutMs: 500,
+    });
     for (let i = 0; i < 5; i++) {
-      await expect(breaker.execute(async () => { throw new Error('fail'); })).rejects.toThrow('fail');
+      await expect(
+        breaker.execute(async () => {
+          throw new Error('fail');
+        }),
+      ).rejects.toThrow('fail');
     }
     expect(breaker.getState()).toBe('OPEN');
     await expect(breaker.execute(async () => 'ok')).rejects.toThrow(/circuit_open/);
@@ -164,8 +185,14 @@ describe('circuit breaker — OPEN after threshold', () => {
   });
 
   it('timeout per-request', async () => {
-    const breaker = createCircuitBreaker('test-timeout', { failureThreshold: 2, timeoutMs: 1000, requestTimeoutMs: 30 });
-    await expect(breaker.execute(async () => new Promise((r) => setTimeout(r, 100)))).rejects.toThrow(/timeout/);
+    const breaker = createCircuitBreaker('test-timeout', {
+      failureThreshold: 2,
+      timeoutMs: 1000,
+      requestTimeoutMs: 30,
+    });
+    await expect(
+      breaker.execute(async () => new Promise((r) => setTimeout(r, 100))),
+    ).rejects.toThrow(/timeout/);
   });
 });
 
@@ -177,24 +204,44 @@ describe('API integration — cache headers + rate limit + tenant isolation', ()
     await app.ready();
 
     // create two users via dev-login (in-memory seed creates alice? We'll use sequential dev-login)
-    const acmeLogin = await app.inject({ method: 'POST', url: '/v1/auth/dev-login', payload: { userId: 'user-acme-only' } });
+    const acmeLogin = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/dev-login',
+      payload: { userId: 'user-acme-only' },
+    });
     const acmeCookie = String(acmeLogin.headers['set-cookie'] ?? '');
-    const contosoLogin = await app.inject({ method: 'POST', url: '/v1/auth/dev-login', payload: { userId: 'user-contoso-only' } });
+    const contosoLogin = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/dev-login',
+      payload: { userId: 'user-contoso-only' },
+    });
     const contosoCookie = String(contosoLogin.headers['set-cookie'] ?? '');
 
     // first acme branches → MISS
-    const first = await app.inject({ method: 'GET', url: '/v1/branches', headers: { host: 'acme.app.localhost', cookie: acmeCookie } });
+    const first = await app.inject({
+      method: 'GET',
+      url: '/v1/branches',
+      headers: { host: 'acme.app.localhost', cookie: acmeCookie },
+    });
     expect(first.statusCode).toBe(200);
     expect(first.headers['x-cache']).toBe('MISS');
     expect(first.headers['cache-control']).toContain('private');
     expect(first.headers['x-ratelimit-limit']).toBeDefined();
 
     // second → HIT
-    const second = await app.inject({ method: 'GET', url: '/v1/branches', headers: { host: 'acme.app.localhost', cookie: acmeCookie } });
+    const second = await app.inject({
+      method: 'GET',
+      url: '/v1/branches',
+      headers: { host: 'acme.app.localhost', cookie: acmeCookie },
+    });
     expect(second.headers['x-cache']).toBe('HIT');
 
     // contoso same endpoint → MISS (tenant-isolated key)
-    const contosoFirst = await app.inject({ method: 'GET', url: '/v1/branches', headers: { host: 'contoso.app.localhost', cookie: contosoCookie } });
+    const contosoFirst = await app.inject({
+      method: 'GET',
+      url: '/v1/branches',
+      headers: { host: 'contoso.app.localhost', cookie: contosoCookie },
+    });
     expect(contosoFirst.headers['x-cache']).toBe('MISS');
 
     await app.close();
@@ -203,13 +250,25 @@ describe('API integration — cache headers + rate limit + tenant isolation', ()
   it('POST /v1/inventory/reserve invalidates inventory cache', async () => {
     const app = buildApp({ allowDevLogin: true });
     await app.ready();
-    const login = await app.inject({ method: 'POST', url: '/v1/auth/dev-login', payload: { userId: 'user-acme-only' } });
+    const login = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/dev-login',
+      payload: { userId: 'user-acme-only' },
+    });
     const cookie = String(login.headers['set-cookie'] ?? '');
 
     // prime cache
-    const before = await app.inject({ method: 'GET', url: '/v1/inventory?branchId=branch-acme-main', headers: { host: 'acme.app.localhost', cookie } });
+    const before = await app.inject({
+      method: 'GET',
+      url: '/v1/inventory?branchId=branch-acme-main',
+      headers: { host: 'acme.app.localhost', cookie },
+    });
     expect(before.headers['x-cache']).toBe('MISS');
-    const cached = await app.inject({ method: 'GET', url: '/v1/inventory?branchId=branch-acme-main', headers: { host: 'acme.app.localhost', cookie } });
+    const cached = await app.inject({
+      method: 'GET',
+      url: '/v1/inventory?branchId=branch-acme-main',
+      headers: { host: 'acme.app.localhost', cookie },
+    });
     expect(cached.headers['x-cache']).toBe('HIT');
 
     // reserve → invalidates
@@ -221,7 +280,11 @@ describe('API integration — cache headers + rate limit + tenant isolation', ()
     });
     expect([201, 409].includes(reserve.statusCode)).toBe(true);
 
-    const after = await app.inject({ method: 'GET', url: '/v1/inventory?branchId=branch-acme-main', headers: { host: 'acme.app.localhost', cookie } });
+    const after = await app.inject({
+      method: 'GET',
+      url: '/v1/inventory?branchId=branch-acme-main',
+      headers: { host: 'acme.app.localhost', cookie },
+    });
     expect(after.headers['x-cache']).toBe('MISS');
 
     await app.close();
@@ -232,7 +295,11 @@ describe('API integration — cache headers + rate limit + tenant isolation', ()
     const limiter = createInMemoryRateLimiter();
     const app = buildApp({ allowDevLogin: true, rateLimiter: limiter });
     await app.ready();
-    const login = await app.inject({ method: 'POST', url: '/v1/auth/dev-login', payload: { userId: 'user-acme-only' } });
+    const login = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/dev-login',
+      payload: { userId: 'user-acme-only' },
+    });
     const cookie = String(login.headers['set-cookie'] ?? '');
 
     // Hit tenant limit 1000 quickly by spamming POST /v1/orders 21 times with lowered limit via monkey?

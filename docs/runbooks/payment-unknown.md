@@ -52,14 +52,14 @@ curl -s http://localhost:4000/health/ready | jq .dependencies
 
 ## Señales y causas
 
-| Señal | Causa | Acción |
-|---|---|---|
-| `payment_pending` sin decrementar | Worker caído o relay lag | `docker compose logs worker`, verifica `outbox_pending` y `processPayment` con `FakeProvider chargeCalls`. Retry es idempotente por `provider_key`. |
-| `payment_unknown 1` | Proveedor timeout / `provider_killed_after_charge` | No liberar reserva; reconciler resolverá en <5m vía `getStatus`. Si permanece >30m, `health payments fail` y alerta. |
-| `payment_unknown` con `oldest >30m` health `fail` | PSP caído prolongado | Consultar `provider.getStatus` manual, verificar `inbound_payment_events` dedupe, contactar PSP con `providerRef`. Solo `failed` libera reserva; `unknown` conserva. |
-| `webhook 401 signature_mismatch` | Secret rotado o body tampered | Verificar `PAYMENT_WEBHOOK_SECRET`, que `rawBody` sea `JSON.stringify(body)` canónico, y `timestamp` dentro de 5m. |
-| `webhook 401 timestamp_tolerance` | Clock skew >5m | Sincronizar NTP, tolerancia fija 5m (`webhook-payment.ts:9`). |
-| Cross-tenant `GET /v1/payments/:id` 404 | Intento de enumerar payment de otro tenant | IDs no filtrables: RLS + `WHERE tenant_id` garantiza 404 idéntico a no existe. Audit `payment.created` no expone datos sensibles. |
+| Señal                                             | Causa                                              | Acción                                                                                                                                                               |
+| ------------------------------------------------- | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `payment_pending` sin decrementar                 | Worker caído o relay lag                           | `docker compose logs worker`, verifica `outbox_pending` y `processPayment` con `FakeProvider chargeCalls`. Retry es idempotente por `provider_key`.                  |
+| `payment_unknown 1`                               | Proveedor timeout / `provider_killed_after_charge` | No liberar reserva; reconciler resolverá en <5m vía `getStatus`. Si permanece >30m, `health payments fail` y alerta.                                                 |
+| `payment_unknown` con `oldest >30m` health `fail` | PSP caído prolongado                               | Consultar `provider.getStatus` manual, verificar `inbound_payment_events` dedupe, contactar PSP con `providerRef`. Solo `failed` libera reserva; `unknown` conserva. |
+| `webhook 401 signature_mismatch`                  | Secret rotado o body tampered                      | Verificar `PAYMENT_WEBHOOK_SECRET`, que `rawBody` sea `JSON.stringify(body)` canónico, y `timestamp` dentro de 5m.                                                   |
+| `webhook 401 timestamp_tolerance`                 | Clock skew >5m                                     | Sincronizar NTP, tolerancia fija 5m (`webhook-payment.ts:9`).                                                                                                        |
+| Cross-tenant `GET /v1/payments/:id` 404           | Intento de enumerar payment de otro tenant         | IDs no filtrables: RLS + `WHERE tenant_id` garantiza 404 idéntico a no existe. Audit `payment.created` no expone datos sensibles.                                    |
 
 ## Recuperación
 

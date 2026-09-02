@@ -43,7 +43,6 @@ function isAllowedOrigin(origin: string | undefined, options: SecurityOptions): 
 
 export function registerSecurity(app: FastifyInstance, options: SecurityOptions): void {
   void app.register(helmet, {
-    // CSP: tight but not breaking JSON API. Report-only if you add frontend later.
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
@@ -53,7 +52,12 @@ export function registerSecurity(app: FastifyInstance, options: SecurityOptions)
         frameAncestors: ["'none'"],
       },
     },
-    crossOriginEmbedderPolicy: false, // API returns JSON, not cross-origin isolation
+    crossOriginEmbedderPolicy: false,
+    crossOriginOpenerPolicy: { policy: 'same-origin' },
+    crossOriginResourcePolicy: { policy: 'same-origin' },
+    referrerPolicy: { policy: 'no-referrer' },
+    noSniff: true,
+    xssFilter: true,
     hsts:
       process.env.NODE_ENV === 'production'
         ? { maxAge: 31_536_000, includeSubDomains: true, preload: true }
@@ -61,7 +65,6 @@ export function registerSecurity(app: FastifyInstance, options: SecurityOptions)
   });
 
   void app.register(cors, {
-    // Reflect origin only if allowed; otherwise CORS preflight will be rejected
     origin: (origin, callback) => {
       if (isAllowedOrigin(origin, options)) {
         callback(null, true);
@@ -76,8 +79,27 @@ export function registerSecurity(app: FastifyInstance, options: SecurityOptions)
       'Idempotency-Key',
       'X-Request-Id',
       'X-Correlation-Id',
+      'X-Trace-Id',
+      'Traceparent',
+      'X-Tenant-Id',
+      'X-Webhook-Timestamp',
+      'X-Webhook-Signature',
+      'X-Signature',
+      'X-Timestamp',
+      'X-Requested-With',
+      'Origin',
     ],
-    exposedHeaders: ['X-Request-Id', 'X-RateLimit-Limit', 'X-RateLimit-Remaining'],
+    exposedHeaders: [
+      'X-Request-Id',
+      'X-RateLimit-Limit',
+      'X-RateLimit-Remaining',
+      'X-RateLimit-Reset',
+      'X-RateLimit-Tenant-Limit',
+      'X-RateLimit-Tenant-Remaining',
+      'Retry-After',
+      'X-Cache',
+      'Cache-Control',
+    ],
     credentials: true,
     maxAge: 600,
   });

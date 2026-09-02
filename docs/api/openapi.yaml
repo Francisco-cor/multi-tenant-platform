@@ -886,6 +886,97 @@ paths:
                 $ref: '#/components/schemas/Automation'
         '400':
           $ref: '#/components/responses/BadRequest'
+  /v1/audit:
+    get:
+      tags: [Members]
+      operationId: listAudit
+      security: [{ oidc: [] }]
+      parameters:
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+        - name: action
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: Audit log tenant-scoped, append-only, paginated. Requires audit:read. Fields traceId, ip, result included (Fase 11).
+          headers:
+            x-ratelimit-limit: { schema: { type: integer } }
+            x-cache: { schema: { type: string } }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string }
+                        action: { type: string }
+                        actorUserId: { type: string }
+                        tenantId: { type: string }
+                        resourceId: { type: string }
+                        requestId: { type: string }
+                        traceId: { type: string }
+                        ip: { type: string }
+                        result: { type: string, enum: [success, failure] }
+                        at: { type: integer }
+                        metadata: { type: object }
+                  nextCursor: { type: string, nullable: true }
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/webhooks/endpoints/{endpointId}/rotate-secret:
+    post:
+      tags: [Webhooks]
+      operationId: rotateWebhookSecret
+      security: [{ oidc: [] }]
+      parameters:
+        - name: endpointId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '201':
+          description: Webhook secret rotated without downtime, version++ and audit webhook.secret_rotated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  endpoint: { $ref: '#/components/schemas/WebhookEndpoint' }
+                  secret: { type: string }
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/api-keys/{apiKeyId}/rotate:
+    post:
+      tags: [Webhooks]
+      operationId: rotateApiKey
+      security: [{ oidc: [] }]
+      parameters:
+        - name: apiKeyId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '201':
+          description: API key rotated, old revoked, new prefix/hash, audit api_key.rotated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeyResponse'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
 components:
   securitySchemes:
     oidc:
@@ -1229,7 +1320,8 @@ components:
         eventId: { type: string }
         eventType: { type: string }
         payload: { type: object, additionalProperties: true }
-        status: { type: string, enum: [pending, retrying, delivered, failed, dead_letter, disabled] }
+        status:
+          { type: string, enum: [pending, retrying, delivered, failed, dead_letter, disabled] }
         attempts: { type: integer, minimum: 0 }
         lastError: { type: string, nullable: true }
         nextAttemptAt: { type: integer }
@@ -1284,7 +1376,20 @@ components:
       required: [id, trigger, action, version, enabled]
       properties:
         id: { type: string, format: uuid }
-        trigger: { type: string, enum: [order.created, order.paid, order.failed, payment.paid, payment.failed, file.ready, inventory.reserved] }
+        trigger:
+          {
+            type: string,
+            enum:
+              [
+                order.created,
+                order.paid,
+                order.failed,
+                payment.paid,
+                payment.failed,
+                file.ready,
+                inventory.reserved,
+              ],
+          }
         action: { type: object, additionalProperties: true }
         version: { type: integer, minimum: 1 }
         enabled: { type: boolean }
@@ -1292,8 +1397,30 @@ components:
       type: object
       required: [trigger, action]
       properties:
-        trigger: { type: string, enum: [order.created, order.paid, order.failed, payment.paid, payment.failed, file.ready, inventory.reserved] }
-        action: { type: object, properties: { type: { type: string, enum: [webhook, log, noop] }, params: { type: object, additionalProperties: true } }, required: [type] }
+        trigger:
+          {
+            type: string,
+            enum:
+              [
+                order.created,
+                order.paid,
+                order.failed,
+                payment.paid,
+                payment.failed,
+                file.ready,
+                inventory.reserved,
+              ],
+          }
+        action:
+          {
+            type: object,
+            properties:
+              {
+                type: { type: string, enum: [webhook, log, noop] },
+                params: { type: object, additionalProperties: true },
+              },
+            required: [type],
+          }
         version: { type: integer, minimum: 1 }
         enabled: { type: boolean }
     AutomationPage:

@@ -139,7 +139,9 @@ async function checkPayments(): Promise<HealthCheckResult> {
       HEALTH_TIMEOUT_MS,
       'payments',
     );
-    const row = (rows as unknown as Array<{ unknown_count: string; oldest_unknown_age: string | null }>)[0];
+    const row = (
+      rows as unknown as Array<{ unknown_count: string; oldest_unknown_age: string | null }>
+    )[0];
     const unknownCount = row ? Number(row.unknown_count) : 0;
     const oldestAge = row?.oldest_unknown_age ? Number(row.oldest_unknown_age) : 0;
     // If any unknown >30m, mark degraded (needs reconciler attention)

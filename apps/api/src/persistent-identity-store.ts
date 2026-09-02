@@ -82,6 +82,9 @@ interface AuditRow extends Record<string, unknown> {
   action: AuditRecord['action'];
   resource_id: string | null;
   request_id: string;
+  trace_id: string | null;
+  ip: string | null;
+  result: string | null;
   created_at: Date | string;
   metadata: Record<string, string>;
 }
@@ -169,6 +172,9 @@ function mapAudit(row: AuditRow): AuditRecord {
     ...(row.tenant_id ? { tenantId: row.tenant_id } : {}),
     ...(row.resource_id ? { resourceId: row.resource_id } : {}),
     requestId: row.request_id,
+    ...(row.trace_id ? { traceId: row.trace_id } : {}),
+    ...(row.ip ? { ip: row.ip } : {}),
+    ...(row.result ? { result: row.result as AuditRecord['result'] } : {}),
     at: timestampToMillis(row.created_at),
     metadata: row.metadata,
   };
@@ -587,21 +593,57 @@ export class PersistentIdentityStore implements IdentityStore {
 
   public async addAudit(record: Omit<AuditRecord, 'id' | 'at'>): Promise<AuditRecord> {
     const insert = async (transaction: DatabaseExecutor): Promise<AuditRecord> => {
-      const rows = await transaction.execute<AuditRow>(sql`
-        insert into audit_log (tenant_id, actor_user_id, action, resource_id, request_id, metadata)
-        values (
-          ${record.tenantId ? sql`${record.tenantId}::uuid` : sql`null`},
-          ${record.actorUserId}::uuid,
-          ${record.action},
-          ${record.resourceId ? sql`${record.resourceId}::uuid` : sql`null`},
-          ${record.requestId},
-          ${JSON.stringify(record.metadata ?? {})}::jsonb
-        )
-        returning id, tenant_id, actor_user_id, action, resource_id, request_id, created_at, metadata
-      `);
-      const row = rows[0];
-      if (!row) throw new Error('audit_create_failed');
-      return mapAudit(row);
+      // Gracefully handle pre-migration rows without trace_id/ip/result columns: try full insert, fallback to minimal
+      try {
+        const rows = await transaction.execute<AuditRow>(sql`
+          insert into audit_log (tenant_id, actor_user_id, action, resource_id, request_id, trace_id, ip, result, metadata)
+          values (
+            ${record.tenantId ? sql`${record.tenantId}::uuid` : sql`null`},
+            ${record.actorUserId}::uuid,
+            ${record.action},
+            ${record.resourceId ? sql`${record.resourceId}::uuid` : sql`null`},
+            ${record.requestId},
+            ${record.traceId ?? null},
+            ${record.ip ?? null},
+            ${record.result ?? null},
+            ${JSON.stringify(record.metadata ?? {})}::jsonb
+          )
+          returning id, tenant_id, actor_user_id, action, resource_id, request_id, trace_id, ip, result, created_at, metadata
+        `);
+        const row = rows[0];
+        if (!row) throw new Error('audit_create_failed');
+        return mapAudit(row);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        if (
+          msg.includes('trace_id') ||
+          msg.includes('column') ||
+          msg.includes('result') ||
+          msg.includes('ip')
+        ) {
+          const rows = await transaction.execute<AuditRow>(sql`
+            insert into audit_log (tenant_id, actor_user_id, action, resource_id, request_id, metadata)
+            values (
+              ${record.tenantId ? sql`${record.tenantId}::uuid` : sql`null`},
+              ${record.actorUserId}::uuid,
+              ${record.action},
+              ${record.resourceId ? sql`${record.resourceId}::uuid` : sql`null`},
+              ${record.requestId},
+              ${JSON.stringify(record.metadata ?? {})}::jsonb
+            )
+            returning id, tenant_id, actor_user_id, action, resource_id, request_id, created_at, metadata
+          `);
+          const row = rows[0];
+          if (!row) throw new Error('audit_create_failed');
+          return mapAudit({
+            ...row,
+            trace_id: record.traceId ?? null,
+            ip: record.ip ?? null,
+            result: record.result ?? null,
+          } as AuditRow);
+        }
+        throw error;
+      }
     };
     if (record.tenantId) {
       return this.withTenant(
@@ -612,15 +654,67 @@ export class PersistentIdentityStore implements IdentityStore {
     return this.withApplicationTransaction(insert);
   }
 
-  public async listAudit(context: StoreTenantContext): Promise<AuditRecord[]> {
+  public async listAudit(
+    context: StoreTenantContext,
+    options: {
+      limit?: number | undefined;
+      cursor?: string | undefined;
+      action?: string | undefined;
+    } = {},
+  ): Promise<AuditRecord[]> {
     return this.withTenant(context, async (transaction) => {
-      const rows = await transaction.execute<AuditRow>(sql`
-        select id, tenant_id, actor_user_id, action, resource_id, request_id, created_at, metadata
-        from audit_log
-        where tenant_id = ${context.tenantId}::uuid
-        order by created_at, id
-      `);
-      return rows.map(mapAudit);
+      const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
+      const action = options.action ?? null;
+      let cursorCreatedAt: string | null = null;
+      let cursorId: string | null = null;
+      if (options.cursor) {
+        try {
+          const decoded = Buffer.from(options.cursor, 'base64url').toString('utf8');
+          const [ca, id] = decoded.split('|');
+          if (ca && id) {
+            cursorCreatedAt = ca;
+            cursorId = id;
+          } else if (decoded) {
+            cursorId = decoded;
+          }
+        } catch {
+          // ignore
+        }
+      }
+      // Try with new columns, fallback without
+      try {
+        const rows = await transaction.execute<AuditRow>(sql`
+          select id, tenant_id, actor_user_id, action, resource_id, request_id, trace_id, ip, result, created_at, metadata
+          from audit_log
+          where tenant_id = ${context.tenantId}::uuid
+            and (${action}::text is null or action = ${action})
+            and (
+              ${cursorCreatedAt}::timestamptz is null
+              or (created_at, id) > (${cursorCreatedAt}::timestamptz, ${cursorId}::uuid)
+            )
+          order by created_at, id
+          limit ${limit}
+        `);
+        return rows.map(mapAudit);
+      } catch {
+        const rows = await transaction.execute<AuditRow>(sql`
+          select id, tenant_id, actor_user_id, action, resource_id, request_id, created_at, metadata
+          from audit_log
+          where tenant_id = ${context.tenantId}::uuid
+            and (${action}::text is null or action = ${action})
+          order by created_at, id
+          limit ${limit}
+        `);
+        // manual cursor for fallback (filter in memory if needed)
+        let filtered: AuditRow[] = [...(rows as unknown as AuditRow[])];
+        if (cursorId) {
+          const idx = filtered.findIndex((r) => r.id === cursorId);
+          if (idx >= 0) filtered = filtered.slice(idx + 1, idx + 1 + limit);
+        }
+        return filtered.map((r) =>
+          mapAudit({ ...r, trace_id: null, ip: null, result: null } as AuditRow),
+        );
+      }
     });
   }
 }

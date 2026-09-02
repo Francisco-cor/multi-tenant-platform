@@ -431,21 +431,23 @@ No se intentará una transacción atómica entre PostgreSQL y el proveedor de pa
 
 ### Tareas
 
-- [ ] Definir eventos de auditoría: actor, tenant, acción, recurso, resultado, request ID, trace ID e IP si aplica.
-- [ ] Hacer audit log append-only, con retención y acceso restringido.
-- [ ] Aplicar validación estricta, límites de body, headers seguros y protección CSRF donde corresponda.
-- [ ] Revisar SSRF, path traversal, mass assignment, SQL injection, IDOR y exposición de errores.
-- [ ] Rotar secretos de OAuth, webhooks y almacenamiento sin downtime.
-- [ ] Añadir control de acceso para exportaciones, replays, DLQ y herramientas administrativas.
-- [ ] Ejecutar dependency audit, secret scanning, SAST y escaneo de imágenes.
-- [ ] Crear threat model y matriz de riesgos.
-- [ ] Documentar borrado/retención de datos y solicitudes de privacidad que entren en alcance.
+- [x] Definir eventos de auditoría: actor, tenant, acción, recurso, resultado, request ID, trace ID e IP si aplica.
+- [x] Hacer audit log append-only, con retención y acceso restringido.
+- [x] Aplicar validación estricta, límites de body, headers seguros y protección CSRF donde corresponda.
+- [x] Revisar SSRF, path traversal, mass assignment, SQL injection, IDOR y exposición de errores.
+- [x] Rotar secretos de OAuth, webhooks y almacenamiento sin downtime.
+- [x] Añadir control de acceso para exportaciones, replays, DLQ y herramientas administrativas.
+- [x] Ejecutar dependency audit, secret scanning, SAST y escaneo de imágenes.
+- [x] Crear threat model y matriz de riesgos.
+- [x] Documentar borrado/retención de datos y solicitudes de privacidad que entren en alcance.
 
 ### Criterios de salida
 
-- Existe una revisión de seguridad reproducible en CI y una lista de excepciones explícita.
-- Los endpoints privilegiados tienen pruebas negativas de autorización.
-- La auditoría no permite editar silenciosamente eventos históricos.
+- [x] Existe una revisión de seguridad reproducible en CI y una lista de excepciones explícita.
+- [x] Los endpoints privilegiados tienen pruebas negativas de autorización.
+- [x] La auditoría no permite editar silenciosamente eventos históricos.
+
+> Progreso sesión 10: Fase 11 cerrada — `migrations/schema/0011_audit_hardening.sql:1` `audit_log trace_id,ip,result` + índices retención `REVOKE UPDATE,DELETE` + trigger `prevent_audit_mutation` 45000, `apps/api/src/app.ts:538` `auditBase` `requestId/traceId/ip/result` + `GET /v1/audit?limit&cursor&action` `audit:read` (`owner/admin/manager/auditor`) + `x-ratelimit-*` + cursor `at|id`, `apps/api/src/plugins/security.ts:1` `helmet CSP/HSTS` + `cors *.${TENANT_BASE_DOMAIN}` + `bodyLimit 1MB + 256KB` + `zod .strict()` 17 schemas → `400 VALIDATION_ERROR` + `CSRF_STRICT` + `validateUrl` SSRF `private_blocked`, `apps/api/src/webhook-store.ts:60` `webhook_endpoints rotate-secret` + `apps/api/src/api-key-store.ts` `api_keys rotate` + audit `webhook.secret_rotated/api_key.rotated`, `CI .github/workflows/ci.yml:103` `security` `pnpm audit/high` + `gitleaks` + `semgrep p/security-audit` + `CodeQL` + `trivy fs CRITICAL,HIGH` + SARIF + `docs/security/exceptions.md`, `docs/threat-model.md` STRIDE + `SECURITY.md` headers/endurecimiento + rotación, `docs/privacy/gdpr.md` + `docs/runbooks/data-retention.md` + `gdpr-erasure.md` 365d audit, 8h sessions, `security.test.ts` 7 tests strict/SSRF/IDOR/audit trace+rotate 403.
 
 ## Fase 12 — Observabilidad y operación
 

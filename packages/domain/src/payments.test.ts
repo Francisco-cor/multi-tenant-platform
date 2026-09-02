@@ -29,10 +29,26 @@ describe('payments state machine', () => {
   });
 
   it('providerIdempotencyKey deterministic sha256(tenant:order:amount:currency)', () => {
-    const k1 = providerIdempotencyKey({ tenantId: '11111111-1111-4111-8111-111111111111', orderId: '22222222-2222-4222-8222-222222222222', amount: 1999 });
-    const k2 = providerIdempotencyKey({ tenantId: '11111111-1111-4111-8111-111111111111', orderId: '22222222-2222-4222-8222-222222222222', amount: 1999 });
-    const k3 = providerIdempotencyKey({ tenantId: '11111111-1111-4111-8111-111111111111', orderId: '22222222-2222-4222-8222-222222222222', amount: 2000 });
-    const k4 = providerIdempotencyKey({ tenantId: '99999999-9999-4999-8999-999999999999', orderId: '22222222-2222-4222-8222-222222222222', amount: 1999 });
+    const k1 = providerIdempotencyKey({
+      tenantId: '11111111-1111-4111-8111-111111111111',
+      orderId: '22222222-2222-4222-8222-222222222222',
+      amount: 1999,
+    });
+    const k2 = providerIdempotencyKey({
+      tenantId: '11111111-1111-4111-8111-111111111111',
+      orderId: '22222222-2222-4222-8222-222222222222',
+      amount: 1999,
+    });
+    const k3 = providerIdempotencyKey({
+      tenantId: '11111111-1111-4111-8111-111111111111',
+      orderId: '22222222-2222-4222-8222-222222222222',
+      amount: 2000,
+    });
+    const k4 = providerIdempotencyKey({
+      tenantId: '99999999-9999-4999-8999-999999999999',
+      orderId: '22222222-2222-4222-8222-222222222222',
+      amount: 1999,
+    });
     expect(k1).toBe(k2);
     expect(k1.length).toBe(32);
     expect(k1).not.toBe(k3);

@@ -36,7 +36,14 @@ export async function deliverWebhook(
   // Load delivery + endpoint with lock
   const ctx = await db.db.transaction(async (tx) => {
     const deliveries = await tx.execute<{
-      id: string; tenant_id: string; endpoint_id: string; event_id: string; event_type: string; payload: string; status: string; attempts: number;
+      id: string;
+      tenant_id: string;
+      endpoint_id: string;
+      event_id: string;
+      event_type: string;
+      payload: string;
+      status: string;
+      attempts: number;
     }>(sql`
       select id, tenant_id, endpoint_id, event_id, event_type, payload::text as payload, status, attempts
       from webhook_deliveries where id=${deliveryId}::uuid and tenant_id=${tenantId}::uuid for update
@@ -47,7 +54,10 @@ export async function deliverWebhook(
       return { delivery: del, endpoint: null, secret: null };
     }
     const endpoints = await tx.execute<{
-      id: string; url: string; secret_hash: string; status: string;
+      id: string;
+      url: string;
+      secret_hash: string;
+      status: string;
     }>(sql`
       select id, url, secret_hash, status from webhook_endpoints where id=${del.endpoint_id}::uuid and tenant_id=${tenantId}::uuid limit 1
     `);
@@ -58,7 +68,10 @@ export async function deliverWebhook(
   });
 
   if (!ctx.endpoint) {
-    return { status: ctx.delivery.status as DeliverResult['status'], attempts: ctx.delivery.attempts };
+    return {
+      status: ctx.delivery.status as DeliverResult['status'],
+      attempts: ctx.delivery.attempts,
+    };
   }
   if (ctx.endpoint.status !== 'active') {
     await db.db.execute(sql`
@@ -139,7 +152,9 @@ export async function deliverWebhook(
         select failure_count from webhook_endpoints where id=${ctx.endpoint!.id}::uuid
       `);
       if ((fails[0]?.failure_count ?? 0) >= 5) {
-        await tx.execute(sql`update webhook_endpoints set status='dead_letter', updated_at=now() where id=${ctx.endpoint!.id}::uuid`);
+        await tx.execute(
+          sql`update webhook_endpoints set status='dead_letter', updated_at=now() where id=${ctx.endpoint!.id}::uuid`,
+        );
       }
     } else if (shouldRetry) {
       const delay = backoffMs(attempts);
@@ -147,7 +162,9 @@ export async function deliverWebhook(
         update webhook_deliveries set status='retrying', attempts=${attempts}, last_error=${error}, next_attempt_at=now() + (${delay}::text || ' ms')::interval, updated_at=now()
         where id=${deliveryId}::uuid
       `);
-      await tx.execute(sql`update webhook_endpoints set failure_count=failure_count+1, updated_at=now() where id=${ctx.endpoint!.id}::uuid`);
+      await tx.execute(
+        sql`update webhook_endpoints set failure_count=failure_count+1, updated_at=now() where id=${ctx.endpoint!.id}::uuid`,
+      );
     } else {
       // 4xx failed
       await tx.execute(sql`
@@ -176,7 +193,9 @@ export async function deliverPendingWebhooks(
   let failed = 0;
   for (const r of rows) {
     // Mark claimed to avoid double process
-    await db.db.execute(sql`update webhook_deliveries set status='retrying', updated_at=now() where id=${r.id}::uuid and status in ('pending','retrying')`);
+    await db.db.execute(
+      sql`update webhook_deliveries set status='retrying', updated_at=now() where id=${r.id}::uuid and status in ('pending','retrying')`,
+    );
     const res = await deliverWebhook(db, r.id, r.tenant_id, { fetchFn: options.fetchFn });
     if (res.status === 'delivered') delivered++;
     else if (res.status === 'failed' || res.status === 'dead_letter') failed++;

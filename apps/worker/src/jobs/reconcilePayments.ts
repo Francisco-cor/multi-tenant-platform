@@ -91,7 +91,8 @@ export async function reconcilePayments(
     }
 
     // Map providerStatus to domain: if provider returns unknown keep unknown, else paid/failed
-    const target = providerStatus === 'paid' ? 'paid' : providerStatus === 'failed' ? 'failed' : 'unknown';
+    const target =
+      providerStatus === 'paid' ? 'paid' : providerStatus === 'failed' ? 'failed' : 'unknown';
 
     await db.db.transaction(async (tx) => {
       const currentRows = await tx.execute<{ status: string }>(sql`

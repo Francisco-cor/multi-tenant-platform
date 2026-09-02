@@ -60,29 +60,45 @@ export interface StoreTenantContext {
   userId?: string;
 }
 
+export type AuditAction =
+  | 'login'
+  | 'logout'
+  | 'invitation.created'
+  | 'invitation.accepted'
+  | 'organization.created'
+  | 'organization.switched'
+  | 'membership.role_changed'
+  | 'membership.removed'
+  | 'order.created'
+  | 'order.paid'
+  | 'payment.created'
+  | 'payment.paid'
+  | 'payment.failed'
+  | 'payment.webhook'
+  | 'webhook.created'
+  | 'webhook.updated'
+  | 'webhook.deleted'
+  | 'webhook.replayed'
+  | 'webhook.secret_rotated'
+  | 'api_key.created'
+  | 'api_key.revoked'
+  | 'api_key.rotated'
+  | 'dlq.replayed'
+  | 'dlq.discarded'
+  | 'automation.created';
+
 export interface AuditRecord {
   id: string;
-  action:
-    | 'login'
-    | 'logout'
-    | 'invitation.created'
-    | 'invitation.accepted'
-    | 'organization.created'
-    | 'organization.switched'
-    | 'membership.role_changed'
-    | 'membership.removed'
-    | 'order.created'
-    | 'order.paid'
-    | 'payment.created'
-    | 'payment.paid'
-    | 'payment.failed'
-    | 'payment.webhook';
+  action: AuditAction;
   actorUserId: string;
-  tenantId?: string;
-  resourceId?: string;
+  tenantId?: string | undefined;
+  resourceId?: string | undefined;
   requestId: string;
+  traceId?: string | undefined;
+  ip?: string | undefined;
+  result?: 'success' | 'failure' | undefined;
   at: number;
-  metadata?: Record<string, string>;
+  metadata?: Record<string, string> | undefined;
 }
 
 export interface CreateInvitationInput {
@@ -158,7 +174,14 @@ export interface IdentityStore {
     membershipId: string,
   ): MembershipRecord | PromiseLike<MembershipRecord>;
   addAudit(record: Omit<AuditRecord, 'id' | 'at'>): AuditRecord | PromiseLike<AuditRecord>;
-  listAudit(context: StoreTenantContext): AuditRecord[] | PromiseLike<AuditRecord[]>;
+  listAudit(
+    context: StoreTenantContext,
+    options?: {
+      limit?: number | undefined;
+      cursor?: string | undefined;
+      action?: string | undefined;
+    },
+  ): AuditRecord[] | PromiseLike<AuditRecord[]>;
   close?: () => void | PromiseLike<void>;
 }
 
@@ -505,9 +528,30 @@ export class InMemoryIdentityStore {
     return audit;
   }
 
-  listAudit(contextOrTenantId: StoreTenantContext | string): AuditRecord[] {
+  listAudit(
+    contextOrTenantId: StoreTenantContext | string,
+    options: {
+      limit?: number | undefined;
+      cursor?: string | undefined;
+      action?: string | undefined;
+    } = {},
+  ): AuditRecord[] {
     const tenantId =
       typeof contextOrTenantId === 'string' ? contextOrTenantId : contextOrTenantId.tenantId;
-    return this.auditLog.filter((record) => record.tenantId === tenantId);
+    let filtered = this.auditLog.filter((record) => record.tenantId === tenantId);
+    if (options.action) filtered = filtered.filter((r) => r.action === options.action);
+    // cursor is base64 of last id or at:id
+    let start = 0;
+    if (options.cursor) {
+      try {
+        const decoded = Buffer.from(options.cursor, 'base64url').toString('utf8');
+        const idx = filtered.findIndex((r) => r.id === decoded);
+        if (idx >= 0) start = idx + 1;
+      } catch {
+        // ignore
+      }
+    }
+    const limit = Math.min(Math.max(options.limit ?? 50, 1), 100);
+    return filtered.slice(start, start + limit);
   }
 }

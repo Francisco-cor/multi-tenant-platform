@@ -19,7 +19,11 @@ async function loginAs(app: ReturnType<typeof buildApp>, userId: string): Promis
   return sessionCookie(res);
 }
 
-async function loginAndSelect(app: ReturnType<typeof buildApp>, userId: string, slug: string): Promise<string> {
+async function loginAndSelect(
+  app: ReturnType<typeof buildApp>,
+  userId: string,
+  slug: string,
+): Promise<string> {
   const cookie = await loginAs(app, userId);
   // If user has multiple memberships, select tenant
   await app.inject({
@@ -61,7 +65,11 @@ describe('webhooks — tenant isolation, HMAC, dedupe, replay', () => {
 
     // Same URL different tenant allowed (contoso)
     // Need cookie for contoso tenant but host contoso
-    const contosoLogin = await app.inject({ method: 'POST', url: '/v1/auth/dev-login', payload: { userId: 'user-contoso-only' } });
+    const contosoLogin = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/dev-login',
+      payload: { userId: 'user-contoso-only' },
+    });
     const contosoCookie = sessionCookie(contosoLogin);
     const createContoso = await app.inject({
       method: 'POST',
@@ -72,13 +80,25 @@ describe('webhooks — tenant isolation, HMAC, dedupe, replay', () => {
     expect(createContoso.statusCode).toBe(201);
 
     // List acme sees 1, contoso sees 1
-    const listAcme = await app.inject({ method: 'GET', url: '/v1/webhooks/endpoints', headers: { host: 'acme.app.localhost', cookie: acmeCookie } });
+    const listAcme = await app.inject({
+      method: 'GET',
+      url: '/v1/webhooks/endpoints',
+      headers: { host: 'acme.app.localhost', cookie: acmeCookie },
+    });
     expect(listAcme.json().data.length).toBe(1);
-    const listContoso = await app.inject({ method: 'GET', url: '/v1/webhooks/endpoints', headers: { host: 'contoso.app.localhost', cookie: contosoCookie } });
+    const listContoso = await app.inject({
+      method: 'GET',
+      url: '/v1/webhooks/endpoints',
+      headers: { host: 'contoso.app.localhost', cookie: contosoCookie },
+    });
     expect(listContoso.json().data.length).toBe(1);
 
     // Cross-tenant GET 404
-    const getCross = await app.inject({ method: 'GET', url: `/v1/webhooks/endpoints/${endpointId}`, headers: { host: 'contoso.app.localhost', cookie: contosoCookie } });
+    const getCross = await app.inject({
+      method: 'GET',
+      url: `/v1/webhooks/endpoints/${endpointId}`,
+      headers: { host: 'contoso.app.localhost', cookie: contosoCookie },
+    });
     expect(getCross.statusCode).toBe(404);
 
     // Invalid URL http ->400
@@ -126,14 +146,26 @@ describe('webhooks — tenant isolation, HMAC, dedupe, replay', () => {
     expect(epRes.statusCode).toBe(201);
     // Simulate delivery creation via helper (not via business event)
     const ctx = { tenantId: 'tenant-acme', requestId: 'test', userId: 'user-alice' } as const;
-    const created = await webhookStore.createDeliveryForEvent(ctx as never, { eventId: 'evt_1', eventType: 'order.paid', payload: { orderId: 'o1' } });
+    const created = await webhookStore.createDeliveryForEvent(ctx as never, {
+      eventId: 'evt_1',
+      eventType: 'order.paid',
+      payload: { orderId: 'o1' },
+    });
     expect(created.length).toBe(1);
     const deliveryId = (created[0] as { id: string }).id;
     // Delivery should be visible via API
-    const list = await app.inject({ method: 'GET', url: '/v1/webhooks/deliveries', headers: { host: 'acme.app.localhost', cookie: acmeCookie } });
+    const list = await app.inject({
+      method: 'GET',
+      url: '/v1/webhooks/deliveries',
+      headers: { host: 'acme.app.localhost', cookie: acmeCookie },
+    });
     expect(list.json().data.length).toBe(1);
     // Duplicate eventId for same endpoint should not create new delivery (unique endpoint+event)
-    await webhookStore.createDeliveryForEvent(ctx as never, { eventId: 'evt_1', eventType: 'order.paid', payload: { orderId: 'o1' } });
+    await webhookStore.createDeliveryForEvent(ctx as never, {
+      eventId: 'evt_1',
+      eventType: 'order.paid',
+      payload: { orderId: 'o1' },
+    });
     // InMemory helper currently creates regardless? Our InMemory does not enforce unique endpoint+event for helper, but Persistent does.
     // Instead test replay: replay creates new pending with same eventId
     const replay = await app.inject({
@@ -144,11 +176,19 @@ describe('webhooks — tenant isolation, HMAC, dedupe, replay', () => {
     expect(replay.statusCode).toBe(200);
     expect(replay.json().delivery.eventId).toBe('evt_1');
     // Replay should create new delivery, list should have 2
-    const listAfter = await app.inject({ method: 'GET', url: '/v1/webhooks/deliveries', headers: { host: 'acme.app.localhost', cookie: acmeCookie } });
+    const listAfter = await app.inject({
+      method: 'GET',
+      url: '/v1/webhooks/deliveries',
+      headers: { host: 'acme.app.localhost', cookie: acmeCookie },
+    });
     expect(listAfter.json().data.length).toBe(2);
     // Cross-tenant list empty
     const contosoCookie = await loginAs(app, 'user-contoso-only');
-    const contosoList = await app.inject({ method: 'GET', url: '/v1/webhooks/deliveries', headers: { host: 'contoso.app.localhost', cookie: contosoCookie } });
+    const contosoList = await app.inject({
+      method: 'GET',
+      url: '/v1/webhooks/deliveries',
+      headers: { host: 'contoso.app.localhost', cookie: contosoCookie },
+    });
     expect(contosoList.json().data.length).toBe(0);
     // Cross-tenant replay 404
     const crossReplay = await app.inject({
@@ -162,11 +202,17 @@ describe('webhooks — tenant isolation, HMAC, dedupe, replay', () => {
   });
 
   it('inbound webhook HMAC dedupe: same eventId 3x ->1 effect, tampered ->401', async () => {
-    (globalThis as unknown as { __inboundDedupe?: Set<string> }).__inboundDedupe = new Set<string>();
+    (globalThis as unknown as { __inboundDedupe?: Set<string> }).__inboundDedupe =
+      new Set<string>();
     const app = buildApp({ allowDevLogin: true });
     const secret = 'test_webhook_secret';
     const tenant = 'tenant-acme';
-    const payload = { eventId: 'in_evt_1', source: 'external', payload: { foo: 'bar' }, tenantId: tenant };
+    const payload = {
+      eventId: 'in_evt_1',
+      source: 'external',
+      payload: { foo: 'bar' },
+      tenantId: tenant,
+    };
     const raw = JSON.stringify(payload);
     const ts = String(Math.floor(Date.now() / 1000));
     const sig = computeWebhookSignature(secret, ts, raw);
@@ -174,7 +220,11 @@ describe('webhooks — tenant isolation, HMAC, dedupe, replay', () => {
     const r1 = await app.inject({
       method: 'POST',
       url: '/v1/webhooks/inbound',
-      headers: { 'x-webhook-timestamp': ts, 'x-webhook-signature': `v1,${sig}`, 'x-tenant-id': tenant },
+      headers: {
+        'x-webhook-timestamp': ts,
+        'x-webhook-signature': `v1,${sig}`,
+        'x-tenant-id': tenant,
+      },
       payload,
     });
     expect(r1.statusCode).toBe(200);
@@ -183,14 +233,22 @@ describe('webhooks — tenant isolation, HMAC, dedupe, replay', () => {
     const r2 = await app.inject({
       method: 'POST',
       url: '/v1/webhooks/inbound',
-      headers: { 'x-webhook-timestamp': ts, 'x-webhook-signature': `v1,${sig}`, 'x-tenant-id': tenant },
+      headers: {
+        'x-webhook-timestamp': ts,
+        'x-webhook-signature': `v1,${sig}`,
+        'x-tenant-id': tenant,
+      },
       payload,
     });
     expect(r2.json().status).toBe('already_processed');
     const r3 = await app.inject({
       method: 'POST',
       url: '/v1/webhooks/inbound',
-      headers: { 'x-webhook-timestamp': ts, 'x-webhook-signature': `v1,${sig}`, 'x-tenant-id': tenant },
+      headers: {
+        'x-webhook-timestamp': ts,
+        'x-webhook-signature': `v1,${sig}`,
+        'x-tenant-id': tenant,
+      },
       payload,
     });
     expect(r3.json().status).toBe('already_processed');
@@ -199,7 +257,11 @@ describe('webhooks — tenant isolation, HMAC, dedupe, replay', () => {
     const bad = await app.inject({
       method: 'POST',
       url: '/v1/webhooks/inbound',
-      headers: { 'x-webhook-timestamp': ts, 'x-webhook-signature': `v1,${badSig}`, 'x-tenant-id': tenant },
+      headers: {
+        'x-webhook-timestamp': ts,
+        'x-webhook-signature': `v1,${badSig}`,
+        'x-tenant-id': tenant,
+      },
       payload: { ...payload, payload: { foo: 'tampered' } },
     });
     expect(bad.statusCode).toBe(401);
@@ -209,7 +271,11 @@ describe('webhooks — tenant isolation, HMAC, dedupe, replay', () => {
     const expired = await app.inject({
       method: 'POST',
       url: '/v1/webhooks/inbound',
-      headers: { 'x-webhook-timestamp': oldTs, 'x-webhook-signature': `v1,${oldSig}`, 'x-tenant-id': tenant },
+      headers: {
+        'x-webhook-timestamp': oldTs,
+        'x-webhook-signature': `v1,${oldSig}`,
+        'x-tenant-id': tenant,
+      },
       payload,
     });
     expect(expired.statusCode).toBe(401);
@@ -245,16 +311,32 @@ describe('webhooks — tenant isolation, HMAC, dedupe, replay', () => {
     const keyId = create.json().apiKey.id as string;
 
     // List acme sees 1, contoso sees 0
-    const listAcme = await app.inject({ method: 'GET', url: '/v1/api-keys', headers: { host: 'acme.app.localhost', cookie: ownerCookie } });
+    const listAcme = await app.inject({
+      method: 'GET',
+      url: '/v1/api-keys',
+      headers: { host: 'acme.app.localhost', cookie: ownerCookie },
+    });
     expect(listAcme.json().data.length).toBe(1);
     const contosoCookie = await loginAs(app, 'user-contoso-only');
-    const listContoso = await app.inject({ method: 'GET', url: '/v1/api-keys', headers: { host: 'contoso.app.localhost', cookie: contosoCookie } });
+    const listContoso = await app.inject({
+      method: 'GET',
+      url: '/v1/api-keys',
+      headers: { host: 'contoso.app.localhost', cookie: contosoCookie },
+    });
     expect(listContoso.json().data.length).toBe(0);
 
     // Revoke
-    const revoke = await app.inject({ method: 'DELETE', url: `/v1/api-keys/${keyId}`, headers: { host: 'acme.app.localhost', cookie: ownerCookie } });
+    const revoke = await app.inject({
+      method: 'DELETE',
+      url: `/v1/api-keys/${keyId}`,
+      headers: { host: 'acme.app.localhost', cookie: ownerCookie },
+    });
     expect(revoke.statusCode).toBe(200);
-    const after = await app.inject({ method: 'GET', url: '/v1/api-keys', headers: { host: 'acme.app.localhost', cookie: ownerCookie } });
+    const after = await app.inject({
+      method: 'GET',
+      url: '/v1/api-keys',
+      headers: { host: 'acme.app.localhost', cookie: ownerCookie },
+    });
     expect(after.json().data.length).toBe(0);
 
     // Automations: create versioned command
@@ -262,7 +344,11 @@ describe('webhooks — tenant isolation, HMAC, dedupe, replay', () => {
       method: 'POST',
       url: '/v1/automations',
       headers: { host: 'acme.app.localhost', cookie: ownerCookie },
-      payload: { trigger: 'order.paid', action: { type: 'log', params: { msg: 'hi' } }, version: 1 },
+      payload: {
+        trigger: 'order.paid',
+        action: { type: 'log', params: { msg: 'hi' } },
+        version: 1,
+      },
     });
     expect(auto.statusCode).toBe(201);
     expect(auto.json().automation.trigger).toBe('order.paid');
@@ -275,9 +361,17 @@ describe('webhooks — tenant isolation, HMAC, dedupe, replay', () => {
     });
     expect(badTrig.statusCode).toBe(400);
     // List tenant-scoped
-    const listAutoAcme = await app.inject({ method: 'GET', url: '/v1/automations', headers: { host: 'acme.app.localhost', cookie: ownerCookie } });
+    const listAutoAcme = await app.inject({
+      method: 'GET',
+      url: '/v1/automations',
+      headers: { host: 'acme.app.localhost', cookie: ownerCookie },
+    });
     expect(listAutoAcme.json().data.length).toBe(1);
-    const listAutoContoso = await app.inject({ method: 'GET', url: '/v1/automations', headers: { host: 'contoso.app.localhost', cookie: contosoCookie } });
+    const listAutoContoso = await app.inject({
+      method: 'GET',
+      url: '/v1/automations',
+      headers: { host: 'contoso.app.localhost', cookie: contosoCookie },
+    });
     expect(listAutoContoso.json().data.length).toBe(0);
 
     await app.close();

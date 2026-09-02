@@ -31,17 +31,11 @@ const TRANSITIONS: Record<PaymentAttemptStatus, readonly PaymentAttemptStatus[]>
   failed: [],
 };
 
-export function canTransition(
-  from: PaymentAttemptStatus,
-  to: PaymentAttemptStatus,
-): boolean {
+export function canTransition(from: PaymentAttemptStatus, to: PaymentAttemptStatus): boolean {
   return TRANSITIONS[from]?.includes(to) ?? false;
 }
 
-export function assertTransition(
-  from: PaymentAttemptStatus,
-  to: PaymentAttemptStatus,
-): void {
+export function assertTransition(from: PaymentAttemptStatus, to: PaymentAttemptStatus): void {
   if (!canTransition(from, to)) {
     throw new Error(`payment_transition_invalid:${from}->${to}`);
   }
