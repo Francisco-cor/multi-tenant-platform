@@ -161,6 +161,8 @@ export function getQueueForAggregate(aggregateType: string): QueueName {
     inventory: 'inventory',
     order: 'orders',
     orders: 'orders',
+    payment: 'orders',
+    payments: 'orders',
     webhook: 'webhooks',
     webhooks: 'webhooks',
     email: 'emails',

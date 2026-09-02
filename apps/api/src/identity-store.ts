@@ -70,7 +70,13 @@ export interface AuditRecord {
     | 'organization.created'
     | 'organization.switched'
     | 'membership.role_changed'
-    | 'membership.removed';
+    | 'membership.removed'
+    | 'order.created'
+    | 'order.paid'
+    | 'payment.created'
+    | 'payment.paid'
+    | 'payment.failed'
+    | 'payment.webhook';
   actorUserId: string;
   tenantId?: string;
   resourceId?: string;

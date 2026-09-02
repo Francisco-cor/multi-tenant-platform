@@ -126,9 +126,50 @@ async function checkOutbox(): Promise<HealthCheckResult> {
   }
 }
 
+async function checkPayments(): Promise<HealthCheckResult> {
+  const url = process.env.DATABASE_URL;
+  if (!url) return { name: 'payments', status: 'skip' };
+  const start = Date.now();
+  let sql: ReturnType<typeof postgres> | null = null;
+  try {
+    sql = postgres(url, { max: 1, prepare: false, connect_timeout: 2, idle_timeout: 2 });
+    const rows = await withTimeout(
+      sql`select count(*) as unknown_count, extract(epoch from (now() - min(updated_at))) as oldest_unknown_age
+           from payment_attempts where status='unknown'`,
+      HEALTH_TIMEOUT_MS,
+      'payments',
+    );
+    const row = (rows as unknown as Array<{ unknown_count: string; oldest_unknown_age: string | null }>)[0];
+    const unknownCount = row ? Number(row.unknown_count) : 0;
+    const oldestAge = row?.oldest_unknown_age ? Number(row.oldest_unknown_age) : 0;
+    // If any unknown >30m, mark degraded (needs reconciler attention)
+    if (unknownCount > 0 && oldestAge > 30 * 60) {
+      return {
+        name: 'payments',
+        status: 'fail',
+        latencyMs: Date.now() - start,
+        error: `unknown ${unknownCount} oldest ${oldestAge.toFixed(0)}s`,
+      };
+    }
+    return { name: 'payments', status: 'ok', latencyMs: Date.now() - start };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (msg.includes('payment_attempts') && msg.includes('does not exist'))
+      return { name: 'payments', status: 'skip' };
+    return { name: 'payments', status: 'fail', latencyMs: Date.now() - start, error: msg };
+  } finally {
+    if (sql) await sql.end({ timeout: 2 }).catch(() => undefined);
+  }
+}
+
 export async function getReadiness(): Promise<ReadyReport> {
-  const [pg, redis, outbox] = await Promise.all([checkDatabase(), checkRedis(), checkOutbox()]);
-  const deps = [pg, redis, outbox].filter((d) => d.status !== 'skip');
+  const [pg, redis, outbox, payments] = await Promise.all([
+    checkDatabase(),
+    checkRedis(),
+    checkOutbox(),
+    checkPayments(),
+  ]);
+  const deps = [pg, redis, outbox, payments].filter((d) => d.status !== 'skip');
   const hasFail = deps.some((d) => d.status === 'fail');
   return {
     status: hasFail ? 'degraded' : 'ok',

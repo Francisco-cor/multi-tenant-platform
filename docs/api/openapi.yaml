@@ -139,6 +139,95 @@ paths:
                 $ref: '#/components/schemas/Order'
         '409':
           $ref: '#/components/responses/Conflict'
+  /v1/orders/{orderId}:
+    get:
+      tags: [Orders]
+      operationId: getOrder
+      security: [{ oidc: [] }]
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Order tenant-scoped.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Order'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/payments/{paymentId}:
+    get:
+      tags: [Orders]
+      operationId: getPaymentAttempt
+      security: [{ oidc: [] }]
+      parameters:
+        - name: paymentId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Payment attempt tenant-scoped.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentAttempt'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/orders/{orderId}/payments:
+    get:
+      tags: [Orders]
+      operationId: listPaymentsForOrder
+      security: [{ oidc: [] }]
+      parameters:
+        - name: orderId
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Payment attempts for order, tenant-scoped.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentPage'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/webhooks/payments:
+    post:
+      tags: [Webhooks]
+      operationId: inboundPaymentWebhook
+      parameters:
+        - name: X-Webhook-Timestamp
+          in: header
+          required: true
+          schema: { type: string }
+        - name: X-Webhook-Signature
+          in: header
+          required: true
+          schema: { type: string }
+        - name: X-Tenant-Id
+          in: header
+          required: false
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PaymentWebhookRequest'
+      responses:
+        '200':
+          description: Webhook processed or already_processed (dedupe).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentWebhookResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
   /v1/inventory/reservations:
     post:
       tags: [Inventory]
@@ -342,7 +431,7 @@ paths:
       operationId: getMetrics
       responses:
         '200':
-          description: Prometheus metrics (outbox_lag_seconds, dlq_size).
+          description: Prometheus metrics (outbox_lag_seconds, dlq_size, payment_unknown, payment_pending).
           content:
             text/plain:
               schema: { type: string }
@@ -562,6 +651,11 @@ components:
             type: string,
             enum: [draft, pending_payment, paid, processing, completed, cancelled, failed],
           }
+        branchId: { type: string, format: uuid }
+        amountCents: { type: integer, minimum: 1 }
+        currency: { type: string, example: USD }
+        tenantId: { type: string, format: uuid }
+        createdAt: { type: integer }
     OrderPage:
       allOf:
         - $ref: '#/components/schemas/CursorPage'
@@ -569,9 +663,11 @@ components:
         data: { type: array, items: { $ref: '#/components/schemas/Order' } }
     CreateOrderRequest:
       type: object
-      required: [branchId, lines]
+      required: [branchId, amountCents]
       properties:
         branchId: { type: string }
+        amountCents: { type: integer, minimum: 1, maximum: 100000000 }
+        currency: { type: string, minLength: 3, maxLength: 10, default: USD }
         lines:
           type: array
           minItems: 1
@@ -581,6 +677,42 @@ components:
             properties:
               sku: { type: string }
               quantity: { type: integer, minimum: 1 }
+    PaymentAttempt:
+      type: object
+      required: [id, orderId, providerKey, status, amountCents, currency]
+      properties:
+        id: { type: string, format: uuid }
+        tenantId: { type: string, format: uuid }
+        orderId: { type: string, format: uuid }
+        providerKey: { type: string, pattern: '^[a-f0-9]{32}$' }
+        status: { type: string, enum: [created, pending, paid, failed, unknown] }
+        providerRef: { type: string, nullable: true }
+        amountCents: { type: integer, minimum: 1 }
+        currency: { type: string }
+        attempts: { type: integer, minimum: 0 }
+        createdAt: { type: integer }
+        updatedAt: { type: integer }
+    PaymentPage:
+      type: object
+      required: [data]
+      properties:
+        data: { type: array, items: { $ref: '#/components/schemas/PaymentAttempt' } }
+    PaymentWebhookRequest:
+      type: object
+      required: [eventId, providerRef, status]
+      properties:
+        eventId: { type: string, minLength: 8, maxLength: 128 }
+        providerRef: { type: string, minLength: 3, maxLength: 128 }
+        status: { type: string, enum: [paid, failed, unknown] }
+        providerKey: { type: string }
+        amountCents: { type: integer }
+        tenantId: { type: string, format: uuid }
+    PaymentWebhookResponse:
+      type: object
+      required: [status, eventId]
+      properties:
+        status: { type: string, enum: [processed, already_processed] }
+        eventId: { type: string }
     ReserveInventoryRequest:
       type: object
       required: [branchId, sku, quantity]

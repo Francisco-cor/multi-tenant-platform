@@ -273,6 +273,82 @@ export const dlqJobs = pgTable(
   (table) => [index('dlq_tenant_queue_idx').on(table.tenantId, table.queue, table.status)],
 );
 
+export const orders = pgTable(
+  'orders',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    branchId: uuid('branch_id')
+      .notNull()
+      .references(() => branches.id, { onDelete: 'cascade' }),
+    status: text('status').notNull().default('pending_payment'),
+    amountCents: integer('amount_cents').notNull(),
+    currency: text('currency').notNull().default('USD'),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    index('orders_tenant_status_idx').on(table.tenantId, table.status),
+    index('orders_tenant_created_idx').on(table.tenantId, table.createdAt),
+    index('orders_branch_idx').on(table.tenantId, table.branchId),
+  ],
+);
+
+export const paymentAttempts = pgTable(
+  'payment_attempts',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    orderId: uuid('order_id')
+      .notNull()
+      .references(() => orders.id, { onDelete: 'cascade' }),
+    providerKey: text('provider_key').notNull(),
+    status: text('status').notNull().default('created'),
+    providerRef: text('provider_ref'),
+    amountCents: integer('amount_cents').notNull(),
+    currency: text('currency').notNull().default('USD'),
+    attempts: integer('attempts').notNull().default(0),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('payment_provider_key_unique').on(table.providerKey),
+    index('payment_tenant_status_updated_idx')
+      .on(table.tenantId, table.status, table.updatedAt)
+      .where(sql`status in ('pending','unknown')`),
+    index('payment_tenant_order_idx').on(table.tenantId, table.orderId),
+    index('payment_provider_ref_idx')
+      .on(table.tenantId, table.providerRef)
+      .where(sql`provider_ref is not null`),
+  ],
+);
+
+export const inboundPaymentEvents = pgTable(
+  'inbound_payment_events',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    eventId: text('event_id').notNull(),
+    providerRef: text('provider_ref'),
+    status: text('status'),
+    payload: text('payload').notNull(),
+    processedAt: timestamp('processed_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('inbound_event_tenant_unique').on(table.tenantId, table.eventId),
+    index('inbound_tenant_created_idx').on(table.tenantId, table.createdAt),
+  ],
+);
+
 export const schema = {
   users,
   organizations,
@@ -286,6 +362,9 @@ export const schema = {
   outboxEvents,
   processedJobs,
   dlqJobs,
+  orders,
+  paymentAttempts,
+  inboundPaymentEvents,
 };
 
 export type Organization = typeof organizations.$inferSelect;

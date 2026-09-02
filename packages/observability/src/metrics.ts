@@ -11,6 +11,8 @@ export interface Metrics {
   jobDurationMs: Map<string, number[]>;
   jobRetries: Map<string, number>;
   dlqSize: number;
+  paymentUnknown: number;
+  paymentPending: number;
 }
 
 class InMemoryMetrics {
@@ -19,6 +21,8 @@ class InMemoryMetrics {
   public jobDurationMs = new Map<string, number[]>();
   public jobRetries = new Map<string, number>();
   public dlqSize = 0;
+  public paymentUnknown = 0;
+  public paymentPending = 0;
 
   recordOutboxLag(lagSeconds: number, pending: number): void {
     this.outboxLagSeconds = lagSeconds;
@@ -40,6 +44,14 @@ class InMemoryMetrics {
     this.dlqSize = size;
   }
 
+  recordPaymentUnknown(count: number): void {
+    this.paymentUnknown = count;
+  }
+
+  recordPaymentPending(count: number): void {
+    this.paymentPending = count;
+  }
+
   p95(queue: string): number {
     const arr = this.jobDurationMs.get(queue) ?? [];
     if (arr.length === 0) return 0;
@@ -59,6 +71,12 @@ class InMemoryMetrics {
     lines.push(`# HELP dlq_size jobs in dead letter`);
     lines.push(`# TYPE dlq_size gauge`);
     lines.push(`dlq_size ${this.dlqSize}`);
+    lines.push(`# HELP payment_unknown payment_attempts in unknown state`);
+    lines.push(`# TYPE payment_unknown gauge`);
+    lines.push(`payment_unknown ${this.paymentUnknown}`);
+    lines.push(`# HELP payment_pending payment_attempts in pending state`);
+    lines.push(`# TYPE payment_pending gauge`);
+    lines.push(`payment_pending ${this.paymentPending}`);
     for (const [q, c] of this.jobRetries) {
       lines.push(`job_retries_total{queue="${q}"} ${c}`);
     }
@@ -71,6 +89,8 @@ class InMemoryMetrics {
     this.jobDurationMs.clear();
     this.jobRetries.clear();
     this.dlqSize = 0;
+    this.paymentUnknown = 0;
+    this.paymentPending = 0;
   }
 }
 

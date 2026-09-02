@@ -121,6 +121,9 @@ importers:
       '@platform/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@platform/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
       '@platform/observability':
         specifier: workspace:*
         version: link:../../packages/observability

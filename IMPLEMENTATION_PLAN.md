@@ -276,20 +276,22 @@ Las fases se ejecutan en orden, pero una fase puede tener trabajo paralelo cuand
 
 ### Tareas
 
-- [ ] Modelar producto, SKU, stock por sucursal, movimientos y reservas.
-- [ ] Elegir reserva temporal vs decremento definitivo y documentar la decisión.
-- [ ] Implementar operación atómica: transacción, lock apropiado o `UPDATE ... WHERE available >= quantity`.
-- [ ] Crear constraint de cantidades no negativas y registro de movimiento con correlation ID.
-- [ ] Definir expiración/reconciliación de reservas mediante job idempotente.
-- [ ] Manejar deadlocks con retry limitado y backoff, sin repetir efectos no idempotentes.
-- [ ] Escribir prueba de concurrencia con decenas de requests y stock inicial 1.
-- [ ] Crear escenario de carga con varios tenants y sucursales para evitar hot spots globales.
+- [x] Modelar producto, SKU, stock por sucursal, movimientos y reservas.
+- [x] Elegir reserva temporal vs decremento definitivo y documentar la decisión.
+- [x] Implementar operación atómica: transacción, lock apropiado o `UPDATE ... WHERE available >= quantity`.
+- [x] Crear constraint de cantidades no negativas y registro de movimiento con correlation ID.
+- [x] Definir expiración/reconciliación de reservas mediante job idempotente.
+- [x] Manejar deadlocks con retry limitado y backoff, sin repetir efectos no idempotentes.
+- [x] Escribir prueba de concurrencia con decenas de requests y stock inicial 1.
+- [x] Crear escenario de carga con varios tenants y sucursales para evitar hot spots globales.
 
 ### Criterios de salida
 
-- Con stock 1, exactamente una operación gana y las demás reciben conflicto/sin stock.
-- El inventario final y los movimientos concuerdan después de reintentos.
-- La latencia y tasa de errores bajo carga tienen umbrales documentados.
+- [x] Con stock 1, exactamente una operación gana y las demás reciben conflicto/sin stock.
+- [x] El inventario final y los movimientos concuerdan después de reintentos.
+- [x] La latencia y tasa de errores bajo carga tienen umbrales documentados.
+
+> Progreso sesión 4: Fase 5 cerrada — `migrations/schema/0006_inventory.sql:1` + `schema.ts:103` `stockPerBranch` + `inventoryReservations` RLS `FORCE`, `apps/api/src/inventory-store.ts:445` `writeOutboxEvent` `inventory.reserved` en misma tx `UPDATE WHERE available>=qty`, `apps/worker/src/jobs/expireReservations.ts:38` `SKIP LOCKED`, `k6/inventory-stock1.js` + `inventory.concurrent.test.ts` stock 1 50 VUs (1×200 49×409), `ADR-006` + `failure/inventory-concurrency.md`.
 
 ## Fase 6 — Archivos y almacenamiento
 
@@ -358,20 +360,22 @@ No se intentará una transacción atómica entre PostgreSQL y el proveedor de pa
 
 ### Tareas
 
-- [ ] Definir interfaz `PaymentProvider` y fake determinista para tests.
-- [ ] Implementar estados y transiciones de `payment_attempt`.
-- [ ] Implementar idempotencia local y del proveedor.
-- [ ] Implementar webhook con firma, timestamp tolerance, replay protection y dedupe.
-- [ ] Implementar reconciler y alertas de pagos inciertos.
-- [ ] Añadir política de compensación/reembolso y permisos de replay.
-- [ ] Simular muerte del worker en cada punto del flujo.
-- [ ] Documentar el runbook de recuperación y evidencia esperada.
+- [x] Definir interfaz `PaymentProvider` y fake determinista para tests.
+- [x] Implementar estados y transiciones de `payment_attempt`.
+- [x] Implementar idempotencia local y del proveedor.
+- [x] Implementar webhook con firma, timestamp tolerance, replay protection y dedupe.
+- [x] Implementar reconciler y alertas de pagos inciertos.
+- [x] Añadir política de compensación/reembolso y permisos de replay.
+- [x] Simular muerte del worker en cada punto del flujo.
+- [x] Documentar el runbook de recuperación y evidencia esperada.
 
 ### Criterios de salida
 
-- El escenario de muerte post-cobro no duplica el cobro ni deja la orden en un estado imposible.
-- El sistema puede explicar la diferencia entre “falló”, “desconocido” y “pagado”.
-- Todos los caminos tienen audit log y métricas.
+- [x] El escenario de muerte post-cobro no duplica el cobro ni deja la orden en un estado imposible.
+- [x] El sistema puede explicar la diferencia entre “falló”, “desconocido” y “pagado”.
+- [x] Todos los caminos tienen audit log y métricas.
+
+> Progreso sesión 7: Fase 8 cerrada — `packages/domain/src/payments.ts:10` state machine `created→pending→paid|failed|unknown` + `providerIdempotencyKey=sha256(tenant:order:amount)` + `ADR-005`, `migrations/schema/0009_payments.sql:1` `orders`+`payment_attempts(provider_key UNIQUE)`+`inbound_payment_events(tenant,event_id UNIQUE)` `FORCE RLS` + `schema.ts`, `apps/api/src/payment-store.ts:40` `createOrderWithPayment` misma tx + outbox `payment|order`, `apps/worker/src/providers/fakePaymentProvider.ts:30` `FakeProvider` idempotente + `jobs/processPayment.ts:30` `FOR UPDATE` + `provider.charge` misma key + `orders.status=paid` idempotente + outbox, `apps/api/src/webhook-payment.ts:9` HMAC sha256 tolerance 5m + dedupe + `POST /v1/webhooks/payments` 401/200 already_processed, `apps/worker/src/jobs/reconcilePayments.ts:10` `SKIP LOCKED` pending>5m → `getStatus` + `metrics payment_unknown` + `health.ts:149` degraded Unknown>30m + `GET /metrics`, `payments.test.ts` + `payments.saga.test.ts` kill-mid-tx 1 charge + `runbooks/payment-unknown.md` + `failure/payment-saga.md`, `openapi.yaml` 25 paths 28 schemas `.openapi.hash fd0fe0b9ed98`.
 
 ## Fase 9 — Webhooks y automatizaciones
 
