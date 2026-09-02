@@ -13,6 +13,14 @@ export interface Metrics {
   dlqSize: number;
   paymentUnknown: number;
   paymentPending: number;
+  cacheHits: number;
+  cacheMisses: number;
+  cacheInvalidations: number;
+  cacheStampedeFallbacks: number;
+  rateLimitHits: Map<string, number>;
+  circuitOpens: Map<string, number>;
+  circuitRejects: Map<string, number>;
+  circuitState: Map<string, string>;
 }
 
 class InMemoryMetrics {
@@ -23,6 +31,14 @@ class InMemoryMetrics {
   public dlqSize = 0;
   public paymentUnknown = 0;
   public paymentPending = 0;
+  public cacheHits = 0;
+  public cacheMisses = 0;
+  public cacheInvalidations = 0;
+  public cacheStampedeFallbacks = 0;
+  public rateLimitHits = new Map<string, number>();
+  public circuitOpens = new Map<string, number>();
+  public circuitRejects = new Map<string, number>();
+  public circuitState = new Map<string, string>();
 
   recordOutboxLag(lagSeconds: number, pending: number): void {
     this.outboxLagSeconds = lagSeconds;
@@ -50,6 +66,38 @@ class InMemoryMetrics {
 
   recordPaymentPending(count: number): void {
     this.paymentPending = count;
+  }
+
+  recordCacheHit(): void {
+    this.cacheHits += 1;
+  }
+
+  recordCacheMiss(): void {
+    this.cacheMisses += 1;
+  }
+
+  recordCacheInvalidation(n: number): void {
+    this.cacheInvalidations += n;
+  }
+
+  recordCacheStampedeFallback(): void {
+    this.cacheStampedeFallbacks += 1;
+  }
+
+  recordRateLimitHit(key: string): void {
+    this.rateLimitHits.set(key, (this.rateLimitHits.get(key) ?? 0) + 1);
+  }
+
+  recordCircuitOpen(name: string): void {
+    this.circuitOpens.set(name, (this.circuitOpens.get(name) ?? 0) + 1);
+  }
+
+  recordCircuitRejected(name: string): void {
+    this.circuitRejects.set(name, (this.circuitRejects.get(name) ?? 0) + 1);
+  }
+
+  recordCircuitState(name: string, state: string): void {
+    this.circuitState.set(name, state);
   }
 
   p95(queue: string): number {
@@ -80,6 +128,31 @@ class InMemoryMetrics {
     for (const [q, c] of this.jobRetries) {
       lines.push(`job_retries_total{queue="${q}"} ${c}`);
     }
+    lines.push(`# HELP cache_hits_total cache hits`);
+    lines.push(`# TYPE cache_hits_total counter`);
+    lines.push(`cache_hits_total ${this.cacheHits}`);
+    lines.push(`# HELP cache_misses_total cache misses`);
+    lines.push(`# TYPE cache_misses_total counter`);
+    lines.push(`cache_misses_total ${this.cacheMisses}`);
+    lines.push(`# HELP cache_invalidations_total cache invalidations`);
+    lines.push(`# TYPE cache_invalidations_total counter`);
+    lines.push(`cache_invalidations_total ${this.cacheInvalidations}`);
+    lines.push(`# HELP cache_stampede_fallback_total stampede fallbacks`);
+    lines.push(`# TYPE cache_stampede_fallback_total counter`);
+    lines.push(`cache_stampede_fallback_total ${this.cacheStampedeFallbacks}`);
+    for (const [k, c] of this.rateLimitHits) {
+      lines.push(`rate_limit_hits_total{key="${k}"} ${c}`);
+    }
+    for (const [k, c] of this.circuitOpens) {
+      lines.push(`circuit_opens_total{breaker="${k}"} ${c}`);
+    }
+    for (const [k, c] of this.circuitRejects) {
+      lines.push(`circuit_rejects_total{breaker="${k}"} ${c}`);
+    }
+    for (const [k, s] of this.circuitState) {
+      const v = s === 'CLOSED' ? 0 : s === 'HALF_OPEN' ? 1 : 2;
+      lines.push(`circuit_state{breaker="${k}"} ${v}`);
+    }
     return lines.join('\n');
   }
 
@@ -91,6 +164,14 @@ class InMemoryMetrics {
     this.dlqSize = 0;
     this.paymentUnknown = 0;
     this.paymentPending = 0;
+    this.cacheHits = 0;
+    this.cacheMisses = 0;
+    this.cacheInvalidations = 0;
+    this.cacheStampedeFallbacks = 0;
+    this.rateLimitHits.clear();
+    this.circuitOpens.clear();
+    this.circuitRejects.clear();
+    this.circuitState.clear();
   }
 }
 

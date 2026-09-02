@@ -113,11 +113,13 @@ paths:
         - $ref: '#/components/parameters/Limit'
       responses:
         '200':
-          description: Orders for the tenant resolved from the request context.
+          description: Orders for the tenant resolved from the request context. Rate limited per tenant 1000/min + per IP 100/min. Headers x-ratelimit-*.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/OrderPage'
+        '429':
+          $ref: '#/components/responses/RateLimited'
     post:
       tags: [Orders]
       operationId: createOrder
@@ -132,13 +134,15 @@ paths:
               $ref: '#/components/schemas/CreateOrderRequest'
       responses:
         '201':
-          description: Order accepted.
+          description: Order accepted. Rate limited 20/min per tenant.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Order'
         '409':
           $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
   /v1/orders/{orderId}:
     get:
       tags: [Orders]
@@ -243,13 +247,93 @@ paths:
               $ref: '#/components/schemas/ReserveInventoryRequest'
       responses:
         '201':
-          description: Inventory reservation created.
+          description: Inventory reservation created. Invalidates cache for GET /v1/inventory. Rate limited 30/min per tenant.
         '409':
           description: Insufficient stock or concurrent conflict.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/inventory:
+    get:
+      tags: [Inventory]
+      operationId: listInventory
+      security: [{ oidc: [] }]
+      parameters:
+        - name: branchId
+          in: query
+          required: true
+          schema: { type: string }
+        - name: q
+          in: query
+          required: false
+          schema: { type: string }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Inventory by branch, tenant-scoped. Cached 30s per tenant+branch+query (x-cache HIT|MISS, private, stampede lock). Invalidated by POST reserve.
+          headers:
+            x-cache:
+              schema: { type: string, enum: [HIT, MISS] }
+            cache-control:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                  nextCursor: { type: string, nullable: true }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/branches:
+    get:
+      tags: [Inventory]
+      operationId: listBranches
+      security: [{ oidc: [] }]
+      responses:
+        '200':
+          description: Branches for tenant, tenant-scoped. Cached 60s per tenant (x-cache HIT|MISS).
+          headers:
+            x-cache:
+              schema: { type: string, enum: [HIT, MISS] }
+            cache-control:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { type: object }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/members:
+    get:
+      tags: [Members]
+      operationId: listMembersCached
+      security: [{ oidc: [] }]
+      responses:
+        '200':
+          description: Members for tenant, cached 30s per tenant (x-cache HIT|MISS).
+          headers:
+            x-cache:
+              schema: { type: string, enum: [HIT, MISS] }
+            cache-control:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MembershipPage'
+        '429':
+          $ref: '#/components/responses/RateLimited'
   /v1/files/presigned-upload:
     post:
       tags: [Files]
@@ -263,13 +347,20 @@ paths:
               $ref: '#/components/schemas/PresignRequest'
       responses:
         '201':
-          description: Presigned upload URL. Key is tenants/{tenantId}/{uuid}, TTL 300s.
+          description: Presigned upload URL. Key is tenants/{tenantId}/{uuid}, TTL 300s. Rate limited 20/min per tenant. S3 via circuit breaker (503 if open, 2s timeout).
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/PresignedUploadResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: Storage temporarily unavailable (circuit open).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ApiError' }
   /v1/files/presign:
     post:
       tags: [Files]
@@ -531,13 +622,20 @@ paths:
       security: [{ oidc: [] }]
       responses:
         '200':
-          description: Endpoints tenant-scoped.
+          description: Endpoints tenant-scoped. Cached 60s per tenant (x-cache HIT|MISS, private).
+          headers:
+            x-cache:
+              schema: { type: string, enum: [HIT, MISS] }
+            cache-control:
+              schema: { type: string }
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/WebhookEndpointPage'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/RateLimited'
     post:
       tags: [Webhooks]
       operationId: createWebhookEndpoint
@@ -550,13 +648,15 @@ paths:
               $ref: '#/components/schemas/CreateWebhookEndpointRequest'
       responses:
         '201':
-          description: Endpoint created, secret returned once.
+          description: Endpoint created, secret returned once. Rate limited 20/min per tenant. Invalidates cache.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/WebhookEndpointResponse'
         '409':
           $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
   /v1/webhooks/endpoints/{endpointId}:
     get:
       tags: [Webhooks]
@@ -833,6 +933,24 @@ components:
           schema: { $ref: '#/components/schemas/ApiError' }
     NotFound:
       description: Resource not found or not visible in this tenant.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ApiError' }
+    RateLimited:
+      description: Too many requests. Check x-ratelimit-* and retry-after headers.
+      headers:
+        x-ratelimit-limit:
+          schema: { type: integer }
+          description: Limit per window (e.g. 100/min IP, 1000/min tenant, 20/min endpoint)
+        x-ratelimit-remaining:
+          schema: { type: integer }
+          description: Remaining requests in window
+        x-ratelimit-reset:
+          schema: { type: integer }
+          description: Seconds until window reset
+        retry-after:
+          schema: { type: integer }
+          description: Seconds to wait before retry
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ApiError' }

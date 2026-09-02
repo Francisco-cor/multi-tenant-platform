@@ -408,20 +408,22 @@ No se intentará una transacción atómica entre PostgreSQL y el proveedor de pa
 
 ### Tareas
 
-- [ ] Identificar lecturas cacheables y TTL máximo por recurso.
-- [ ] Diseñar keys con tenant, versión y parámetros normalizados.
-- [ ] Invalidar por evento/outbox después de una escritura confirmada.
-- [ ] Usar cache-aside con protección contra stampede en lecturas costosas.
-- [ ] Implementar rate limits por IP, identidad, tenant y endpoint sensible.
-- [ ] Definir comportamiento si Redis está degradado: fail-open solo donde sea seguro, fail-closed para abuso claro.
-- [ ] Añadir timeouts, circuit breakers y límites para proveedores externos.
-- [ ] Definir presupuesto de latencia y tamaño de payload por endpoint.
+- [x] Identificar lecturas cacheables y TTL máximo por recurso.
+- [x] Diseñar keys con tenant, versión y parámetros normalizados.
+- [x] Invalidar por evento/outbox después de una escritura confirmada.
+- [x] Usar cache-aside con protección contra stampede en lecturas costosas.
+- [x] Implementar rate limits por IP, identidad, tenant y endpoint sensible.
+- [x] Definir comportamiento si Redis está degradado: fail-open solo donde sea seguro, fail-closed para abuso claro.
+- [x] Añadir timeouts, circuit breakers y límites para proveedores externos.
+- [x] Definir presupuesto de latencia y tamaño de payload por endpoint.
 
 ### Criterios de salida
 
-- Un cambio de datos no deja respuestas viejas más allá del TTL/política documentada.
-- Los límites no permiten que un tenant monopolice recursos compartidos.
-- La API sigue siendo segura cuando Redis no está disponible.
+- [x] Un cambio de datos no deja respuestas viejas más allá del TTL/política documentada.
+- [x] Los límites no permiten que un tenant monopolice recursos compartidos.
+- [x] La API sigue siendo segura cuando Redis no está disponible.
+
+> Progreso sesión 9: Fase 10 cerrada — `apps/api/src/cache.ts:1` `buildCacheKey tenant:{id}:v1:{resource}:hash16` `getOrLoad` lock `SET NX PX 5s` poll 10×50ms + `CACHE_TTLS branches 60s/inventory 30s/webhooks 60s` + `deleteByPrefix SCAN`, `apps/api/src/rate-limit.ts:1` `RATE_LIMITS ip 100/tenant 1000/user 200 + endpoints POST /orders 20/reserve 30/presigned 20/dev-login 10` fixed-window `rl:{kind}:{id}:{bucket}` Redis `INCR+EXPIRE` fallback InMemory, `apps/api/src/circuit-breaker.ts:1` `CLOSED→OPEN 5 fails 30s→HALF_OPEN 2 successes` `requestTimeoutMs 2s` `s3/oidc/payment` + `metrics cache_hits/misses/invalidations/rate_limit_hits/circuit_state` + `health redis fail → degraded pero fallback`, `apps/api/src/app.ts:413` `enforce*RateLimit` + `invalidateCache` en `branches/members/inventory/webhooks` + `s3Breaker` en presigned/download + `oidcBreaker` en discover, `openapi.yaml` 37 paths `b5422461d0b7` 44 schemas + 429 `RateLimited` + `x-cache/x-ratelimit-*`, `cache-rate-limit.test.ts` 13 tests tenant isolation/invalidation/stampede/rate 5→429/circuit OPEN.
 
 ## Fase 11 — Auditoría, seguridad y cumplimiento operativo
 

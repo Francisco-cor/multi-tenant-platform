@@ -44,6 +44,23 @@ import {
 import { getDefaultS3Service } from './s3.js';
 import { registerSecurity } from './plugins/security.js';
 import { metrics } from '@platform/observability';
+import {
+  buildCacheKey,
+  buildCachePrefix,
+  CACHE_TTLS,
+  createInMemoryCache,
+  type Cache,
+} from './cache.js';
+import {
+  createInMemoryRateLimiter,
+  RATE_LIMITS,
+  rateLimitKeyForEndpoint,
+  rateLimitKeyForIp,
+  rateLimitKeyForTenant,
+  rateLimitKeyForUser,
+  type RateLimiter,
+} from './rate-limit.js';
+import { createCircuitBreaker, type CircuitBreaker } from './circuit-breaker.js';
 import { InMemoryDlqStore, PersistentDlqStore, type DlqStore } from './dlq-store.js';
 import {
   InMemoryPaymentStore,
@@ -201,6 +218,13 @@ interface AppOptions {
   paymentStore?: PaymentStore;
   webhookStore?: WebhookStore;
   apiKeyStore?: ApiKeyStore;
+  cache?: Cache;
+  rateLimiter?: RateLimiter;
+  circuitBreakers?: {
+    s3?: CircuitBreaker;
+    payment?: CircuitBreaker;
+    oidc?: CircuitBreaker;
+  };
   baseDomain?: string;
   allowDevLogin?: boolean;
   oidc?: {
@@ -356,6 +380,16 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           process.env.DATABASE_ROLE ?? 'platform_app',
         )
       : new InMemoryApiKeyStore());
+  const cache: Cache = options.cache ?? createInMemoryCache();
+  const rateLimiter: RateLimiter = options.rateLimiter ?? createInMemoryRateLimiter();
+  const s3Breaker: CircuitBreaker =
+    options.circuitBreakers?.s3 ?? createCircuitBreaker('s3', { failureThreshold: 5, timeoutMs: 30_000, requestTimeoutMs: 2000 });
+  // paymentBreaker reserved for worker payment provider; keep for metrics even if not used directly in API order saga
+  const paymentBreaker: CircuitBreaker =
+    options.circuitBreakers?.payment ?? createCircuitBreaker('payment', { failureThreshold: 5, timeoutMs: 30_000, requestTimeoutMs: 3000 });
+  void paymentBreaker;
+  const oidcBreaker: CircuitBreaker =
+    options.circuitBreakers?.oidc ?? createCircuitBreaker('oidc', { failureThreshold: 3, timeoutMs: 60_000, requestTimeoutMs: 2000 });
   const stateStore = new InMemoryOidcStateStore();
   const baseDomain = options.baseDomain ?? process.env.TENANT_BASE_DOMAIN ?? DEFAULT_BASE_DOMAIN;
   const allowDevLogin = options.allowDevLogin ?? process.env.ALLOW_DEV_LOGIN === '1';
@@ -393,7 +427,74 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
 
   app.addHook('onClose', async () => {
     await store.close?.();
+    await cache.close?.();
+    await (rateLimiter as unknown as { close?: () => Promise<void> }).close?.();
   });
+
+  // --- Rate limiting: per-IP global (fail-open with in-memory fallback) ---
+  const RATE_LIMIT_ENABLED = process.env.RATE_LIMIT_ENABLED !== '0';
+  if (RATE_LIMIT_ENABLED) {
+    app.addHook('onRequest', async (request, reply) => {
+      // Skip health/metrics for liveness
+      if (request.url.startsWith('/health') || request.url === '/metrics') return;
+      const ip = request.ip;
+      const res = await rateLimiter.check(rateLimitKeyForIp(ip), RATE_LIMITS.ip);
+      reply.header('x-ratelimit-limit', String(res.limit));
+      reply.header('x-ratelimit-remaining', String(res.remaining));
+      reply.header('x-ratelimit-reset', String(Math.ceil(res.resetMs / 1000)));
+      if (!res.allowed) {
+        reply.header('retry-after', String(res.retryAfterSec ?? 60));
+        throw new RequestProblem(429, 'RATE_LIMITED', 'Too many requests', {
+          retryAfter: res.retryAfterSec,
+        });
+      }
+    });
+  }
+
+  const enforceTenantRateLimit = async (
+    request: FastifyRequest,
+    reply: import('fastify').FastifyReply,
+    context: TenantContext,
+  ): Promise<void> => {
+    if (!RATE_LIMIT_ENABLED) return;
+    const res = await rateLimiter.check(rateLimitKeyForTenant(context.tenantId), RATE_LIMITS.tenant);
+    reply.header('x-ratelimit-tenant-limit', String(res.limit));
+    reply.header('x-ratelimit-tenant-remaining', String(res.remaining));
+    if (!res.allowed) {
+      reply.header('retry-after', String(res.retryAfterSec ?? 60));
+      throw new RequestProblem(429, 'RATE_LIMITED', 'Tenant rate limit exceeded', {
+        retryAfter: res.retryAfterSec,
+      });
+    }
+    // also per-user within tenant
+    const userRes = await rateLimiter.check(rateLimitKeyForUser(context.user.id), RATE_LIMITS.user);
+    if (!userRes.allowed) {
+      reply.header('retry-after', String(userRes.retryAfterSec ?? 60));
+      throw new RequestProblem(429, 'RATE_LIMITED', 'User rate limit exceeded', {
+        retryAfter: userRes.retryAfterSec,
+      });
+    }
+  };
+
+  const enforceEndpointRateLimit = async (
+    request: FastifyRequest,
+    reply: import('fastify').FastifyReply,
+    endpointKey: string,
+    identifier: string,
+  ): Promise<void> => {
+    if (!RATE_LIMIT_ENABLED) return;
+    const cfg = (RATE_LIMITS.endpoints as Record<string, { windowMs: number; max: number; key: string }>)[endpointKey];
+    if (!cfg) return;
+    const res = await rateLimiter.check(rateLimitKeyForEndpoint(endpointKey, identifier), cfg);
+    reply.header('x-ratelimit-endpoint-limit', String(res.limit));
+    reply.header('x-ratelimit-endpoint-remaining', String(res.remaining));
+    if (!res.allowed) {
+      reply.header('retry-after', String(res.retryAfterSec ?? 60));
+      throw new RequestProblem(429, 'RATE_LIMITED', `Rate limit exceeded for ${endpointKey}`, {
+        retryAfter: res.retryAfterSec,
+      });
+    }
+  };
 
   const requireSession = async (request: FastifyRequest): Promise<SessionAuth> => {
     const token = requestToken(request);
@@ -464,6 +565,14 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     }
   };
 
+  const invalidateCache = async (tenantId: string, resource: string): Promise<void> => {
+    try {
+      await cache.deleteByPrefix(buildCachePrefix(tenantId, resource));
+    } catch {
+      // fail-open
+    }
+  };
+
   const createOidcIdentity = async (
     code: string,
     state: OidcStateRecord,
@@ -472,7 +581,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     if (!oidc.issuer || !oidc.clientId) {
       throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'OIDC is not configured');
     }
-    const metadata = await discoverOidcProvider(oidc.issuer);
+    const metadata = await oidcBreaker.execute(() => discoverOidcProvider(oidc.issuer));
     const { idToken } = await exchangeOidcCode({
       metadata,
       code,
@@ -569,6 +678,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
 
   app.post('/v1/auth/dev-login', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
     if (!allowDevLogin) throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
+    await enforceEndpointRateLimit(request, reply, 'POST /v1/auth/dev-login', request.ip);
     const body = parseOrThrow(DevLoginSchema, request.body);
     const user = await store.getUser(body.userId);
     if (!user || user.status !== 'active')
@@ -707,31 +817,53 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     return { organization: organizationView(context.organization) };
   });
 
-  app.get('/v1/branches', async (request) => {
+  app.get('/v1/branches', async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply, context);
     requirePermission(context, 'branches:read');
-    const branches = await store.listBranches(context);
-    return {
-      data: branches.map((branch: BranchRecord) => ({
-        id: branch.id,
-        slug: branch.slug,
-        name: branch.name,
-        status: branch.status,
-      })),
-    };
+    const cacheKey = buildCacheKey(context.tenantId, 'branches', {});
+    const { value, hit } = await cache.getOrLoad(
+      cacheKey,
+      CACHE_TTLS.branches,
+      async () => {
+        const branches = await store.listBranches(context);
+        return {
+          data: branches.map((branch: BranchRecord) => ({
+            id: branch.id,
+            slug: branch.slug,
+            name: branch.name,
+            status: branch.status,
+          })),
+        };
+      },
+    );
+    reply.header('x-cache', hit ? 'HIT' : 'MISS');
+    reply.header('cache-control', `private, max-age=${CACHE_TTLS.branches / 1000}`);
+    return value;
   });
 
-  app.get('/v1/members', async (request) => {
+  app.get('/v1/members', async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply, context);
     requirePermission(context, 'members:read');
-    const memberships = await store.listMembershipsForOrganization(context);
-    return {
-      data: await Promise.all(memberships.map((membership) => membershipView(membership, store))),
-    };
+    const cacheKey = buildCacheKey(context.tenantId, 'members', {});
+    const { value, hit } = await cache.getOrLoad(
+      cacheKey,
+      CACHE_TTLS.members,
+      async () => ({
+        data: await Promise.all(
+          (await store.listMembershipsForOrganization(context)).map((m) => membershipView(m, store)),
+        ),
+      }),
+    );
+    reply.header('x-cache', hit ? 'HIT' : 'MISS');
+    reply.header('cache-control', `private, max-age=${CACHE_TTLS.members / 1000}`);
+    return value;
   });
 
   app.post('/v1/members/invitations', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply, context);
     requirePermission(context, 'members:invite');
     const body = parseOrThrow(InvitationCreateSchema, request.body);
     let created: CreateInvitationResult;
@@ -757,6 +889,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       requestId: request.id,
       metadata: { role: body.role },
     });
+    await invalidateCache(context.tenantId, 'members');
     return reply.status(201).send({
       invitation: {
         id: created.invitation.id,
@@ -825,8 +958,9 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     },
   );
 
-  app.patch('/v1/members/:membershipId', { bodyLimit: SMALL_BODY_LIMIT }, async (request) => {
+  app.patch('/v1/members/:membershipId', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply as never, context);
     requirePermission(context, 'members:update_role');
     const params = request.params as { membershipId?: string };
     const body = parseOrThrow(RoleUpdateSchema, request.body);
@@ -846,6 +980,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
         requestId: request.id,
         metadata: { role: updated.role },
       });
+      await invalidateCache(context.tenantId, 'members');
       return { membership: await membershipView(updated, store) };
     } catch (error) {
       if (error instanceof Error && error.message === 'last_owner') {
@@ -855,8 +990,9 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     }
   });
 
-  app.delete('/v1/members/:membershipId', async (request) => {
+  app.delete('/v1/members/:membershipId', async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply as never, context);
     requirePermission(context, 'members:remove');
     const params = request.params as { membershipId?: string };
     const membership = params.membershipId
@@ -874,6 +1010,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
         resourceId: removed.id,
         requestId: request.id,
       });
+      await invalidateCache(context.tenantId, 'members');
       return { membership: await membershipView(removed, store) };
     } catch (error) {
       if (error instanceof Error && error.message === 'last_owner') {
@@ -885,6 +1022,8 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
 
   app.post('/v1/inventory/reserve', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply, context);
+    await enforceEndpointRateLimit(request, reply, 'POST /v1/inventory/reserve', context.tenantId);
     requirePermission(context, 'inventory:reserve');
     const body = parseOrThrow(ReserveSchema, request.body);
     try {
@@ -898,6 +1037,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           createdBy: context.user.id,
         },
       );
+      await invalidateCache(context.tenantId, 'inventory');
       return reply.status(201).send({ reservation });
     } catch (error) {
       if (error instanceof Error) {
@@ -915,8 +1055,9 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     }
   });
 
-  app.get('/v1/inventory/reservations', async (request) => {
+  app.get('/v1/inventory/reservations', async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply as never, context);
     requirePermission(context, 'inventory:read');
     const reservations = await inventoryStore.listReservations({
       tenantId: context.tenantId,
@@ -926,21 +1067,37 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     return { data: reservations };
   });
 
-  app.get('/v1/inventory', async (request) => {
+  app.get('/v1/inventory', async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply, context);
     requirePermission(context, 'inventory:read');
     const query = parseOrThrow(InventoryListQuery, request.query);
-    const result = await inventoryStore.listStock(
-      { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
-      query.branchId,
-      { q: query.q, limit: query.limit, cursor: query.cursor },
+    const cacheKey = buildCacheKey(context.tenantId, 'inventory', {
+      branchId: query.branchId,
+      q: query.q ?? '',
+      limit: query.limit,
+      cursor: query.cursor ?? '',
+    });
+    const { value, hit } = await cache.getOrLoad(
+      cacheKey,
+      CACHE_TTLS.inventory,
+      async () =>
+        inventoryStore.listStock(
+          { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
+          query.branchId,
+          { q: query.q, limit: query.limit, cursor: query.cursor },
+        ),
     );
-    return result;
+    reply.header('x-cache', hit ? 'HIT' : 'MISS');
+    reply.header('cache-control', `private, max-age=${CACHE_TTLS.inventory / 1000}`);
+    return value;
   });
 
   // --- Orders + Payments saga (tenant-isolation 6 capas + RLS) ---
   app.post('/v1/orders', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply, context);
+    await enforceEndpointRateLimit(request, reply, 'POST /v1/orders', context.tenantId);
     requirePermission(context, 'orders:create');
     const body = parseOrThrow(OrderCreateSchema, request.body);
     // branch must belong to tenant: check via store.listBranches
@@ -980,8 +1137,9 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     }
   });
 
-  app.get('/v1/orders', async (request) => {
+  app.get('/v1/orders', async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply as never, context);
     requirePermission(context, 'orders:read');
     const orders = await paymentStore.listOrders(
       { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
@@ -990,8 +1148,9 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     return { data: orders };
   });
 
-  app.get('/v1/orders/:id', async (request) => {
+  app.get('/v1/orders/:id', async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply as never, context);
     requirePermission(context, 'orders:read');
     const params = request.params as { id?: string };
     if (!params.id) throw new RequestProblem(400, 'BAD_REQUEST', 'Order id required');
@@ -1245,6 +1404,8 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   // --- Webhooks outbound (tenant-scoped) ---
   app.post('/v1/webhooks/endpoints', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply, context);
+    await enforceEndpointRateLimit(request, reply, 'POST /v1/webhooks/endpoints', context.tenantId);
     requirePermission(context, 'webhooks:manage');
     const body = parseOrThrow(WebhookEndpointCreateSchema, request.body);
     try {
@@ -1260,6 +1421,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
         requestId: request.id,
         metadata: { webhookCreated: endpoint.id },
       });
+      await invalidateCache(context.tenantId, 'webhooks:endpoints');
       return reply.status(201).send({ endpoint: { id: endpoint.id, url: endpoint.url, events: endpoint.events, status: endpoint.status }, secret: rawSecret });
     } catch (e) {
       if (e instanceof Error && e.message === 'webhook_url_taken') throw new RequestProblem(409, 'CONFLICT', 'Webhook URL already exists for this tenant');
@@ -1268,11 +1430,22 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     }
   });
 
-  app.get('/v1/webhooks/endpoints', async (request) => {
+  app.get('/v1/webhooks/endpoints', async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply as never, context);
     requirePermission(context, 'webhooks:read');
-    const eps = await webhookStore.listEndpoints({ tenantId: context.tenantId, requestId: request.id, userId: context.user.id });
-    return { data: eps.map((e) => ({ id: e.id, url: e.url, events: e.events, status: e.status, version: e.version })) };
+    const cacheKey = buildCacheKey(context.tenantId, 'webhooks:endpoints', {});
+    const { value, hit } = await cache.getOrLoad(
+      cacheKey,
+      CACHE_TTLS.webhooks,
+      async () => {
+        const eps = await webhookStore.listEndpoints({ tenantId: context.tenantId, requestId: request.id, userId: context.user.id });
+        return { data: eps.map((e) => ({ id: e.id, url: e.url, events: e.events, status: e.status, version: e.version })) };
+      },
+    );
+    reply.header('x-cache', hit ? 'HIT' : 'MISS');
+    reply.header('cache-control', `private, max-age=${CACHE_TTLS.webhooks / 1000}`);
+    return value;
   });
 
   app.get('/v1/webhooks/endpoints/:id', async (request) => {
@@ -1285,14 +1458,16 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     return { endpoint: { id: ep.id, url: ep.url, events: ep.events, status: ep.status, version: ep.version } };
   });
 
-  app.patch('/v1/webhooks/endpoints/:id', { bodyLimit: SMALL_BODY_LIMIT }, async (request) => {
+  app.patch('/v1/webhooks/endpoints/:id', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply as never, context);
     requirePermission(context, 'webhooks:manage');
     const params = request.params as { id?: string };
     if (!params.id) throw new RequestProblem(400, 'BAD_REQUEST', 'Webhook id required');
     const body = parseOrThrow(WebhookEndpointUpdateSchema, request.body);
     try {
       const ep = await webhookStore.updateEndpoint({ tenantId: context.tenantId, requestId: request.id, userId: context.user.id }, params.id, body);
+      await invalidateCache(context.tenantId, 'webhooks:endpoints');
       return { endpoint: { id: ep.id, url: ep.url, events: ep.events, status: ep.status, version: ep.version } };
     } catch (e) {
       if (e instanceof Error && e.message === 'webhook_not_found') throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
@@ -1301,13 +1476,15 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     }
   });
 
-  app.delete('/v1/webhooks/endpoints/:id', async (request) => {
+  app.delete('/v1/webhooks/endpoints/:id', async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply as never, context);
     requirePermission(context, 'webhooks:manage');
     const params = request.params as { id?: string };
     if (!params.id) throw new RequestProblem(400, 'BAD_REQUEST', 'Webhook id required');
     try {
       await webhookStore.deleteEndpoint({ tenantId: context.tenantId, requestId: request.id, userId: context.user.id }, params.id);
+      await invalidateCache(context.tenantId, 'webhooks:endpoints');
       return { status: 'deleted' };
     } catch (e) {
       if (e instanceof Error && e.message === 'webhook_not_found') throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
@@ -1315,8 +1492,9 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     }
   });
 
-  app.get('/v1/webhooks/deliveries', async (request) => {
+  app.get('/v1/webhooks/deliveries', async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply as never, context);
     requirePermission(context, 'webhooks:read');
     const query = parseOrThrow(z.object({ endpointId: z.string().optional(), limit: z.coerce.number().int().min(1).max(100).default(25) }), request.query);
     const deliveries = await webhookStore.listDeliveries({ tenantId: context.tenantId, requestId: request.id, userId: context.user.id }, { endpointId: query.endpointId, limit: query.limit });
@@ -1505,6 +1683,8 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     { bodyLimit: SMALL_BODY_LIMIT },
     async (request, reply) => {
       const context = await requireTenantContext(request);
+      await enforceTenantRateLimit(request, reply, context);
+      await enforceEndpointRateLimit(request, reply, 'POST /v1/files/presigned-upload', context.tenantId);
       requirePermission(context, 'files:upload');
       const body = parseOrThrow(FilePresignSchema, request.body);
       if (!ALLOWED_MIME_TYPES.has(body.contentType) && !ALLOWED_MIME_REGEX.test(body.contentType)) {
@@ -1528,12 +1708,22 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           },
         );
         const s3 = getDefaultS3Service();
-        const upload = await s3.generateUploadUrl({
-          key: file.key,
-          contentType: file.contentType,
-          sizeExpected: file.sizeExpected,
-          expiresSeconds: UPLOAD_TTL_SECONDS,
-        });
+        let upload: { url: string; expiresAt: number; headers: Record<string, string> };
+        try {
+          upload = await s3Breaker.execute(() =>
+            s3.generateUploadUrl({
+              key: file.key,
+              contentType: file.contentType,
+              sizeExpected: file.sizeExpected,
+              expiresSeconds: UPLOAD_TTL_SECONDS,
+            }),
+          );
+        } catch (e) {
+          if (e instanceof Error && (e as unknown as { code?: string }).code === 'CIRCUIT_OPEN') {
+            throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Storage temporarily unavailable');
+          }
+          throw e;
+        }
         // Never log full presigned URL / tokens — only key prefix is safe. We intentionally avoid logging url.
         return reply.status(201).send({
           file: {
@@ -1565,6 +1755,9 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           ) {
             throw new RequestProblem(400, 'BAD_REQUEST', error.message);
           }
+          if (error.message.includes('CIRCUIT_OPEN') || (error as unknown as { code?: string }).code === 'CIRCUIT_OPEN') {
+            throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Storage temporarily unavailable');
+          }
         }
         throw error;
       }
@@ -1574,6 +1767,8 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   // Legacy alias for OpenAPI compatibility: /v1/files/presign
   app.post('/v1/files/presign', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply, context);
+    await enforceEndpointRateLimit(request, reply, 'POST /v1/files/presign', context.tenantId);
     requirePermission(context, 'files:upload');
     // Accept legacy payload shape {filename, contentType, size} same as new
     const body = parseOrThrow(FilePresignSchema, request.body);
@@ -1590,17 +1785,27 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       },
     );
     const s3 = getDefaultS3Service();
-    const upload = await s3.generateUploadUrl({
-      key: file.key,
-      contentType: file.contentType,
-      sizeExpected: file.sizeExpected,
-      expiresSeconds: UPLOAD_TTL_SECONDS,
-    });
+    let upload: { url: string; expiresAt: number; headers: Record<string, string> };
+    try {
+      upload = await s3Breaker.execute(() =>
+        s3.generateUploadUrl({
+          key: file.key,
+          contentType: file.contentType,
+          sizeExpected: file.sizeExpected,
+          expiresSeconds: UPLOAD_TTL_SECONDS,
+        }),
+      );
+    } catch (e) {
+      if (e instanceof Error && (e as unknown as { code?: string }).code === 'CIRCUIT_OPEN')
+        throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Storage temporarily unavailable');
+      throw e;
+    }
     return reply.status(201).send({ file, upload });
   });
 
-  app.post('/v1/files/:id/finalize', { bodyLimit: SMALL_BODY_LIMIT }, async (request) => {
+  app.post('/v1/files/:id/finalize', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply as never, context);
     requirePermission(context, 'files:upload');
     const params = request.params as { id?: string };
     if (!params.id) throw new RequestProblem(400, 'BAD_REQUEST', 'File id required');
@@ -1685,8 +1890,9 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     };
   });
 
-  app.get('/v1/files', async (request) => {
+  app.get('/v1/files', async (request, reply) => {
     const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply as never, context);
     requirePermission(context, 'files:read');
     const query = parseOrThrow(
       z.object({
@@ -1727,7 +1933,14 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
         params.id,
       );
       const s3 = getDefaultS3Service();
-      const download = await s3.generateDownloadUrl({ key, expiresSeconds: DOWNLOAD_TTL_SECONDS });
+      let download: { url: string; expiresAt: number };
+      try {
+        download = await s3Breaker.execute(() => s3.generateDownloadUrl({ key, expiresSeconds: DOWNLOAD_TTL_SECONDS }));
+      } catch (e) {
+        if (e instanceof Error && (e as unknown as { code?: string }).code === 'CIRCUIT_OPEN')
+          throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Storage temporarily unavailable');
+        throw e;
+      }
       // Avoid logging download.url
       return {
         file: {
