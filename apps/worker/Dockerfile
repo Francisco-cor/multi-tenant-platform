@@ -32,6 +32,14 @@ COPY packages ./packages
 RUN pnpm --filter @platform/worker build
 
 FROM node:${NODE_VERSION} AS runner
+ARG COMMIT_SHA=unknown
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.revision=$COMMIT_SHA \
+      org.opencontainers.image.created=$BUILD_DATE \
+      org.opencontainers.image.version=$COMMIT_SHA \
+      org.opencontainers.image.source="https://github.com/multi-tenant-platform"
+ENV COMMIT_SHA=$COMMIT_SHA
+ENV BUILD_DATE=$BUILD_DATE
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 WORKDIR /app
 ENV NODE_ENV=production

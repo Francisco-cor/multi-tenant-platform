@@ -24,6 +24,7 @@ import {
   type MembershipRecord,
   type OrganizationRecord,
   type SessionRecord,
+  type StoreTenantContext,
   type UserRecord,
 } from './identity-store.js';
 import { getLiveness, getReadiness, getStartup } from './health.js';
@@ -84,6 +85,11 @@ import {
 } from './webhook-store.js';
 import { InMemoryApiKeyStore, PersistentApiKeyStore, type ApiKeyStore } from './api-key-store.js';
 import { validateAutomation } from '@platform/domain';
+import {
+  InMemoryFeatureFlagStore,
+  PersistentFeatureFlagStore,
+  type FeatureFlagStore,
+} from './feature-flag-store.js';
 
 const SESSION_COOKIE = 'platform_session';
 const OIDC_STATE_COOKIE = 'oidc_state';
@@ -247,6 +253,28 @@ const InboundWebhookSchema = z
     tenantId: z.string().min(1).max(128).optional(),
   })
   .strict();
+const FlagUpdateSchema = z
+  .object({
+    enabled: z.boolean(),
+    payload: z.record(z.string(), z.unknown()).optional(),
+  })
+  .strict();
+const BranchCreateSchema = z
+  .object({
+    slug: z
+      .string()
+      .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u)
+      .max(63),
+    name: z.string().trim().min(1).max(120),
+    description: z.string().max(500).optional(),
+  })
+  .strict();
+const BranchUpdateSchema = z
+  .object({
+    name: z.string().trim().min(1).max(120).optional(),
+    description: z.string().max(500).optional(),
+  })
+  .strict();
 
 class RequestProblem extends Error {
   constructor(
@@ -281,6 +309,7 @@ interface AppOptions {
   paymentStore?: PaymentStore;
   webhookStore?: WebhookStore;
   apiKeyStore?: ApiKeyStore;
+  featureFlagStore?: FeatureFlagStore;
   cache?: Cache;
   rateLimiter?: RateLimiter;
   circuitBreakers?: {
@@ -443,6 +472,14 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           process.env.DATABASE_ROLE ?? 'platform_app',
         )
       : new InMemoryApiKeyStore());
+  const featureFlagStore: FeatureFlagStore =
+    options.featureFlagStore ??
+    (process.env.DATABASE_URL
+      ? PersistentFeatureFlagStore.fromConnectionString(
+          process.env.DATABASE_URL,
+          process.env.DATABASE_ROLE ?? 'platform_app',
+        )
+      : new InMemoryFeatureFlagStore());
   const cache: Cache = options.cache ?? createInMemoryCache();
   const rateLimiter: RateLimiter = options.rateLimiter ?? createInMemoryRateLimiter();
   const s3Breaker: CircuitBreaker =
@@ -1059,6 +1096,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           id: branch.id,
           slug: branch.slug,
           name: branch.name,
+          ...(branch.description !== undefined ? { description: branch.description ?? '' } : {}),
           status: branch.status,
         })),
       };
@@ -1066,6 +1104,170 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     reply.header('x-cache', hit ? 'HIT' : 'MISS');
     reply.header('cache-control', `private, max-age=${CACHE_TTLS.branches / 1000}`);
     return value;
+  });
+
+  // Expand-contract branch create: supports description (nullable expand), old clients without description still 201
+  app.post('/v1/branches', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
+    const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply, context);
+    requirePermission(context, 'branches:create');
+    const body = parseOrThrow(BranchCreateSchema, request.body);
+    // Try persistent path with description, fallback without if column missing
+    if (
+      'createBranch' in store &&
+      typeof (store as unknown as { createBranch: unknown }).createBranch === 'function'
+    ) {
+      const ps = store as unknown as {
+        createBranch: (
+          ctx: StoreTenantContext,
+          input: { slug: string; name: string; description?: string | null },
+        ) => Promise<BranchRecord>;
+      };
+      try {
+        const created = await ps.createBranch(context, {
+          slug: body.slug,
+          name: body.name,
+          description: body.description ?? null,
+        });
+        await invalidateCache(context.tenantId, 'branches');
+        await store.addAudit(
+          auditBase(request, {
+            action: 'organization.created',
+            actorUserId: context.user.id,
+            tenantId: context.tenantId,
+            resourceId: created.id,
+            metadata: { branch: created.slug },
+          }),
+        );
+        return reply.status(201).send({
+          branch: {
+            id: created.id,
+            slug: created.slug,
+            name: created.name,
+            description: created.description ?? '',
+            status: created.status,
+          },
+        });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        if (msg.includes('description') && msg.includes('does not exist')) {
+          // fallback: create without description (vN compat)
+          const fallback = await (
+            store as unknown as {
+              createBranch: (
+                ctx: StoreTenantContext,
+                input: { slug: string; name: string },
+              ) => Promise<BranchRecord>;
+            }
+          ).createBranch(context, { slug: body.slug, name: body.name });
+          await invalidateCache(context.tenantId, 'branches');
+          return reply.status(201).send({
+            branch: {
+              id: fallback.id,
+              slug: fallback.slug,
+              name: fallback.name,
+              status: fallback.status,
+            },
+          });
+        }
+        if (
+          msg === 'organization_slug_taken' ||
+          msg.includes('branch_slug_taken') ||
+          msg.includes('duplicate key')
+        )
+          throw new RequestProblem(409, 'CONFLICT', 'Branch slug already exists');
+        throw error;
+      }
+    }
+    // InMemory path: direct map write tenant-scoped
+    const memStore = store as unknown as InMemoryIdentityStore;
+    try {
+      // Check duplicate slug for tenant
+      const existing = (memStore as unknown as { branches: Map<string, BranchRecord> }).branches
+        ? [
+            ...(memStore as unknown as { branches: Map<string, BranchRecord> }).branches.values(),
+          ].find((b) => b.organizationId === context.tenantId && b.slug === body.slug)
+        : null;
+      if (existing) throw new RequestProblem(409, 'CONFLICT', 'Branch slug already exists');
+      const id = `branch_${body.slug}_${Math.random().toString(36).slice(2, 8)}`;
+      const record: BranchRecord = {
+        id,
+        organizationId: context.tenantId,
+        slug: body.slug,
+        name: body.name,
+        ...(body.description !== undefined ? { description: body.description } : {}),
+        status: 'active',
+      };
+      (memStore as unknown as { branches: Map<string, BranchRecord> }).branches.set(id, record);
+      await invalidateCache(context.tenantId, 'branches');
+      return reply.status(201).send({
+        branch: {
+          id: record.id,
+          slug: record.slug,
+          name: record.name,
+          description: record.description ?? '',
+          status: record.status,
+        },
+      });
+    } catch (e) {
+      if (e instanceof RequestProblem) throw e;
+      throw e;
+    }
+  });
+
+  app.patch('/v1/branches/:id', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
+    const context = await requireTenantContext(request);
+    await enforceTenantRateLimit(request, reply as never, context);
+    requirePermission(context, 'branches:update');
+    const params = request.params as { id?: string };
+    if (!params.id) throw new RequestProblem(400, 'BAD_REQUEST', 'Branch id required');
+    const body = parseOrThrow(BranchUpdateSchema, request.body ?? {});
+    // Try persistent
+    if (
+      'updateBranch' in store &&
+      typeof (store as unknown as { updateBranch: unknown }).updateBranch === 'function'
+    ) {
+      const ps = store as unknown as {
+        updateBranch: (
+          ctx: StoreTenantContext,
+          id: string,
+          patch: { name?: string; description?: string | null },
+        ) => Promise<BranchRecord | null>;
+      };
+      const updated = await ps.updateBranch(context, params.id, {
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.description !== undefined ? { description: body.description } : {}),
+      });
+      if (!updated) throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
+      await invalidateCache(context.tenantId, 'branches');
+      return {
+        branch: {
+          id: updated.id,
+          slug: updated.slug,
+          name: updated.name,
+          description: updated.description ?? '',
+          status: updated.status,
+        },
+      };
+    }
+    // InMemory
+    const memStore = store as unknown as InMemoryIdentityStore;
+    const map = (memStore as unknown as { branches: Map<string, BranchRecord> }).branches;
+    const existing = map.get(params.id);
+    if (!existing || existing.organizationId !== context.tenantId)
+      throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
+    if (body.name !== undefined) existing.name = body.name;
+    if (body.description !== undefined) existing.description = body.description;
+    await invalidateCache(context.tenantId, 'branches');
+    return {
+      branch: {
+        id: existing.id,
+        slug: existing.slug,
+        name: existing.name,
+        description: existing.description ?? '',
+        status: existing.status,
+      },
+    };
   });
 
   app.get('/v1/members', async (request, reply) => {
@@ -1326,6 +1528,14 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     await enforceTenantRateLimit(request, reply, context);
     await enforceEndpointRateLimit(request, reply, 'POST /v1/orders', context.tenantId);
     requirePermission(context, 'orders:create');
+    // Kill switch per tenant (Fase 14): if kill_orders_write enabled, reject with 503 without touching DB
+    try {
+      const killed = await featureFlagStore.isEnabled(context, 'kill_orders_write');
+      if (killed)
+        throw new RequestProblem(503, 'KILL_SWITCH', 'Orders write disabled by kill switch');
+    } catch (e) {
+      if (e instanceof RequestProblem) throw e;
+    }
     const body = parseOrThrow(OrderCreateSchema, request.body);
     // branch must belong to tenant: check via store.listBranches
     const branches = await store.listBranches(context);
@@ -2676,6 +2886,64 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       }),
     );
     return { status: 'discarded' };
+  });
+
+  // --- Feature flags + kill switches (Fase 14) tenant-scoped ---
+  app.get('/v1/flags', async (request) => {
+    const context = await requireTenantContext(request);
+    requirePermission(context, 'organization:read');
+    const flags = await featureFlagStore.list(context);
+    return {
+      data: flags.map((f) => ({
+        flag: f.flag,
+        enabled: f.enabled,
+        payload: f.payload,
+        updatedAt: f.updatedAt,
+      })),
+    };
+  });
+
+  app.get('/v1/flags/:flag', async (request) => {
+    const context = await requireTenantContext(request);
+    requirePermission(context, 'organization:read');
+    const params = request.params as { flag?: string };
+    if (!params.flag) throw new RequestProblem(400, 'BAD_REQUEST', 'Flag name required');
+    if (!/^[a-z0-9_]{3,64}$/.test(params.flag))
+      throw new RequestProblem(400, 'BAD_REQUEST', 'Flag name invalid');
+    const rec = await featureFlagStore.get(context, params.flag);
+    if (!rec) return { flag: params.flag, enabled: false, payload: {}, updatedAt: null };
+    return { flag: rec.flag, enabled: rec.enabled, payload: rec.payload, updatedAt: rec.updatedAt };
+  });
+
+  app.put('/v1/flags/:flag', { bodyLimit: SMALL_BODY_LIMIT }, async (request) => {
+    const context = await requireTenantContext(request);
+    requirePermission(context, 'audit:read');
+    if (!['owner', 'admin'].includes(context.membership.role))
+      throw new RequestProblem(403, 'FORBIDDEN', 'Requires owner or admin');
+    const params = request.params as { flag?: string };
+    if (!params.flag) throw new RequestProblem(400, 'BAD_REQUEST', 'Flag name required');
+    if (!/^[a-z0-9_]{3,64}$/.test(params.flag))
+      throw new RequestProblem(400, 'BAD_REQUEST', 'Flag name invalid');
+    const body = parseOrThrow(FlagUpdateSchema, request.body ?? {});
+    const rec = await featureFlagStore.set(
+      context,
+      params.flag,
+      body.enabled,
+      body.payload ?? {},
+      context.user.id,
+    );
+    await store.addAudit(
+      auditBase(request, {
+        action: 'flag.updated',
+        actorUserId: context.user.id,
+        tenantId: context.tenantId,
+        resourceId: params.flag,
+        metadata: { flag: params.flag, enabled: String(body.enabled) },
+      }),
+    );
+    // Invalidate any cached flag-derived state: for now no cache, but metrics
+    metrics.recordAudit('flag.updated');
+    return { flag: rec.flag, enabled: rec.enabled, payload: rec.payload, updatedAt: rec.updatedAt };
   });
 
   app.get('/v1/audit', async (request, reply) => {

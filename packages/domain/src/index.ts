@@ -126,3 +126,4 @@ export function rolesHavePermission(roles: readonly Role[], permission: Permissi
 
 export * from './payments.js';
 export * from './automations.js';
+export * from './feature-flags.js';

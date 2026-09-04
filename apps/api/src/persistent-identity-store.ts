@@ -54,6 +54,7 @@ interface BranchRow extends Record<string, unknown> {
   tenant_id: string;
   slug: string;
   name: string;
+  description?: string | null;
   active: boolean;
 }
 
@@ -138,6 +139,7 @@ function mapBranch(row: BranchRow): BranchRecord {
     organizationId: row.tenant_id,
     slug: row.slug,
     name: row.name,
+    ...(row.description !== undefined ? { description: row.description } : {}),
     status: row.active ? 'active' : 'archived',
   };
 }
@@ -370,13 +372,109 @@ export class PersistentIdentityStore implements IdentityStore {
 
   public async listBranches(context: StoreTenantContext): Promise<BranchRecord[]> {
     return this.withTenant(context, async (transaction) => {
-      const rows = await transaction.execute<BranchRow>(sql`
-        select id, tenant_id, slug, name, active
-        from branches
-        where tenant_id = ${context.tenantId}::uuid
-        order by slug, id
-      `);
-      return rows.map(mapBranch);
+      // Dual-read: try with description (expand), fallback without if column missing (vN compat)
+      try {
+        const rows = await transaction.execute<BranchRow>(sql`
+          select id, tenant_id, slug, name, coalesce(description,'') as description, active
+          from branches
+          where tenant_id = ${context.tenantId}::uuid
+          order by slug, id
+        `);
+        return rows.map(mapBranch);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        if (msg.includes('description') && msg.includes('does not exist')) {
+          const rows = await transaction.execute<BranchRow>(sql`
+            select id, tenant_id, slug, name, active
+            from branches
+            where tenant_id = ${context.tenantId}::uuid
+            order by slug, id
+          `);
+          return rows.map(mapBranch);
+        }
+        throw error;
+      }
+    });
+  }
+
+  public async createBranch(
+    context: StoreTenantContext,
+    input: { slug: string; name: string; description?: string | null },
+  ): Promise<BranchRecord> {
+    return this.withTenant(context, async (transaction) => {
+      // Dual-write: try with description (vN+1), fallback without if column missing (vN)
+      try {
+        const rows = await transaction.execute<BranchRow>(sql`
+          insert into branches (tenant_id, slug, name, description, active, created_by)
+          values (${context.tenantId}::uuid, ${input.slug}, ${input.name}, ${input.description ?? null}, true, ${context.userId ?? null}::uuid)
+          returning id, tenant_id, slug, name, coalesce(description,'') as description, active
+        `);
+        const row = rows[0];
+        if (!row) throw new Error('branch_create_failed');
+        return mapBranch(row);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        if (msg.includes('description') && msg.includes('does not exist')) {
+          const rows = await transaction.execute<BranchRow>(sql`
+            insert into branches (tenant_id, slug, name, active, created_by)
+            values (${context.tenantId}::uuid, ${input.slug}, ${input.name}, true, ${context.userId ?? null}::uuid)
+            returning id, tenant_id, slug, name, active
+          `);
+          const row = rows[0];
+          if (!row) throw new Error('branch_create_failed');
+          return mapBranch(row);
+        }
+        if (isPostgresError(error, '23505')) throw new Error('branch_slug_taken');
+        throw error;
+      }
+    });
+  }
+
+  public async updateBranch(
+    context: StoreTenantContext,
+    branchId: string,
+    patch: { name?: string; description?: string | null },
+  ): Promise<BranchRecord | null> {
+    return this.withTenant(context, async (transaction) => {
+      // Check existence and tenant scoping
+      const existing = await transaction
+        .execute<BranchRow>(
+          sql`
+        select id, tenant_id, slug, name, coalesce(description,'') as description, active from branches where id = ${branchId}::uuid and tenant_id = ${context.tenantId}::uuid limit 1
+      `,
+        )
+        .catch(async (err) => {
+          const msg = err instanceof Error ? err.message : String(err);
+          if (msg.includes('description') && msg.includes('does not exist')) {
+            return transaction.execute<BranchRow>(
+              sql`select id, tenant_id, slug, name, active from branches where id = ${branchId}::uuid and tenant_id = ${context.tenantId}::uuid limit 1`,
+            );
+          }
+          throw err;
+        });
+      if (existing.length === 0) return null;
+      try {
+        const row = await transaction.execute<BranchRow>(sql`
+          update branches
+          set
+            name = coalesce(${patch.name ?? null}::text, name),
+            description = case when ${patch.description !== undefined}::boolean then ${patch.description ?? null}::text else description end,
+            updated_at = now()
+          where id = ${branchId}::uuid and tenant_id = ${context.tenantId}::uuid
+          returning id, tenant_id, slug, name, coalesce(description,'') as description, active
+        `);
+        return row[0] ? mapBranch(row[0]) : null;
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        if (msg.includes('description') && msg.includes('does not exist')) {
+          if (patch.description !== undefined) throw new Error('description_not_supported');
+          const row = await transaction.execute<BranchRow>(sql`
+            update branches set name = coalesce(${patch.name ?? null}::text, name), updated_at = now() where id = ${branchId}::uuid and tenant_id = ${context.tenantId}::uuid returning id, tenant_id, slug, name, active
+          `);
+          return row[0] ? mapBranch(row[0]) : null;
+        }
+        throw error;
+      }
     });
   }
 

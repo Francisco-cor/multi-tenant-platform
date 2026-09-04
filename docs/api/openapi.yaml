@@ -299,7 +299,7 @@ paths:
       security: [{ oidc: [] }]
       responses:
         '200':
-          description: Branches for tenant, tenant-scoped. Cached 60s per tenant (x-cache HIT|MISS).
+          description: Branches for tenant, tenant-scoped. Cached 60s per tenant (x-cache HIT|MISS). Dual-read supports description (nullable expand, COALESCE fallback for vN).
           headers:
             x-cache:
               schema: { type: string, enum: [HIT, MISS] }
@@ -313,6 +313,73 @@ paths:
                   data:
                     type: array
                     items: { type: object }
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    post:
+      tags: [Inventory]
+      operationId: createBranch
+      security: [{ oidc: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [slug, name]
+              properties:
+                slug: { type: string, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$', maxLength: 63 }
+                name: { type: string, minLength: 1, maxLength: 120 }
+                description: { type: string, maxLength: 500 }
+      responses:
+        '201':
+          description: Branch created, expand-contract nullable description (vN without description still 201, vN+1 with description).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  branch:
+                    type: object
+                    properties:
+                      id: { type: string }
+                      slug: { type: string }
+                      name: { type: string }
+                      description: { type: string }
+                      status: { type: string }
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/branches/{branchId}:
+    patch:
+      tags: [Inventory]
+      operationId: updateBranch
+      security: [{ oidc: [] }]
+      parameters:
+        - name: branchId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, minLength: 1, maxLength: 120 }
+                description: { type: string, maxLength: 500 }
+      responses:
+        '200':
+          description: Branch updated (description dual-read).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  branch: { type: object }
+        '404':
+          $ref: '#/components/responses/NotFound'
         '429':
           $ref: '#/components/responses/RateLimited'
   /v1/members:
@@ -884,6 +951,83 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Automation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /v1/flags:
+    get:
+      tags: [Organizations]
+      operationId: listFlags
+      security: [{ oidc: [] }]
+      responses:
+        '200':
+          description: Feature flags per tenant (kill switches). Tenant-scoped, RLS FORCE.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { type: object }
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/flags/{flag}:
+    get:
+      tags: [Organizations]
+      operationId: getFlag
+      security: [{ oidc: [] }]
+      parameters:
+        - name: flag
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[a-z0-9_]{3,64}$' }
+      responses:
+        '200':
+          description: Flag state per tenant.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  flag: { type: string }
+                  enabled: { type: boolean }
+                  payload: { type: object }
+                  updatedAt: { type: string, nullable: true }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    put:
+      tags: [Organizations]
+      operationId: updateFlag
+      security: [{ oidc: [] }]
+      parameters:
+        - name: flag
+          in: path
+          required: true
+          schema: { type: string, pattern: '^[a-z0-9_]{3,64}$' }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: { type: boolean }
+                payload: { type: object }
+      responses:
+        '200':
+          description: Flag updated (owner/admin only), audit flag.updated.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  flag: { type: string }
+                  enabled: { type: boolean }
+                  payload: { type: object }
+                  updatedAt: { type: string }
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '400':
           $ref: '#/components/responses/BadRequest'
   /v1/audit:

@@ -17,7 +17,12 @@
     "test:e2e": "turbo run test:e2e",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "openapi:check": "node scripts/check-openapi.mjs"
+    "openapi:check": "node scripts/check-openapi.mjs",
+    "migrate:check": "node scripts/analyze-migrations.mjs",
+    "docker:tag": "node scripts/docker-tag.mjs",
+    "docker:build": "node scripts/docker-tag.mjs && docker build -f apps/api/Dockerfile --build-arg COMMIT_SHA=$(git rev-parse HEAD) --build-arg BUILD_DATE=$(date +%Y%m%d) -t platform-api:$(git rev-parse --short HEAD) .",
+    "smoke": "node scripts/smoke.mjs",
+    "rolling:check": "node scripts/rolling-deploy-check.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",

@@ -12,12 +12,12 @@ const openApiPath = resolve(root, 'docs/api/openapi.yaml');
 const hashPath = resolve(root, 'docs/api/.openapi.hash');
 
 describe('Fase 13 — contract tests (OpenAPI + provider)', () => {
-  it('openapi.yaml is valid 3.1, has 40 paths, hash matches .openapi.hash', () => {
+  it('openapi.yaml is valid 3.1, has 43 paths, hash matches .openapi.hash', () => {
     const raw = readFileSync(openApiPath, 'utf8');
     const doc = parse(raw) as Record<string, unknown>;
     expect((doc as { openapi: string }).openapi).toMatch(/^3\./);
     const paths = (doc as { paths: Record<string, unknown> }).paths;
-    expect(Object.keys(paths).length).toBe(40);
+    expect(Object.keys(paths).length).toBe(43);
     const hash = readFileSync(hashPath, 'utf8').trim();
     expect(hash).toMatch(/^[0-9a-f]{12}$/);
     // ApiError schema must have code/message/requestId

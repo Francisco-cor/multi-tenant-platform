@@ -13,8 +13,11 @@
     "test": "vitest run --passWithNoTests",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "migrate": "tsx src/migrate.ts",
-    "backup": "tsx src/backup.ts",
-    "restore:drill": "tsx src/restore-drill.ts"
+    "migrate:dry-run": "tsx src/migrate.ts --dry-run",
+    "migrate:check": "tsx src/migrate.ts --dry-run",
+    "analyze:migrations": "node ../../scripts/analyze-migrations.mjs",
+    "seed": "tsx src/seed.ts",
+    "seed:check": "tsx src/seed.ts --check"
   },
   "dependencies": {
     "drizzle-orm": "^0.44.5",

@@ -25,6 +25,7 @@ export interface BranchRecord {
   organizationId: string;
   slug: string;
   name: string;
+  description?: string | null;
   status: 'active' | 'archived';
 }
 
@@ -85,7 +86,8 @@ export type AuditAction =
   | 'api_key.rotated'
   | 'dlq.replayed'
   | 'dlq.discarded'
-  | 'automation.created';
+  | 'automation.created'
+  | 'flag.updated';
 
 export interface AuditRecord {
   id: string;
@@ -153,6 +155,15 @@ export interface IdentityStore {
     context: StoreTenantContext,
   ): MembershipRecord[] | PromiseLike<MembershipRecord[]>;
   listBranches(context: StoreTenantContext): BranchRecord[] | PromiseLike<BranchRecord[]>;
+  createBranch?(
+    context: StoreTenantContext,
+    input: { slug: string; name: string; description?: string | null },
+  ): BranchRecord | PromiseLike<BranchRecord>;
+  updateBranch?(
+    context: StoreTenantContext,
+    branchId: string,
+    patch: { name?: string; description?: string | null },
+  ): BranchRecord | PromiseLike<BranchRecord | null> | null;
   createOrganization(
     input: CreateOrganizationInput,
   ): OrganizationRecord | PromiseLike<OrganizationRecord>;
@@ -260,8 +271,21 @@ export class InMemoryIdentityStore {
     this.memberships.set(id, { id, userId, organizationId, role, status: 'active' });
   }
 
-  private addSeedBranch(id: string, organizationId: string, slug: string, name: string): void {
-    this.branches.set(id, { id, organizationId, slug, name, status: 'active' });
+  private addSeedBranch(
+    id: string,
+    organizationId: string,
+    slug: string,
+    name: string,
+    description?: string,
+  ): void {
+    this.branches.set(id, {
+      id,
+      organizationId,
+      slug,
+      name,
+      ...(description !== undefined ? { description } : {}),
+      status: 'active',
+    });
   }
 
   upsertOidcUser(identity: OidcIdentity): UserRecord {

@@ -71,6 +71,7 @@ export const branches = pgTable(
       .references(() => organizations.id, { onDelete: 'cascade' }),
     slug: text('slug').notNull(),
     name: text('name').notNull(),
+    description: text('description'),
     active: boolean('active').notNull().default(true),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -79,6 +80,25 @@ export const branches = pgTable(
   (table) => [
     uniqueIndex('branches_tenant_slug_idx').on(table.tenantId, table.slug),
     index('branches_tenant_id_idx').on(table.tenantId, table.id),
+  ],
+);
+
+export const tenantFeatureFlags = pgTable(
+  'tenant_feature_flags',
+  {
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    flag: text('flag').notNull(),
+    enabled: boolean('enabled').notNull().default(false),
+    payload: text('payload').notNull().default('{}'),
+    updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    // primary key is composite tenant_id+flag via SQL CHECK in migration; drizzle uses explicit pk in DDL via migration file
+    index('tenant_feature_flags_tenant_idx').on(table.tenantId),
   ],
 );
 
@@ -492,6 +512,7 @@ export const schema = {
   inboundWebhookEvents,
   apiKeys,
   automations,
+  tenantFeatureFlags,
 };
 
 export type Organization = typeof organizations.$inferSelect;
