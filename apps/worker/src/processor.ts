@@ -1,4 +1,4 @@
-import type { DatabaseHandle } from '@platform/db';
+import { sql, type DatabaseHandle } from '@platform/db';
 import {
   metrics,
   runWithCorrelation,
@@ -6,6 +6,7 @@ import {
   createLogger,
 } from '@platform/observability';
 import { withDedup } from './dedup.js';
+import { workerTenantTransaction } from './tenant-db.js';
 import type { JobPayload } from './queues.js';
 
 const logger = createLogger({ service: 'worker' });
@@ -26,6 +27,21 @@ export interface ProcessorOptions {
   queue: string;
   timeoutMs?: number | undefined;
   handler?: JobHandler | undefined;
+  attemptsMade?: number | undefined;
+  maxAttempts?: number | undefined;
+}
+
+async function writeFinalFailureToDlq(
+  db: DatabaseHandle,
+  input: { jobId: string; payload: JobPayload; queue: string; attempts: number; error: unknown },
+): Promise<void> {
+  const cause = input.error instanceof Error ? input.error.message : String(input.error);
+  await workerTenantTransaction(db, input.payload.tenantId, `dlq:${input.jobId}`, (tx) =>
+    tx.execute(sql`
+      insert into dlq_jobs (job_id, tenant_id, queue, payload, cause, attempts)
+      values (${input.jobId}, ${input.payload.tenantId}::uuid, ${input.queue}, ${JSON.stringify(input.payload)}::jsonb, ${cause.slice(0, 2000)}, ${input.attempts})
+    `),
+  );
 }
 
 export async function processJob(
@@ -59,17 +75,44 @@ export async function processJob(
   const effectiveTraceId = traceId || generateTraceId();
   const effectiveRequestId = requestId || jobId.slice(0, 8);
 
-  const result = await runWithCorrelation(
-    {
-      requestId: effectiveRequestId,
-      traceId: effectiveTraceId,
-      tenantId: payload.tenantId,
-    },
-    async () =>
-      withDedup(db, { jobId, tenantId: payload.tenantId, queue: options.queue }, async () =>
-        runWithTimeout(() => handler(payload, { tenantId: payload.tenantId, jobId })),
-      ),
-  );
+  let result: { deduped: boolean; result: unknown };
+  try {
+    result = await runWithCorrelation(
+      {
+        requestId: effectiveRequestId,
+        traceId: effectiveTraceId,
+        tenantId: payload.tenantId,
+      },
+      async () =>
+        withDedup(db, { jobId, tenantId: payload.tenantId, queue: options.queue }, async () =>
+          runWithTimeout(() => handler(payload, { tenantId: payload.tenantId, jobId })),
+        ),
+    );
+  } catch (error) {
+    const attemptsMade = options.attemptsMade ?? 1;
+    const maxAttempts = options.maxAttempts ?? 1;
+    if (attemptsMade >= maxAttempts) {
+      try {
+        await writeFinalFailureToDlq(db, {
+          jobId,
+          payload,
+          queue: options.queue,
+          attempts: attemptsMade,
+          error,
+        });
+      } catch (dlqError) {
+        logger.error(
+          {
+            jobId,
+            queue: options.queue,
+            error: dlqError instanceof Error ? dlqError.message : String(dlqError),
+          },
+          'dlq_write_failed',
+        );
+      }
+    }
+    throw error;
+  }
 
   const duration = Date.now() - start;
   metrics.recordJobDuration(options.queue, duration);

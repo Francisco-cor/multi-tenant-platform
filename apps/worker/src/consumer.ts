@@ -1,10 +1,47 @@
 import type { DatabaseHandle } from '@platform/db';
 import { metrics } from '@platform/observability';
 import { deliverWebhook } from './jobs/deliverWebhook.js';
+import { deliverPendingWebhooks } from './jobs/deliverWebhook.js';
+import { expireReservations } from './jobs/expireReservations.js';
+import { gcFiles } from './jobs/gcFiles.js';
 import { processPayment } from './jobs/processPayment.js';
+import { reconcilePayments } from './jobs/reconcilePayments.js';
 import { FakePaymentProvider } from './providers/fakePaymentProvider.js';
+import { createWorkerObjectStore } from './s3-delete.js';
 import { processJob } from './processor.js';
 import type { JobPayload, QueueName, QueueProcessor } from './queues.js';
+
+/**
+ * Events produced by the API and worker today. Events whose business effect is
+ * already committed in the originating transaction are intentionally explicit
+ * acknowledgements below; an event outside this registry must fail and be
+ * retried/DLQ'd instead of being silently discarded.
+ */
+export const REGISTERED_EVENT_TYPES = new Set([
+  'file.created',
+  'inventory.reserved',
+  'order.created',
+  'order.paid',
+  'order.failed',
+  'order.reconciled_paid',
+  'payment.created',
+  'payment.paid',
+  'payment.failed',
+  'payment.unknown',
+  'payment.webhook_paid',
+  'payment.webhook_failed',
+  'payment.webhook_unknown',
+  'payment.reconciled_paid',
+  'payment.reconciled_failed',
+  'payment.reconciled_unknown',
+  'webhook.created',
+  'webhook.secret_rotated',
+  'webhook.replayed',
+]);
+
+export function isRegisteredEventType(eventType: string): boolean {
+  return REGISTERED_EVENT_TYPES.has(eventType);
+}
 
 function payloadRecord(payload: JobPayload): Record<string, unknown> {
   return payload.payload && typeof payload.payload === 'object'
@@ -13,15 +50,51 @@ function payloadRecord(payload: JobPayload): Record<string, unknown> {
 }
 
 /** Build the single entrypoint used by every BullMQ consumer. */
-export function createWorkerProcessor(db: DatabaseHandle): QueueProcessor {
+async function processGlobalMaintenance(
+  db: DatabaseHandle,
+  payload: JobPayload,
+  paymentProvider: FakePaymentProvider | null,
+): Promise<unknown> {
+  switch (payload.eventType) {
+    case 'maintenance.expire_reservations':
+      return expireReservations(db);
+    case 'maintenance.deliver_pending_webhooks':
+      return deliverPendingWebhooks(db);
+    case 'maintenance.reconcile_payments':
+      if (!paymentProvider) throw new Error('payment_provider_not_configured');
+      return reconcilePayments(db, paymentProvider);
+    case 'maintenance.gc_files':
+      return gcFiles(db, createWorkerObjectStore());
+    default:
+      throw new Error(`maintenance_task_not_registered:${payload.eventType}`);
+  }
+}
+
+/** Build the single entrypoint used by every BullMQ consumer. */
+export function createWorkerProcessor(
+  db: DatabaseHandle,
+  globalDb: DatabaseHandle = db,
+): QueueProcessor {
   const paymentProvider =
     process.env.PAYMENT_PROVIDER === 'fake'
       ? new FakePaymentProvider({ mode: 'deterministic' })
       : null;
 
-  return async (queue: QueueName, payload: JobPayload, jobId: string) =>
-    processJob(db, jobId, payload, {
+  return async (
+    queue: QueueName,
+    payload: JobPayload,
+    jobId: string,
+    attempt?: { attemptsMade: number; maxAttempts: number } | undefined,
+  ) => {
+    if (payload.scope === 'global') {
+      const start = Date.now();
+      const result = await processGlobalMaintenance(globalDb, payload, paymentProvider);
+      metrics.recordJobDuration(queue, Date.now() - start);
+      return { deduped: false, result };
+    }
+    return processJob(db, jobId, payload, {
       queue,
+      ...(attempt ? { attemptsMade: attempt.attemptsMade, maxAttempts: attempt.maxAttempts } : {}),
       handler: async (jobPayload) => {
         const inner = payloadRecord(jobPayload);
         if (jobPayload.eventType === 'webhook.replayed') {
@@ -33,8 +106,16 @@ export function createWorkerProcessor(db: DatabaseHandle): QueueProcessor {
           if (!paymentProvider) throw new Error('payment_provider_not_configured');
           return processPayment(db, jobPayload, paymentProvider);
         }
+        if (!isRegisteredEventType(jobPayload.eventType)) {
+          throw new Error(`event_handler_not_registered:${jobPayload.eventType}`);
+        }
         metrics.recordJobDuration(queue, 0);
-        return { acknowledged: true, eventType: jobPayload.eventType };
+        return {
+          acknowledged: true,
+          eventType: jobPayload.eventType,
+          reason: 'effect_already_committed',
+        };
       },
     });
+  };
 }

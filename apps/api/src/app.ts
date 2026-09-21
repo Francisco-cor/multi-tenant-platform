@@ -11,6 +11,7 @@ import {
   type OidcStateRecord,
 } from '@platform/auth';
 import { randomUUID } from 'node:crypto';
+import { Readable } from 'node:stream';
 import { API_VERSION, metaResponse } from '@platform/contracts';
 import {
   PERMISSIONS,
@@ -102,6 +103,11 @@ const OIDC_STATE_COOKIE = 'oidc_state';
 const DEFAULT_BASE_DOMAIN = 'app.localhost';
 const DEFAULT_OIDC_REDIRECT_URI = 'http://api.localhost:4000/v1/auth/callback';
 const SMALL_BODY_LIMIT = 256 * 1024;
+// Keep the exact bytes received on the wire for signed webhook verification.
+// Fastify parses JSON before route handlers run, so JSON.stringify(request.body)
+// is not a safe representation of the signed payload (whitespace and key order
+// are significant).
+const rawBodyByRequest = new WeakMap<FastifyRequest, Buffer>();
 
 const DevLoginSchema = z.object({ userId: z.string().min(1) }).strict();
 const OrganizationCreateSchema = z
@@ -582,6 +588,26 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     baseDomain,
     webPublicUrl: process.env.WEB_PUBLIC_URL ?? 'http://app.localhost:3000',
     allowDevOrigins: process.env.NODE_ENV !== 'production',
+  });
+
+  app.addHook('preParsing', async (request, _reply, payload) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of payload) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    }
+    const rawBody = Buffer.concat(chunks);
+    rawBodyByRequest.set(request, rawBody);
+
+    // Re-feed the consumed stream to Fastify's JSON parser. Fastify uses this
+    // property to enforce body limits after a preParsing hook replaces payload.
+    const replay = Readable.from([rawBody]);
+    Object.defineProperty(replay, 'receivedEncodedLength', {
+      configurable: true,
+      enumerable: false,
+      value: rawBody.length,
+      writable: false,
+    });
+    return replay;
   });
 
   app.addHook('onClose', async () => {
@@ -1726,10 +1752,9 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   });
 
   // Webhook inbound — no session auth, HMAC + dedupe per tenant
-  // Note: rawBody verification uses JSON.stringify(body) as canonical raw for tests;
-  // in production, use fastify-raw-body to get exact bytes before parse.
   app.post('/v1/webhooks/payments', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
-    const rawBody = JSON.stringify(request.body ?? {});
+    const rawBody =
+      rawBodyByRequest.get(request) ?? Buffer.from(JSON.stringify(request.body ?? {}), 'utf8');
     const timestamp =
       (request.headers['x-webhook-timestamp'] as string) ??
       (request.headers['x-timestamp'] as string) ??
@@ -2204,7 +2229,8 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   // Generic inbound webhook (tenant-scoped via x-tenant-id header, HMAC before parse, dedupe)
   app.post('/v1/webhooks/inbound', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
     // For inbound we trust x-tenant-id header or body.tenantId; HMAC verified against per-tenant secret or global
-    const rawBody = JSON.stringify(request.body ?? {});
+    const rawBody =
+      rawBodyByRequest.get(request) ?? Buffer.from(JSON.stringify(request.body ?? {}), 'utf8');
     const timestamp = (request.headers['x-webhook-timestamp'] as string) ?? '';
     const signatureHeader =
       (request.headers['x-webhook-signature'] as string) ??

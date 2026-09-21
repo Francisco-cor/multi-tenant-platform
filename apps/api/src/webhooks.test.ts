@@ -283,6 +283,33 @@ describe('webhooks — tenant isolation, HMAC, dedupe, replay', () => {
     await app.close();
   });
 
+  it('verifies inbound HMAC over the exact HTTP body bytes', async () => {
+    const app = buildApp({ allowDevLogin: true });
+    const secret = 'test_webhook_secret';
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    // Deliberate whitespace and key ordering make this differ from the parsed
+    // object serialized by JSON.stringify.
+    const rawBody =
+      ' {\n  "payload": { "value": "signed" }, "tenantId": "tenant-acme",\n  "source": "external", "eventId": "in_evt_raw_bytes"\n} ';
+    const signature = computeWebhookSignature(secret, timestamp, rawBody);
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/v1/webhooks/inbound',
+      headers: {
+        'content-type': 'application/json',
+        'x-webhook-timestamp': timestamp,
+        'x-webhook-signature': `v1,${signature}`,
+        'x-tenant-id': 'tenant-acme',
+      },
+      payload: rawBody,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json().status).toBe('processed');
+    await app.close();
+  });
+
   it('api-keys M2M tenant-scoped + automations versioned', async () => {
     const apiKeyStore = new InMemoryApiKeyStore();
     const app = buildApp({ allowDevLogin: true, apiKeyStore });

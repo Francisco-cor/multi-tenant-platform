@@ -411,6 +411,8 @@ export const webhookDeliveries = pgTable(
     attempts: integer('attempts').notNull().default(0),
     lastError: text('last_error'),
     nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
+    claimToken: text('claim_token'),
+    claimUntil: timestamp('claim_until', { withTimezone: true }),
     deliveredAt: timestamp('delivered_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),

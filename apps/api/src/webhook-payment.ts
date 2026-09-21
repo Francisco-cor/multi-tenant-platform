@@ -5,10 +5,13 @@ export const WEBHOOK_TOLERANCE_MS = 5 * 60 * 1000;
 export function computeWebhookSignature(
   secret: string,
   timestamp: string,
-  rawBody: string,
+  rawBody: string | Buffer,
 ): string {
-  const payload = `${timestamp}.${rawBody}`;
-  return createHmac('sha256', secret).update(payload).digest('hex');
+  const body = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(rawBody, 'utf8');
+  return createHmac('sha256', secret)
+    .update(Buffer.from(`${timestamp}.`, 'utf8'))
+    .update(body)
+    .digest('hex');
 }
 
 export function parseWebhookSignature(
@@ -37,7 +40,7 @@ export function isTimestampFresh(
 export function verifyWebhookSignature(input: {
   secret: string;
   timestamp: string;
-  rawBody: string;
+  rawBody: string | Buffer;
   signatureHeader: string | undefined;
   nowMs?: number;
 }): { valid: boolean; reason?: string } {

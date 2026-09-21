@@ -25,6 +25,11 @@ function backoffMs(attempt: number): number {
 
 export interface DeliverWebhookOptions {
   fetchFn?: typeof fetch | undefined;
+  claimToken?: string | undefined;
+}
+
+function claimGuard(claimToken: string | undefined) {
+  return claimToken ? sql`and claim_token=${claimToken}` : sql``;
 }
 
 export async function deliverWebhook(
@@ -46,12 +51,16 @@ export async function deliverWebhook(
       payload: string;
       status: string;
       attempts: number;
+      claim_token: string | null;
     }>(sql`
       select id, tenant_id, endpoint_id, event_id, event_type, payload::text as payload, status, attempts
       from webhook_deliveries where id=${deliveryId}::uuid and tenant_id=${tenantId}::uuid for update
     `);
     const del = deliveries[0];
     if (!del) throw new Error('delivery_not_found');
+    if (options.claimToken && del.claim_token !== options.claimToken) {
+      throw new Error('webhook_claim_lost');
+    }
     if (del.status === 'delivered' || del.status === 'dead_letter' || del.status === 'disabled') {
       return { delivery: del, endpoint: null, secret: null };
     }
@@ -80,7 +89,7 @@ export async function deliverWebhook(
   if (ctx.endpoint.status !== 'active') {
     await workerTenantTransaction(db, tenantId, `webhook:${deliveryId}`, (tx) =>
       tx.execute(sql`
-        update webhook_deliveries set status='disabled', updated_at=now() where id=${deliveryId}::uuid
+        update webhook_deliveries set status='disabled', claim_token=null, claim_until=null, updated_at=now() where id=${deliveryId}::uuid ${claimGuard(options.claimToken)}
       `),
     );
     return { status: 'disabled', attempts: ctx.delivery.attempts };
@@ -114,8 +123,8 @@ export async function deliverWebhook(
       // 2xx -> delivered
       await workerTenantTransaction(db, tenantId, `webhook:${deliveryId}`, async (tx) => {
         await tx.execute(sql`
-          update webhook_deliveries set status='delivered', attempts=attempts+1, delivered_at=now(), last_error=null, updated_at=now()
-          where id=${deliveryId}::uuid
+          update webhook_deliveries set status='delivered', attempts=attempts+1, delivered_at=now(), last_error=null, claim_token=null, claim_until=null, updated_at=now()
+          where id=${deliveryId}::uuid ${claimGuard(options.claimToken)}
         `);
         await tx.execute(sql`
           update webhook_endpoints set failure_count=0, last_delivery_at=now(), updated_at=now()
@@ -146,8 +155,8 @@ export async function deliverWebhook(
   await workerTenantTransaction(db, tenantId, `webhook:${deliveryId}`, async (tx) => {
     if (shouldDeadLetter) {
       await tx.execute(sql`
-        update webhook_deliveries set status='dead_letter', attempts=${attempts}, last_error=${error}, next_attempt_at=now() + interval '1 hour', updated_at=now()
-        where id=${deliveryId}::uuid
+        update webhook_deliveries set status='dead_letter', attempts=${attempts}, last_error=${error}, next_attempt_at=now() + interval '1 hour', claim_token=null, claim_until=null, updated_at=now()
+        where id=${deliveryId}::uuid ${claimGuard(options.claimToken)}
       `);
       await tx.execute(sql`
         update webhook_endpoints set failure_count=failure_count+1, updated_at=now()
@@ -165,8 +174,8 @@ export async function deliverWebhook(
     } else if (shouldRetry) {
       const delay = backoffMs(attempts);
       await tx.execute(sql`
-        update webhook_deliveries set status='retrying', attempts=${attempts}, last_error=${error}, next_attempt_at=now() + (${delay}::text || ' ms')::interval, updated_at=now()
-        where id=${deliveryId}::uuid
+        update webhook_deliveries set status='retrying', attempts=${attempts}, last_error=${error}, next_attempt_at=now() + (${delay}::text || ' ms')::interval, claim_token=null, claim_until=null, updated_at=now()
+        where id=${deliveryId}::uuid ${claimGuard(options.claimToken)}
       `);
       await tx.execute(
         sql`update webhook_endpoints set failure_count=failure_count+1, updated_at=now() where id=${ctx.endpoint!.id}::uuid`,
@@ -174,8 +183,8 @@ export async function deliverWebhook(
     } else {
       // 4xx failed
       await tx.execute(sql`
-        update webhook_deliveries set status='failed', attempts=${attempts}, last_error=${error}, updated_at=now()
-        where id=${deliveryId}::uuid
+        update webhook_deliveries set status='failed', attempts=${attempts}, last_error=${error}, claim_token=null, claim_until=null, updated_at=now()
+        where id=${deliveryId}::uuid ${claimGuard(options.claimToken)}
       `);
     }
   });
@@ -190,23 +199,38 @@ export async function deliverPendingWebhooks(
   options: { batchSize?: number; fetchFn?: typeof fetch } = {},
 ): Promise<{ processed: number; delivered: number; failed: number }> {
   const batchSize = options.batchSize ?? 10;
-  const rows = await workerGlobalTransaction(db, (tx) =>
-    tx.execute<{ id: string; tenant_id: string }>(sql`
+  const rows = await workerGlobalTransaction(
+    db,
+    async (tx): Promise<Array<{ id: string; tenant_id: string; claim_token: string }>> => {
+      const candidates = await tx.execute<{ id: string; tenant_id: string }>(sql`
       select id, tenant_id from webhook_deliveries
-      where status in ('pending','retrying') and next_attempt_at <= now()
-      order by created_at limit ${batchSize} for update skip locked
-    `),
+      where status in ('pending','retrying')
+        and next_attempt_at <= now()
+        and (claim_until is null or claim_until <= now())
+      order by created_at
+      limit ${batchSize}
+      for update skip locked
+    `);
+      if (candidates.length === 0) return [];
+      const ids = candidates.map((row) => row.id);
+      return tx.execute<{ id: string; tenant_id: string; claim_token: string }>(sql`
+      update webhook_deliveries
+      set status='retrying', claim_token=gen_random_uuid()::text,
+          claim_until=now() + interval '5 minutes', updated_at=now()
+      where id = any(${ids}::uuid[])
+        and status in ('pending','retrying')
+        and (claim_until is null or claim_until <= now())
+      returning id, tenant_id, claim_token
+    `);
+    },
   );
   let delivered = 0;
   let failed = 0;
   for (const r of rows) {
-    // Mark claimed to avoid double process
-    await workerTenantTransaction(db, r.tenant_id, `webhook:${r.id}`, (tx) =>
-      tx.execute(
-        sql`update webhook_deliveries set status='retrying', updated_at=now() where id=${r.id}::uuid and status in ('pending','retrying')`,
-      ),
-    );
-    const res = await deliverWebhook(db, r.id, r.tenant_id, { fetchFn: options.fetchFn });
+    const res = await deliverWebhook(db, r.id, r.tenant_id, {
+      fetchFn: options.fetchFn,
+      claimToken: r.claim_token,
+    });
     if (res.status === 'delivered') delivered++;
     else if (res.status === 'failed' || res.status === 'dead_letter') failed++;
   }

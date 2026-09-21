@@ -4,6 +4,7 @@ import { metrics, createLogger, initTracing } from '@platform/observability';
 import { createWorkerProcessor } from './consumer.js';
 import { createBullMqFactory, type QueueFactory } from './queues.js';
 import { OutboxRelay } from './relay/outboxRelay.js';
+import { startMaintenanceScheduler, type MaintenanceScheduler } from './scheduler.js';
 import { workerGlobalTransaction } from './tenant-db.js';
 
 const logger = createLogger({ service: process.env.OTEL_SERVICE_NAME ?? 'worker' });
@@ -21,6 +22,7 @@ let queueFactory: QueueFactory | null = null;
 let database: DatabaseHandle | null = null;
 let relayDatabase: DatabaseHandle | null = null;
 let lagTimer: NodeJS.Timeout | null = null;
+let maintenanceScheduler: MaintenanceScheduler | null = null;
 const readyFile = process.env.WORKER_READY_FILE ?? '/tmp/platform-worker-ready';
 
 const shutdown = async (signal: string, exitCode = 0) => {
@@ -30,6 +32,7 @@ const shutdown = async (signal: string, exitCode = 0) => {
   const deadline = Date.now() + 30000;
   try {
     if (relay) await relay.stop();
+    maintenanceScheduler?.stop();
     if (queueFactory) await queueFactory.closeAll();
     if (lagTimer) clearInterval(lagTimer);
     await rm(readyFile, { force: true });
@@ -71,7 +74,11 @@ async function bootstrap(): Promise<void> {
     { mode: 'bullmq', redisUrl: redisUrl.replace(/:\/\/.*@/, '://***@') },
     'worker_queues',
   );
-  await queueFactory.startWorkers?.(createWorkerProcessor(database));
+  await queueFactory.startWorkers?.(createWorkerProcessor(database, relayDatabase));
+
+  maintenanceScheduler = startMaintenanceScheduler(queueFactory, {
+    paymentProviderConfigured: process.env.PAYMENT_PROVIDER === 'fake',
+  });
 
   relay = new OutboxRelay(relayDatabase, queueFactory, { batchSize: 100, intervalMs: 2000 });
   relay.start();

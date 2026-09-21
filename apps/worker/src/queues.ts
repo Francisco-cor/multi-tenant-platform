@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 export const QUEUES = ['files', 'inventory', 'orders', 'webhooks', 'emails', 'generic'] as const;
 export type QueueName = (typeof QUEUES)[number];
+export const GLOBAL_MAINTENANCE_TENANT_ID = '00000000-0000-0000-0000-000000000000';
 
 export interface JobPayload {
   tenantId: string;
@@ -10,6 +11,7 @@ export interface JobPayload {
   eventType: string;
   eventId: string;
   correlationId?: string | undefined;
+  scope?: 'tenant' | 'global' | undefined;
   payload: unknown;
 }
 
@@ -33,6 +35,7 @@ export type QueueProcessor = (
   queue: QueueName,
   payload: JobPayload,
   jobId: string,
+  attempt?: { attemptsMade: number; maxAttempts: number } | undefined,
 ) => Promise<unknown>;
 
 export function deterministicJobId(
@@ -168,7 +171,10 @@ export async function createBullMqFactory(redisUrl: string): Promise<QueueFactor
                 job.id ??
                   deterministicJobId(payload.tenantId, payload.aggregateId, payload.eventType),
               );
-              return processor(name, payload, jobId);
+              return processor(name, payload, jobId, {
+                attemptsMade: job.attemptsMade + 1,
+                maxAttempts: Math.max(1, Number(job.opts.attempts ?? 1)),
+              });
             },
             { connection: { url: redisUrl }, concurrency: 10 } as never,
           );
