@@ -149,7 +149,7 @@ async function inMemoryCheck() {
   try {
     execSync('node scripts/analyze-migrations.mjs', { stdio: 'inherit' });
     log(`OK analyze-migrations passed`);
-  } catch (e) {
+  } catch {
     console.error('FAIL analyze-migrations');
     process.exit(1);
   }

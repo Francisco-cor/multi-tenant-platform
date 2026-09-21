@@ -17,6 +17,12 @@ export interface ReadyReport {
 const HEALTH_TIMEOUT_MS = 2000;
 const startedAt = Date.now();
 
+type RedisHealthClient = {
+  ping: () => Promise<string>;
+  quit: () => Promise<void>;
+  disconnect?: () => void;
+};
+
 async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   let timeoutId: NodeJS.Timeout | undefined;
   const timeout = new Promise<never>((_, reject) => {
@@ -59,25 +65,25 @@ async function checkRedis(): Promise<HealthCheckResult> {
   const start = Date.now();
   // Avoid hard dependency on ioredis in api; do a best-effort TCP check via fetch if redis URL is http?
   // For now, try to use ioredis if available via dynamic import, else skip
+  let client: RedisHealthClient | null = null;
   try {
     const ioredisMod = await import('ioredis').catch(() => null);
     if (!ioredisMod) return { name: 'redis', status: 'skip' };
     const Redis = (
       ioredisMod as unknown as {
-        default: new (
-          url: string,
-          opts: unknown,
-        ) => { ping: () => Promise<string>; quit: () => Promise<void> };
+        default: new (url: string, opts: unknown) => RedisHealthClient;
       }
     ).default;
-    const client = new Redis(url, {
+    client = new Redis(url, {
       lazyConnect: true,
       connectTimeout: HEALTH_TIMEOUT_MS,
       maxRetriesPerRequest: 0,
       enableReadyCheck: false,
     });
-    await withTimeout(client.ping(), HEALTH_TIMEOUT_MS, 'redis');
-    await client.quit().catch(() => undefined);
+    const activeClient = client;
+    await withTimeout(activeClient.ping(), HEALTH_TIMEOUT_MS, 'redis');
+    await activeClient.quit().catch(() => undefined);
+    client = null;
     return { name: 'redis', status: 'ok', latencyMs: Date.now() - start };
   } catch (error) {
     return {
@@ -86,6 +92,11 @@ async function checkRedis(): Promise<HealthCheckResult> {
       latencyMs: Date.now() - start,
       error: error instanceof Error ? error.message : String(error),
     };
+  } finally {
+    if (client) {
+      client.disconnect?.();
+      client = null;
+    }
   }
 }
 

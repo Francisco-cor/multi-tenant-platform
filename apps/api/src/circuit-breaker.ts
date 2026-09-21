@@ -23,6 +23,7 @@ export class CircuitBreaker {
   private failures = 0;
   private successes = 0;
   private nextAttempt = 0;
+  private halfOpenProbeInFlight = false;
   private readonly failureThreshold: number;
   private readonly successThreshold: number;
   private readonly timeoutMs: number;
@@ -88,6 +89,19 @@ export class CircuitBreaker {
         breaker: this.name,
       });
     }
+    if (st === 'HALF_OPEN') {
+      // Allow only one probe at a time. Without this gate, a burst after the
+      // cool-down can run many requests concurrently and falsely close the
+      // breaker while the dependency is still failing.
+      if (this.halfOpenProbeInFlight) {
+        metrics.recordCircuitRejected(this.name);
+        throw Object.assign(new Error(`circuit_half_open:${this.name}`), {
+          code: 'CIRCUIT_HALF_OPEN',
+          breaker: this.name,
+        });
+      }
+      this.halfOpenProbeInFlight = true;
+    }
     try {
       const result = await withTimeout(fn(), this.requestTimeoutMs, `circuit:${this.name}`);
       this.recordSuccess();
@@ -95,6 +109,8 @@ export class CircuitBreaker {
     } catch (err) {
       this.recordFailure();
       throw err;
+    } finally {
+      if (st === 'HALF_OPEN') this.halfOpenProbeInFlight = false;
     }
   }
 
@@ -104,6 +120,7 @@ export class CircuitBreaker {
     this.failures = 0;
     this.successes = 0;
     this.nextAttempt = 0;
+    this.halfOpenProbeInFlight = false;
     metrics.recordCircuitState(this.name, 'CLOSED');
   }
 }

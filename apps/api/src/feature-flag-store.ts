@@ -21,6 +21,7 @@ export interface FeatureFlagStore {
     updatedBy?: string,
   ): Promise<FlagRecord>;
   isEnabled(context: TenantRepositoryContext, flag: string): Promise<boolean>;
+  close?(): Promise<void>;
 }
 
 export class InMemoryFeatureFlagStore implements FeatureFlagStore {

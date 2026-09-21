@@ -47,3 +47,6 @@ Thumbs.db
 
 # Elevation plan is session-local and not versioned.
 PLAN_ELEVACION.md
+
+# Local audit deliverable: keep it in the workspace, never in main.
+SONDEO_MULTI_TENANT_PLATFORM.md

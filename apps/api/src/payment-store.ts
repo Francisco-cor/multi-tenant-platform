@@ -62,6 +62,7 @@ export interface PaymentStore {
     context: StoreTenantContext,
     orderId?: string,
   ): Promise<PaymentAttemptRecord[]>;
+  close?(): Promise<void>;
 }
 
 export class InMemoryPaymentStore implements PaymentStore {
@@ -179,6 +180,10 @@ export class PersistentPaymentStore implements PaymentStore {
     role = 'platform_app',
   ): PersistentPaymentStore {
     return new PersistentPaymentStore(createDatabase(connectionString, { role }));
+  }
+
+  async close(): Promise<void> {
+    await this.db.close();
   }
 
   async createOrderWithPayment(

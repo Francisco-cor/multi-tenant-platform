@@ -19,6 +19,10 @@ function ok(msg) {
   console.log(`[analyze:migrations] OK: ${msg}`);
 }
 
+function withoutSqlComments(raw) {
+  return raw.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
+}
+
 async function collectFiles() {
   const all = [];
   const kinds = ['schema', 'data', 'indexes'];
@@ -59,6 +63,8 @@ async function main() {
 
   for (const f of files) {
     const lower = f.raw.toLowerCase();
+    const sql = withoutSqlComments(f.raw);
+    const sqlLower = sql.toLowerCase();
     const id = `${f.kind}/${f.name}`;
 
     // Rule 1: indexes must use CONCURRENTLY and not inside transaction
@@ -79,9 +85,9 @@ async function main() {
       }
     } else if (f.kind === 'schema' || f.raw.includes('create index')) {
       // schema should not have CREATE INDEX without CONCURRENTLY if table large — warn if no CONCURRENTLY but is index
-      if (/create\s+index\s+(?!concurrently)/i.test(f.raw)) {
+      if (/create\s+index\s+(?!concurrently)/i.test(sql)) {
         // Allow small indexes with IF NOT EXISTS
-        if (!f.raw.includes('IF NOT EXISTS')) {
+        if (!sqlLower.includes('if not exists')) {
           warn(`${id} creates index without IF NOT EXISTS — add for idempotence`);
           warnings++;
         }
@@ -89,22 +95,22 @@ async function main() {
     }
 
     // Rule 2: destructive ops should be in contract-only files (name contains contract or drop) and warn
-    if (/(drop\s+column|drop\s+table|alter\s+table.*\sdrop)/i.test(f.raw)) {
+    if (/(drop\s+(?:column|table)\b|alter\s+table[\s\S]*?\bdrop\s+(?:column|table)\b)/i.test(sql)) {
       if (!/contract/i.test(f.name)) {
         warn(
           `${id} contains destructive DROP — should be deferred to contract phase (rename file to include 'contract' or ensure expand-contract)`,
         );
         warnings++;
       }
-      if (!/if\s+exists/i.test(lower)) {
+      if (!/if\s+exists/i.test(sqlLower)) {
         warn(`${id} DROP without IF EXISTS — add for safety`);
         warnings++;
       }
     }
 
     // Rule 3: ADD COLUMN NOT NULL without DEFAULT should be forbidden in expand
-    if (/add\s+column/i.test(lower)) {
-      const addCols = [...f.raw.matchAll(/add\s+column[^;]*;/gi)];
+    if (/add\s+column/i.test(sqlLower)) {
+      const addCols = [...sql.matchAll(/add\s+column[^;]*;/gi)];
       for (const m of addCols) {
         const stmt = m[0];
         if (/not\s+null/i.test(stmt) && !/default/i.test(stmt)) {
@@ -153,13 +159,13 @@ async function main() {
     }
 
     // Rule 6: ensure IF NOT EXISTS for idempotence on tables/indexes
-    if (/create\s+table/i.test(lower) && !/if\s+not\s+exists/i.test(lower)) {
+    if (/create\s+table/i.test(sqlLower) && !/if\s+not\s+exists/i.test(sqlLower)) {
       warn(`${id} CREATE TABLE without IF NOT EXISTS — should be idempotent for reruns`);
       warnings++;
     }
 
     // Rule 7: lock/timeout expectations: schema migrations run in tx, so no CONCURRENTLY
-    if (f.kind === 'schema' && /concurrently/i.test(lower)) {
+    if (f.kind === 'schema' && /concurrently/i.test(sqlLower)) {
       fail(`${id} schema migration uses CONCURRENTLY — must be in indexes/ (non-transactional)`);
       errors++;
     }

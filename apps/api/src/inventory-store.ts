@@ -67,6 +67,7 @@ export interface InventoryStore {
   // helpers for tests/seed
   upsertProduct(product: ProductRecord): Promise<void> | void;
   setStock(record: StockRecord): Promise<void> | void;
+  close?(): Promise<void>;
 }
 
 const DEFAULT_RESERVATION_TTL_MS = 15 * 60 * 1000;
@@ -273,6 +274,10 @@ export class PersistentInventoryStore implements InventoryStore {
     role = 'platform_app',
   ): PersistentInventoryStore {
     return new PersistentInventoryStore(createDatabase(connectionString, { role }));
+  }
+
+  async close(): Promise<void> {
+    await this.db.close();
   }
 
   async upsertProduct(product: ProductRecord): Promise<void> {

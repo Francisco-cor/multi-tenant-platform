@@ -137,6 +137,7 @@ export interface WebhookStore {
     context: StoreTenantContext,
     id: string,
   ): Promise<{ endpoint: WebhookEndpoint; rawSecret: string }>;
+  close?(): Promise<void>;
 }
 
 export class InMemoryWebhookStore implements WebhookStore {
@@ -335,6 +336,10 @@ export class InMemoryWebhookStore implements WebhookStore {
 export class PersistentWebhookStore implements WebhookStore {
   constructor(private readonly db: DatabaseHandle) {
     if (!db.role) throw new Error('database_role_required');
+  }
+
+  async close(): Promise<void> {
+    await this.db.close();
   }
 
   static fromConnectionString(

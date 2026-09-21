@@ -194,6 +194,33 @@ describe('circuit breaker — OPEN after threshold', () => {
       breaker.execute(async () => new Promise((r) => setTimeout(r, 100))),
     ).rejects.toThrow(/timeout/);
   });
+
+  it('allows only one concurrent half-open probe', async () => {
+    const breaker = createCircuitBreaker('test-half-open', {
+      failureThreshold: 1,
+      successThreshold: 1,
+      timeoutMs: 20,
+      requestTimeoutMs: 500,
+    });
+    await expect(
+      breaker.execute(async () => {
+        throw new Error('fail');
+      }),
+    ).rejects.toThrow('fail');
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    let release!: () => void;
+    const probe = breaker.execute(
+      () =>
+        new Promise<string>((resolve) => {
+          release = () => resolve('ok');
+        }),
+    );
+    await expect(breaker.execute(async () => 'second')).rejects.toThrow(/circuit_half_open/);
+    release();
+    await expect(probe).resolves.toBe('ok');
+    expect(breaker.getState()).toBe('CLOSED');
+  });
 });
 
 describe('API integration — cache headers + rate limit + tenant isolation', () => {

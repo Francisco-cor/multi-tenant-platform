@@ -503,7 +503,9 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     });
   const stateStore = new InMemoryOidcStateStore();
   const baseDomain = options.baseDomain ?? process.env.TENANT_BASE_DOMAIN ?? DEFAULT_BASE_DOMAIN;
-  const allowDevLogin = options.allowDevLogin ?? process.env.ALLOW_DEV_LOGIN === '1';
+  const allowDevLogin =
+    process.env.NODE_ENV !== 'production' &&
+    (options.allowDevLogin ?? process.env.ALLOW_DEV_LOGIN === '1');
   const oidc = options.oidc ?? {
     issuer: process.env.OIDC_ISSUER_URL ?? '',
     clientId: process.env.OIDC_CLIENT_ID ?? '',
@@ -551,7 +553,10 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       },
     },
     bodyLimit: 1024 * 1024,
-    trustProxy: true,
+    // Only trust forwarded client IP/host headers when the process is behind
+    // an explicitly configured reverse proxy. Trusting them by default lets a
+    // caller bypass IP rate limits and falsify audit IPs.
+    trustProxy: process.env.TRUST_PROXY === '1',
     genReqId: (req) =>
       (req.headers['x-request-id'] as string) ??
       (req.headers['x-correlation-id'] as string) ??
@@ -565,9 +570,18 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   });
 
   app.addHook('onClose', async () => {
-    await store.close?.();
-    await cache.close?.();
-    await (rateLimiter as unknown as { close?: () => Promise<void> }).close?.();
+    await Promise.all([
+      store.close?.(),
+      inventoryStore.close?.(),
+      fileStore.close?.(),
+      dlqStore.close?.(),
+      paymentStore.close?.(),
+      webhookStore.close?.(),
+      apiKeyStore.close?.(),
+      featureFlagStore.close?.(),
+      cache.close?.(),
+      (rateLimiter as unknown as { close?: () => Promise<void> }).close?.(),
+    ]);
   });
 
   // --- Observability: correlation propagation + RED metrics + structured logs ---
@@ -866,7 +880,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     if (!isCsrfSafe(request)) {
       // For now, log and enforce only if Origin header is present but invalid? We already have CORS.
       // We treat missing Origin+X-Requested-With with cookie as 403 in strict mode (production)
-      if (process.env.CSRF_STRICT === '1') {
+      if (process.env.CSRF_STRICT === '1' || process.env.NODE_ENV === 'production') {
         throw new RequestProblem(403, 'CSRF_REQUIRED', 'Missing Origin or X-Requested-With');
       }
     }

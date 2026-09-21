@@ -21,6 +21,7 @@ export interface DlqStore {
   discard(context: StoreTenantContext, id: string): Promise<void>;
   // test helper
   insertForTest(record: Omit<DlqRecordApi, 'createdAt'> & { createdAt?: number }): Promise<void>;
+  close?(): Promise<void>;
 }
 
 export class InMemoryDlqStore implements DlqStore {
@@ -64,6 +65,10 @@ export class InMemoryDlqStore implements DlqStore {
 
 export class PersistentDlqStore implements DlqStore {
   constructor(private readonly db: DatabaseHandle) {}
+
+  async close(): Promise<void> {
+    await this.db.close();
+  }
 
   static fromConnectionString(cs: string, role = 'platform_app'): PersistentDlqStore {
     return new PersistentDlqStore(createDatabase(cs, { role }));

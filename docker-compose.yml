@@ -31,7 +31,7 @@ services:
       retries: 10
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio:RELEASE.2024-06-13T19-03-19Z
     command: server /data --console-address ':9001'
     environment:
       MINIO_ROOT_USER: minio
@@ -41,6 +41,11 @@ services:
       - '9001:9001'
     volumes:
       - minio-data:/data
+    healthcheck:
+      test: ['CMD-SHELL', 'curl -fsS http://localhost:9000/minio/health/live']
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.104.0

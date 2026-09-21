@@ -43,11 +43,17 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
+      - name: Build artifacts
+        run: pnpm build
+
       - name: Unit tests
         run: pnpm test
 
       - name: OpenAPI drift
         run: pnpm openapi:check
+
+      - name: Migration safety checks
+        run: pnpm migrate:check
 
   migrate-check:
     runs-on: ubuntu-latest

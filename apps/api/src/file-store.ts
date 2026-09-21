@@ -68,6 +68,7 @@ export interface FileStore {
   ): Promise<{ items: FileRecord[]; nextCursor: string | null }>;
   // helpers for tests
   setStatus?(fileId: string, status: FileRecord['status'], expiresAt?: number): Promise<void>;
+  close?(): Promise<void>;
 }
 
 function sanitizeFilename(name: string): string {
@@ -284,6 +285,10 @@ export class PersistentFileStore implements FileStore {
     role = 'platform_app',
   ): PersistentFileStore {
     return new PersistentFileStore(createDatabase(connectionString, { role }));
+  }
+
+  async close(): Promise<void> {
+    await this.db.close();
   }
 
   async createPending(context: StoreTenantContext, input: CreateFileInput): Promise<FileRecord> {

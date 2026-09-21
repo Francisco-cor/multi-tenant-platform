@@ -1,24 +1,40 @@
 import { initTracing } from '@platform/observability';
+import { loadEnvironment } from '@platform/config';
 import { buildApp } from './app.js';
 import { PersistentIdentityStore } from './persistent-identity-store.js';
 
+const environment = loadEnvironment();
+
 await initTracing({
-  serviceName: process.env.OTEL_SERVICE_NAME ?? 'api',
-  ...(process.env.OTEL_EXPORTER_OTLP_ENDPOINT
-    ? { exporterEndpoint: process.env.OTEL_EXPORTER_OTLP_ENDPOINT }
+  serviceName: environment.OTEL_SERVICE_NAME,
+  ...(environment.OTEL_EXPORTER_OTLP_ENDPOINT
+    ? { exporterEndpoint: environment.OTEL_EXPORTER_OTLP_ENDPOINT }
     : {}),
 });
 
-const databaseUrl = process.env.DATABASE_URL;
+const databaseUrl = environment.DATABASE_URL;
 const persistentStore = databaseUrl
   ? PersistentIdentityStore.fromConnectionString(
       databaseUrl,
-      process.env.DATABASE_ROLE ?? 'platform_app',
+      environment.DATABASE_ROLE ?? 'platform_app',
     )
   : undefined;
-const app = buildApp(persistentStore ? { store: persistentStore } : {});
-const port = Number(process.env.API_PORT ?? 4000);
-const host = process.env.API_HOST ?? '0.0.0.0';
+const app = buildApp({
+  ...(persistentStore ? { store: persistentStore } : {}),
+  baseDomain: environment.TENANT_BASE_DOMAIN,
+  allowDevLogin: environment.NODE_ENV !== 'production' && environment.ALLOW_DEV_LOGIN === '1',
+  oidc: {
+    issuer: environment.OIDC_ISSUER_URL ?? '',
+    clientId: environment.OIDC_CLIENT_ID ?? '',
+    ...(environment.OIDC_CLIENT_SECRET ? { clientSecret: environment.OIDC_CLIENT_SECRET } : {}),
+    ...(environment.OIDC_REDIRECT_URI ? { redirectUri: environment.OIDC_REDIRECT_URI } : {}),
+    ...(environment.OIDC_AUTHORIZATION_ENDPOINT
+      ? { authorizationEndpoint: environment.OIDC_AUTHORIZATION_ENDPOINT }
+      : {}),
+  },
+});
+const port = environment.API_PORT;
+const host = environment.API_HOST;
 
 await app.listen({ port, host });
 

@@ -57,6 +57,7 @@ export interface ApiKeyStore {
   revoke(context: StoreTenantContext, id: string): Promise<void>;
   verify(prefix: string, raw: string): Promise<ApiKeyRecord | null>;
   rotate(context: StoreTenantContext, id: string): Promise<{ record: ApiKeyRecord; raw: string }>;
+  close?(): Promise<void>;
 }
 
 export class InMemoryApiKeyStore implements ApiKeyStore {
@@ -156,6 +157,10 @@ export class InMemoryApiKeyStore implements ApiKeyStore {
 export class PersistentApiKeyStore implements ApiKeyStore {
   constructor(private readonly db: DatabaseHandle) {
     if (!db.role) throw new Error('database_role_required');
+  }
+
+  async close(): Promise<void> {
+    await this.db.close();
   }
   static fromConnectionString(cs: string, role = 'platform_app'): PersistentApiKeyStore {
     return new PersistentApiKeyStore(createDatabase(cs, { role }));
