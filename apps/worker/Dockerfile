@@ -53,7 +53,8 @@ COPY --from=build /app/package.json ./package.json
 COPY --from=build /app/pnpm-workspace.yaml ./pnpm-workspace.yaml
 COPY --from=build /app/pnpm-lock.yaml ./pnpm-lock.yaml
 USER appuser
-# Worker has no HTTP port; health is via queue metrics. Keep container alive.
+# Worker has no HTTP port; bootstrap writes a readiness marker only after DB/Redis,
+# consumers, and the relay are ready. The marker is removed during graceful shutdown.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD node -e "process.exit(0)"
+  CMD test -f /tmp/platform-worker-ready
 CMD ["node_modules/.bin/tsx", "apps/worker/dist/main.js"]

@@ -12,7 +12,13 @@ import {
 } from '@platform/auth';
 import { randomUUID } from 'node:crypto';
 import { API_VERSION, metaResponse } from '@platform/contracts';
-import { PERMISSIONS, rolesHavePermission, type Permission, type Role } from '@platform/domain';
+import {
+  PERMISSIONS,
+  canTransition,
+  rolesHavePermission,
+  type Permission,
+  type Role,
+} from '@platform/domain';
 import { z } from 'zod';
 import {
   InMemoryIdentityStore,
@@ -77,7 +83,7 @@ import {
   type PaymentStore,
 } from './payment-store.js';
 import { verifyWebhookSignature } from './webhook-payment.js';
-import { sql, createDatabase } from '@platform/db';
+import { sql, createDatabase, withTenantTransaction, writeOutboxEvent } from '@platform/db';
 import {
   InMemoryWebhookStore,
   PersistentWebhookStore,
@@ -294,11 +300,14 @@ interface SessionAuth {
 }
 
 interface TenantContext extends SessionAuth {
+  authType: 'session' | 'api_key';
   requestId: string;
   tenantId: string;
   organization: OrganizationRecord;
   membership: MembershipRecord;
   roles: readonly Role[];
+  apiKeyScopes?: readonly string[];
+  apiKeyId?: string;
 }
 
 interface AppOptions {
@@ -382,6 +391,12 @@ function requestToken(request: FastifyRequest): string | null {
   if (cookieToken) return cookieToken;
   const authorization = request.headers.authorization;
   return authorization?.startsWith('Bearer ') ? authorization.slice(7).trim() : null;
+}
+
+function requestApiKey(request: FastifyRequest): string | null {
+  const value = request.headers['x-api-key'];
+  if (Array.isArray(value)) return value[0] ?? null;
+  return value ?? null;
 }
 
 function parseOrThrow<S extends z.ZodTypeAny>(schema: S, input: unknown): z.infer<S> {
@@ -781,6 +796,59 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   };
 
   const requireTenantContext = async (request: FastifyRequest): Promise<TenantContext> => {
+    const rawApiKey = requestApiKey(request);
+    if (rawApiKey) {
+      const resolution = resolveTenantFromHost(request.headers.host, baseDomain, '');
+      if (!resolution) {
+        throw new RequestProblem(400, 'TENANT_REQUIRED', 'A valid tenant host is required');
+      }
+      const organization = await store.getOrganizationBySlug(resolution.tenantSlug);
+      if (!organization || organization.status !== 'active') {
+        throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
+      }
+      if (!rawApiKey.startsWith('pk_') || rawApiKey.length < 12) {
+        throw new RequestProblem(401, 'UNAUTHORIZED', 'Invalid API key');
+      }
+      const record = await apiKeyStore.verify(rawApiKey.slice(0, 8), rawApiKey, organization.id);
+      if (!record || record.tenantId !== organization.id) {
+        throw new RequestProblem(401, 'UNAUTHORIZED', 'Invalid API key');
+      }
+      const principal: UserRecord = {
+        id: record.createdBy,
+        subject: `api-key:${record.id}`,
+        issuer: 'api-key',
+        email: `api-key:${record.prefix}`,
+        displayName: `API key ${record.prefix}`,
+        status: 'active',
+      };
+      const membership: MembershipRecord = {
+        id: `api-key:${record.id}`,
+        userId: principal.id,
+        organizationId: organization.id,
+        role: 'operator',
+        status: 'active',
+      };
+      setCorrelationPatch({ tenantId: organization.id, userId: principal.id });
+      return {
+        token: `api-key:${record.id}`,
+        user: principal,
+        session: {
+          tokenHash: `api-key:${record.id}`,
+          userId: principal.id,
+          expiresAt: record.expiresAt ?? Number.MAX_SAFE_INTEGER,
+          selectedTenantId: organization.id,
+        },
+        authType: 'api_key',
+        requestId: request.id,
+        tenantId: organization.id,
+        organization,
+        membership,
+        roles: ['operator'],
+        apiKeyScopes: record.scopes,
+        apiKeyId: record.id,
+      };
+    }
+
     const auth = await requireSession(request);
     const resolution = resolveTenantFromHost(request.headers.host, baseDomain, '');
     if (!resolution) {
@@ -824,6 +892,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     }
     return {
       ...auth,
+      authType: 'session',
       requestId: request.id,
       tenantId: organization.id,
       organization,
@@ -833,8 +902,20 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   };
 
   const requirePermission = (context: TenantContext, permission: Permission): void => {
+    if (context.authType === 'api_key') {
+      if (!context.apiKeyScopes?.includes(permission)) {
+        throw new RequestProblem(403, 'FORBIDDEN', 'API key scope is insufficient');
+      }
+      return;
+    }
     if (!rolesHavePermission(context.roles, permission)) {
       throw new RequestProblem(403, 'FORBIDDEN', 'You do not have permission for this action');
+    }
+  };
+
+  const requireHumanAuth = (context: TenantContext): void => {
+    if (context.authType === 'api_key') {
+      throw new RequestProblem(403, 'FORBIDDEN', 'A user session is required for this action');
     }
   };
 
@@ -1657,7 +1738,11 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       (request.headers['x-webhook-signature'] as string) ??
       (request.headers['x-signature'] as string) ??
       '';
-    const secret = process.env.PAYMENT_WEBHOOK_SECRET ?? 'test_webhook_secret';
+    const configuredSecret = process.env.PAYMENT_WEBHOOK_SECRET;
+    if (!configuredSecret && process.env.NODE_ENV === 'production') {
+      throw new RequestProblem(503, 'WEBHOOK_NOT_CONFIGURED', 'Payment webhook is not configured');
+    }
+    const secret = configuredSecret ?? 'test_webhook_secret';
     const verify = verifyWebhookSignature({
       secret,
       timestamp,
@@ -1668,62 +1753,25 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       throw new RequestProblem(401, 'UNAUTHORIZED', `Webhook signature invalid: ${verify.reason}`);
     }
     const body = parseOrThrow(PaymentWebhookSchema, request.body);
-    // Resolve tenantId: prefer explicit header x-tenant-id, else try to find payment_attempt by providerRef
-    let tenantId: string | null = (request.headers['x-tenant-id'] as string) ?? null;
-    // If tenant not in header, try to deduce from DB via providerRef lookup (requires DB)
-    if (!tenantId && process.env.DATABASE_URL) {
-      try {
-        const db = createDatabase(process.env.DATABASE_URL, {
-          role: process.env.DATABASE_ROLE ?? 'platform_app',
-        });
-        // We need to search across tenants? But we can try to find any payment_attempt with provider_ref
-        // Use direct sql without tenant context (bypass RLS via search path) — for demo, we allow global lookup
-        // Simpler: require tenant in body or header; if missing, reject
-        await db.close();
-      } catch {
-        // ignore
-      }
-    }
-    // For tenant-isolation demo, webhook body may contain tenantId via providerKey mapping;
-    // we attempt to extract tenantId from payment_attempts via providerRef if no header
-    // Fallback: if still null, try to use body.tenantId if present (we add optional parsing)
+    // Tenant identity must be inside the signed body. A header alone is not covered by HMAC.
+    const headerTenantId = (request.headers['x-tenant-id'] as string) ?? null;
     const bodyWithTenant = request.body as Record<string, unknown>;
-    if (!tenantId && typeof bodyWithTenant.tenantId === 'string')
-      tenantId = bodyWithTenant.tenantId as string;
-
-    if (!tenantId) {
-      // Try to brute-force lookup: query payment_attempts without RLS by using direct connection and no tenant
-      // For test simplicity, we will assume webhook includes tenant context via requiring authenticated tenant?
-      // Alternative: if DATABASE_URL exists, do a global scan for providerRef
-      if (process.env.DATABASE_URL) {
-        try {
-          const dbGlobal = createDatabase(process.env.DATABASE_URL, {
-            role: process.env.DATABASE_ROLE ?? 'platform_app',
-          });
-          // Bypass RLS by setting tenant to the first found? Instead we query without RLS using raw postgres client
-          // Use handler's db.db with no tenant filter: we can query payment_attempts directly via sql without setting app.tenant_id
-          // Drizzle transaction without set_config will bypass RLS? No, RLS still applies but app.tenant_id empty => no rows.
-          // So we need to use a superuser connection without RLS. For demo, we skip global lookup and require header.
-          await dbGlobal.close();
-        } catch {
-          // ignore
-        }
-      }
-      throw new RequestProblem(
-        400,
-        'BAD_REQUEST',
-        'Tenant context required in webhook (x-tenant-id header or tenantId body)',
-      );
+    const bodyTenantId =
+      typeof bodyWithTenant.tenantId === 'string' ? bodyWithTenant.tenantId : null;
+    if (!bodyTenantId) {
+      throw new RequestProblem(400, 'BAD_REQUEST', 'Signed tenantId is required in webhook body');
     }
+    if (headerTenantId && headerTenantId !== bodyTenantId) {
+      throw new RequestProblem(401, 'UNAUTHORIZED', 'Webhook tenant mismatch');
+    }
+    const tenantId = bodyTenantId;
 
     // Validate tenantId format
     if (
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(tenantId)
     ) {
-      // Allow non-uuid tenants for in-memory demo (tenant-acme etc)
-      // So we skip strict check for demo tenants
-      if (tenantId.includes('-') && tenantId.length < 10) {
-        // ok
+      if (process.env.DATABASE_URL) {
+        throw new RequestProblem(400, 'BAD_REQUEST', 'Persistent webhook tenantId must be a UUID');
       }
     }
 
@@ -1737,140 +1785,106 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       return { status: 'already_processed', eventId: body.eventId };
     }
 
-    // Try DB dedupe if DATABASE_URL present
+    // The persistent dedupe insert and payment transition must commit together.
+    // Otherwise a failed transition could be acknowledged as already processed on retry.
     if (process.env.DATABASE_URL) {
+      const db = createDatabase(process.env.DATABASE_URL, {
+        role: process.env.DATABASE_ROLE ?? 'platform_app',
+      });
       try {
-        const db = createDatabase(process.env.DATABASE_URL, {
-          role: process.env.DATABASE_ROLE ?? 'platform_app',
-        });
-        const inserted = await db.db
-          .execute<{ id: string }>(
-            sql`
-          insert into inbound_payment_events (tenant_id, event_id, provider_ref, status, payload)
-          values (${tenantId}::uuid, ${body.eventId}, ${body.providerRef}, ${body.status}, ${JSON.stringify(body)}::jsonb)
-          on conflict (tenant_id, event_id) do nothing
-          returning id
-        `,
-          )
-          .catch(async (err) => {
-            // For non-uuid tenant (demo), fallback to text insertion without uuid cast
-            if (String(err).includes('invalid input syntax for type uuid')) {
-              return (await db.db.execute<{ id: string }>(sql`
+        const outcome = await withTenantTransaction(
+          db,
+          { tenantId, requestId: request.id },
+          async (tx) => {
+            const inserted = await tx.execute<{ id: string }>(sql`
               insert into inbound_payment_events (tenant_id, event_id, provider_ref, status, payload)
-              values (${tenantId}::text::uuid, ${body.eventId}, ${body.providerRef}, ${body.status}, ${JSON.stringify(body)}::jsonb)
+              values (${tenantId}::uuid, ${body.eventId}, ${body.providerRef}, ${body.status}, ${JSON.stringify(body)}::jsonb)
               on conflict (tenant_id, event_id) do nothing
               returning id
-            `)) as unknown as { id: string }[];
-            }
-            throw err;
-          });
-        await db.close();
-        if (inserted.length === 0) {
-          globalAny.__webhookDedupe.add(dedupeKey);
-          return { status: 'already_processed', eventId: body.eventId };
-        }
-      } catch (error) {
-        if (error instanceof RequestProblem) throw error;
-        // If DB error due to non-uuid tenant or missing table, fallback to in-memory dedupe only
-        // Continue to process
-      }
-    }
+            `);
+            if (inserted.length === 0) return { duplicate: true } as const;
 
-    globalAny.__webhookDedupe.add(dedupeKey);
-
-    // Apply to payment_attempt if providerRef matches
-    // Use paymentStore to update? We need to handle both Persistent and InMemory
-    // Try to find payment attempt by providerRef via direct DB update with RLS
-    if (process.env.DATABASE_URL) {
-      try {
-        const db = createDatabase(process.env.DATABASE_URL, {
-          role: process.env.DATABASE_ROLE ?? 'platform_app',
-        });
-        // Need tenant-scoped update: set app.tenant_id then update
-        // Use withTenantTransaction helper
-        const { withTenantTransaction } = await import('@platform/db');
-        const dummyDb = db;
-        await withTenantTransaction(dummyDb, { tenantId, requestId: request.id }, async (tx) => {
-          // Find attempt by provider_ref or provider_key
-          const rows = await tx.execute<{ id: string; status: string; order_id: string }>(sql`
+            // Find attempt by provider_ref or provider_key inside this tenant transaction.
+            const rows = await tx.execute<{ id: string; status: string; order_id: string }>(sql`
               select id, status, order_id from payment_attempts
               where tenant_id=${tenantId}::uuid and (provider_ref=${body.providerRef} or provider_key=${body.providerKey ?? ''} or provider_ref=${body.providerRef})
               limit 1
             `);
-          let attempt = rows[0];
-          // Fallback: search by provider_key if providerRef not found
-          if (!attempt && body.providerRef) {
-            const byKey = await tx.execute<{ id: string; status: string; order_id: string }>(sql`
+            let attempt = rows[0];
+            if (!attempt && body.providerRef) {
+              const byKey = await tx.execute<{ id: string; status: string; order_id: string }>(sql`
                 select id, status, order_id from payment_attempts where tenant_id=${tenantId}::uuid and provider_ref=${body.providerRef} limit 1
               `);
-            attempt = byKey[0];
-          }
-          if (!attempt) {
-            // Try global providerRef search without tenant lock: maybe webhook is first time we learn providerRef
-            const anyRows = await tx.execute<{ id: string; status: string; order_id: string }>(sql`
+              attempt = byKey[0];
+            }
+            if (!attempt) {
+              const anyRows = await tx.execute<{
+                id: string;
+                status: string;
+                order_id: string;
+              }>(sql`
                 select id, status, order_id from payment_attempts where tenant_id=${tenantId}::uuid order by created_at desc limit 1
               `);
-            // For demo, if only one pending attempt exists, use it
-            if (
-              anyRows.length === 1 &&
-              (anyRows[0]!.status === 'pending' ||
-                anyRows[0]!.status === 'unknown' ||
-                anyRows[0]!.status === 'created')
-            ) {
-              attempt = anyRows[0];
+              if (
+                anyRows.length === 1 &&
+                (anyRows[0]!.status === 'pending' ||
+                  anyRows[0]!.status === 'unknown' ||
+                  anyRows[0]!.status === 'created')
+              ) {
+                attempt = anyRows[0];
+              }
             }
-          }
-          if (!attempt) return;
-          const cur = attempt.status;
-          const target = body.status; // paid|failed|unknown
-          // Only allow valid transitions
-          const { canTransition: ct } = await import('@platform/domain');
-          if (cur === target) return;
-          if (cur === 'paid' || cur === 'failed') return;
-          if (!ct(cur as never, target as never)) {
-            // Allow pending->unknown->paid progression, but if invalid keep as is
-            if (
-              !(cur === 'pending' && target === 'unknown') &&
-              !(cur === 'unknown' && (target === 'paid' || target === 'failed'))
-            ) {
-              return;
+
+            if (!attempt) return { duplicate: false, applied: false } as const;
+            const cur = attempt.status;
+            const target = body.status;
+            if (cur !== target && cur !== 'paid' && cur !== 'failed') {
+              if (canTransition(cur as never, target as never)) {
+                await tx.execute(sql`
+                  update payment_attempts set status=${target}, provider_ref=${body.providerRef}, updated_at=now()
+                  where id=${attempt.id}::uuid and tenant_id=${tenantId}::uuid
+                `);
+                if (target === 'paid') {
+                  await tx.execute(sql`
+                    update orders set status='paid', updated_at=now()
+                    where id=${attempt.order_id}::uuid and tenant_id=${tenantId}::uuid
+                  `);
+                } else if (target === 'failed') {
+                  await tx.execute(sql`
+                    update orders set status='failed', updated_at=now()
+                    where id=${attempt.order_id}::uuid and tenant_id=${tenantId}::uuid
+                  `);
+                }
+                await writeOutboxEvent(tx, {
+                  tenantId,
+                  aggregateType: 'payment',
+                  aggregateId: attempt.id,
+                  eventType: `payment.webhook_${target}`,
+                  payload: {
+                    attemptId: attempt.id,
+                    orderId: attempt.order_id,
+                    providerRef: body.providerRef,
+                    status: target,
+                    eventId: body.eventId,
+                  },
+                  correlationId: getCorrelationId(request),
+                });
+                return { duplicate: false, applied: true } as const;
+              }
             }
-          }
-          await tx.execute(sql`
-              update payment_attempts set status=${target}, provider_ref=${body.providerRef}, updated_at=now()
-              where id=${attempt.id}::uuid and tenant_id=${tenantId}::uuid
-            `);
-          if (target === 'paid') {
-            await tx.execute(sql`
-                update orders set status='paid', updated_at=now() where id=${attempt.order_id}::uuid and tenant_id=${tenantId}::uuid
-              `);
-          } else if (target === 'failed') {
-            await tx.execute(sql`
-                update orders set status='failed', updated_at=now() where id=${attempt.order_id}::uuid and tenant_id=${tenantId}::uuid
-              `);
-          }
-          const outPayload = {
-            attemptId: attempt.id,
-            orderId: attempt.order_id,
-            providerRef: body.providerRef,
-            status: target,
-            eventId: body.eventId,
-          };
-          const { writeOutboxEvent: woe } = await import('@platform/db');
-          await woe(tx, {
-            tenantId,
-            aggregateType: 'payment',
-            aggregateId: attempt.id,
-            eventType: `payment.webhook_${target}`,
-            payload: outPayload,
-            correlationId: getCorrelationId(request),
-          });
-        });
-        await db.close();
+            return { duplicate: false, applied: false } as const;
+          },
+        );
+        if (outcome.duplicate) {
+          globalAny.__webhookDedupe.add(dedupeKey);
+          return { status: 'already_processed', eventId: body.eventId };
+        }
+        globalAny.__webhookDedupe.add(dedupeKey);
       } catch (error) {
-        if (error instanceof RequestProblem) throw error;
-        // Log but don't fail webhook (idempotent)
         request.log.error({ err: error }, 'webhook_payment_update_failed');
+        throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Payment state unavailable');
+      } finally {
+        await db.close();
       }
     } else {
       // InMemory path: update paymentStore directly if global paymentStore accessible
@@ -1895,6 +1909,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
             memStore.setAttemptStatus(targetAttempt.id, body.status, body.providerRef);
           }
         }
+        globalAny.__webhookDedupe.add(dedupeKey);
       } catch {
         // ignore
       }
@@ -2196,23 +2211,24 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       (request.headers['x-signature'] as string) ??
       '';
     // Use global secret for demo, but tenant isolation via dedupe key
-    const secret =
-      process.env.WEBHOOK_INBOUND_SECRET ??
-      process.env.PAYMENT_WEBHOOK_SECRET ??
-      'test_webhook_secret';
+    const configuredSecret =
+      process.env.WEBHOOK_INBOUND_SECRET ?? process.env.PAYMENT_WEBHOOK_SECRET;
+    if (!configuredSecret && process.env.NODE_ENV === 'production') {
+      throw new RequestProblem(503, 'WEBHOOK_NOT_CONFIGURED', 'Inbound webhook is not configured');
+    }
+    const secret = configuredSecret ?? 'test_webhook_secret';
     const verify = verifyWebhookSignature({ secret, timestamp, rawBody, signatureHeader });
     if (!verify.valid)
       throw new RequestProblem(401, 'UNAUTHORIZED', `Webhook signature invalid: ${verify.reason}`);
     const body = parseOrThrow(InboundWebhookSchema, request.body);
-    const tenantId =
-      (request.headers['x-tenant-id'] as string) ??
-      ((body as unknown as Record<string, unknown>).tenantId as string | undefined);
-    if (!tenantId)
-      throw new RequestProblem(
-        400,
-        'BAD_REQUEST',
-        'Tenant context required in webhook (x-tenant-id header)',
-      );
+    const headerTenantId = (request.headers['x-tenant-id'] as string) ?? null;
+    const bodyTenantId = body.tenantId ?? null;
+    if (!bodyTenantId)
+      throw new RequestProblem(400, 'BAD_REQUEST', 'Signed tenantId is required in webhook body');
+    if (headerTenantId && headerTenantId !== bodyTenantId) {
+      throw new RequestProblem(401, 'UNAUTHORIZED', 'Webhook tenant mismatch');
+    }
+    const tenantId = bodyTenantId;
     const dedupeKey = `${tenantId}:${body.eventId}`;
     const globalAny = globalThis as unknown as { __inboundDedupe?: Set<string> };
     if (!globalAny.__inboundDedupe) globalAny.__inboundDedupe = new Set<string>();
@@ -2221,29 +2237,33 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     }
     // Persistent dedupe if DB available
     if (process.env.DATABASE_URL) {
+      if (
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+          tenantId,
+        )
+      ) {
+        throw new RequestProblem(400, 'BAD_REQUEST', 'Persistent webhook tenantId must be a UUID');
+      }
+      const db = createDatabase(process.env.DATABASE_URL, {
+        role: process.env.DATABASE_ROLE ?? 'platform_app',
+      });
       try {
-        const db = createDatabase(process.env.DATABASE_URL, {
-          role: process.env.DATABASE_ROLE ?? 'platform_app',
-        });
-        const inserted = await db.db
-          .execute<{ id: string }>(
-            sql`
-          insert into inbound_webhook_events (tenant_id, event_id, source, payload)
-          values (${tenantId}::uuid, ${body.eventId}, ${body.source ?? 'external'}, ${JSON.stringify(body.payload ?? body)}::jsonb)
-          on conflict (tenant_id, event_id) do nothing returning id
-        `,
-          )
-          .catch(async () => {
-            // fallback for non-uuid tenant (demo) - use text cast
-            return [] as { id: string }[];
-          });
-        await db.close();
+        const inserted = await withTenantTransaction(
+          db,
+          { tenantId, requestId: request.id },
+          (tx) =>
+            tx.execute<{ id: string }>(sql`
+              insert into inbound_webhook_events (tenant_id, event_id, source, payload)
+              values (${tenantId}::uuid, ${body.eventId}, ${body.source ?? 'external'}, ${JSON.stringify(body.payload ?? body)}::jsonb)
+              on conflict (tenant_id, event_id) do nothing returning id
+            `),
+        );
         if (inserted.length === 0) {
           globalAny.__inboundDedupe.add(dedupeKey);
           return { status: 'already_processed', eventId: body.eventId };
         }
-      } catch {
-        // fallback to memory
+      } finally {
+        await db.close();
       }
     }
     globalAny.__inboundDedupe.add(dedupeKey);
@@ -2254,6 +2274,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   // --- API Keys M2M (tenant-scoped) ---
   app.post('/v1/api-keys', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
     const context = await requireTenantContext(request);
+    requireHumanAuth(context);
     requirePermission(context, 'webhooks:manage');
     if (!['owner', 'admin'].includes(context.membership.role))
       throw new RequestProblem(403, 'FORBIDDEN', 'Requires owner or admin');
@@ -2284,6 +2305,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
 
   app.get('/v1/api-keys', async (request) => {
     const context = await requireTenantContext(request);
+    requireHumanAuth(context);
     requirePermission(context, 'webhooks:read');
     const keys = await apiKeyStore.list({
       tenantId: context.tenantId,
@@ -2303,6 +2325,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
 
   app.delete('/v1/api-keys/:id', async (request) => {
     const context = await requireTenantContext(request);
+    requireHumanAuth(context);
     requirePermission(context, 'webhooks:manage');
     if (!['owner', 'admin'].includes(context.membership.role))
       throw new RequestProblem(403, 'FORBIDDEN', 'Requires owner or admin');
@@ -2331,6 +2354,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
 
   app.post('/v1/api-keys/:id/rotate', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
     const context = await requireTenantContext(request);
+    requireHumanAuth(context);
     requirePermission(context, 'webhooks:manage');
     if (!['owner', 'admin'].includes(context.membership.role))
       throw new RequestProblem(403, 'FORBIDDEN', 'Requires owner or admin');
@@ -2393,12 +2417,11 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     const id = randomUUID();
     // Persistent if DB available, else memory
     if (process.env.DATABASE_URL) {
+      const db = createDatabase(process.env.DATABASE_URL, {
+        role: process.env.DATABASE_ROLE ?? 'platform_app',
+      });
       try {
-        const db = createDatabase(process.env.DATABASE_URL, {
-          role: process.env.DATABASE_ROLE ?? 'platform_app',
-        });
-        const { withTenantTransaction: wtt } = await import('@platform/db');
-        const rows = await wtt(
+        const rows = await withTenantTransaction(
           db,
           { tenantId: context.tenantId, requestId: request.id },
           async (tx) => {
@@ -2410,19 +2433,9 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
             return r;
           },
         );
-        await db.close();
         if (rows.length === 0) throw new Error('automation_create_failed');
-      } catch {
-        // fallback to mem
-        if (!automationsMem.has(context.tenantId)) automationsMem.set(context.tenantId, new Map());
-        automationsMem.get(context.tenantId)!.set(id, {
-          id,
-          tenantId: context.tenantId,
-          trigger: validated.trigger,
-          action: validated.action,
-          version: validated.action.version,
-          enabled: body.enabled ?? true,
-        });
+      } finally {
+        await db.close();
       }
     } else {
       if (!automationsMem.has(context.tenantId)) automationsMem.set(context.tenantId, new Map());
@@ -2458,12 +2471,11 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     const context = await requireTenantContext(request);
     requirePermission(context, 'automations:read');
     if (process.env.DATABASE_URL) {
+      const db = createDatabase(process.env.DATABASE_URL, {
+        role: process.env.DATABASE_ROLE ?? 'platform_app',
+      });
       try {
-        const db = createDatabase(process.env.DATABASE_URL, {
-          role: process.env.DATABASE_ROLE ?? 'platform_app',
-        });
-        const { withTenantTransaction: wtt } = await import('@platform/db');
-        const rows = await wtt(
+        const rows = await withTenantTransaction(
           db,
           { tenantId: context.tenantId, requestId: request.id },
           async (tx) => {
@@ -2478,7 +2490,6 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           `);
           },
         );
-        await db.close();
         return {
           data: rows.map((r) => ({
             id: r.id,
@@ -2488,8 +2499,8 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
             enabled: r.enabled,
           })),
         };
-      } catch {
-        // fallback
+      } finally {
+        await db.close();
       }
     }
     const map = automationsMem.get(context.tenantId);

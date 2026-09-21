@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { encryptWebhookSecret } from '@platform/config';
 import { sql, writeOutboxEvent } from '@platform/db';
 import { createDatabase, withTenantTransaction, type DatabaseHandle } from '@platform/db';
 import type { StoreTenantContext } from './identity-store.js';
@@ -334,7 +335,10 @@ export class InMemoryWebhookStore implements WebhookStore {
 }
 
 export class PersistentWebhookStore implements WebhookStore {
-  constructor(private readonly db: DatabaseHandle) {
+  constructor(
+    private readonly db: DatabaseHandle,
+    private readonly encryptionKey = process.env.WEBHOOK_SECRET_ENCRYPTION_KEY,
+  ) {
     if (!db.role) throw new Error('database_role_required');
   }
 
@@ -345,8 +349,9 @@ export class PersistentWebhookStore implements WebhookStore {
   static fromConnectionString(
     connectionString: string,
     role = 'platform_app',
+    encryptionKey = process.env.WEBHOOK_SECRET_ENCRYPTION_KEY,
   ): PersistentWebhookStore {
-    return new PersistentWebhookStore(createDatabase(connectionString, { role }));
+    return new PersistentWebhookStore(createDatabase(connectionString, { role }), encryptionKey);
   }
 
   async createEndpoint(
@@ -357,6 +362,8 @@ export class PersistentWebhookStore implements WebhookStore {
     validateEvents(input.events);
     const rawSecret = input.secret ?? randomBytes(32).toString('base64url');
     const secretHash = hashSecret(rawSecret);
+    if (!this.encryptionKey) throw new Error('webhook_secret_encryption_key_required');
+    const secretCiphertext = encryptWebhookSecret(rawSecret, this.encryptionKey);
     const eventsJson = JSON.stringify(input.events);
     return withTenantTransaction(this.db, context, async (tx) => {
       try {
@@ -374,8 +381,8 @@ export class PersistentWebhookStore implements WebhookStore {
           updated_at: string;
           last_delivery_at: string | null;
         }>(sql`
-          insert into webhook_endpoints (tenant_id, url, secret_hash, events, status, created_by)
-          values (${context.tenantId}::uuid, ${input.url}, ${secretHash}, ${eventsJson}::jsonb, 'active', ${input.createdBy}::uuid)
+          insert into webhook_endpoints (tenant_id, url, secret_hash, secret_ciphertext, events, status, created_by)
+          values (${context.tenantId}::uuid, ${input.url}, ${secretHash}, ${secretCiphertext}, ${eventsJson}::jsonb, 'active', ${input.createdBy}::uuid)
           returning id, tenant_id, url, secret_hash, events::text as events, status, version, failure_count, created_by, created_at, updated_at, last_delivery_at
         `);
         const r = rows[0];
@@ -567,6 +574,8 @@ export class PersistentWebhookStore implements WebhookStore {
       if (existing.length === 0) throw new Error('webhook_not_found');
       const rawSecret = randomBytes(32).toString('base64url');
       const secretHash = hashSecret(rawSecret);
+      if (!this.encryptionKey) throw new Error('webhook_secret_encryption_key_required');
+      const secretCiphertext = encryptWebhookSecret(rawSecret, this.encryptionKey);
       const rows = await tx.execute<{
         id: string;
         tenant_id: string;
@@ -581,7 +590,7 @@ export class PersistentWebhookStore implements WebhookStore {
         updated_at: string;
         last_delivery_at: string | null;
       }>(sql`
-        update webhook_endpoints set secret_hash=${secretHash}, version=version+1, updated_at=now()
+        update webhook_endpoints set secret_hash=${secretHash}, secret_ciphertext=${secretCiphertext}, version=version+1, updated_at=now()
         where id=${id}::uuid and tenant_id=${context.tenantId}::uuid
         returning id, tenant_id, url, secret_hash, events::text as events, status, version, failure_count, created_by, created_at, updated_at, last_delivery_at
       `);

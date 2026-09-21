@@ -42,11 +42,11 @@ Si CI falla un check, ver `docs/security/exceptions.md` antes de añadir excepci
 
 ## Rotación de secretos sin downtime
 
-- **Webhooks**: `POST /v1/webhooks/endpoints/:id/rotate-secret` genera nuevo `rawSecret` base64url 32B, `sha256` hash, `version++`, invalida cache, audit `webhook.secret_rotated`. Soporta ventana dual: verifica `new` primero, si 401 prueba `old` 24h (soporte futuro `secret_hash_old`).
+- **Webhooks**: `POST /v1/webhooks/endpoints/:id/rotate-secret` genera nuevo `rawSecret` base64url 32B, `sha256` hash y `secret_ciphertext` AES-GCM, incrementa `version`, invalida cache y audita `webhook.secret_rotated`. La ventana dual de versiones/KMS sigue pendiente.
 - **API keys**: `POST /v1/api-keys/:id/rotate` revoca old (`revokedAt=now()`) y crea nuevo `prefix/hash` mismo `name/scopes` + audit `api_key.rotated`. M2M clientes usan `X-Api-Key: prefix.raw` nuevo sin downtime.
 - **S3**: `S3_ACCESS_KEY` + `S3_SECRET_KEY` rotación via env `S3_ACCESS_KEY_OLD/NEW` o IAM STS `AssumeRole`; `FakeS3Service` demo con `ensureBucket`.
 - **OIDC**: `OIDC_CLIENT_SECRET` + `OIDC_CLIENT_SECRET_OLD` (24h window), JWKS `kid` rotación con cache `jwk` TTL 5m en `validateOidcIdToken`; `oidcBreaker` 3 fails 60s.
-- **Payment webhooks**: `PAYMENT_WEBHOOK_SECRET` + `PAYMENT_WEBHOOK_SECRET_OLD` dual HMAC verify (try primary, then old). Documentado `docs/runbooks/webhooks.md`.
+- **Payment webhooks**: `PAYMENT_WEBHOOK_SECRET` global, requerido en producción, con `tenantId` dentro del cuerpo firmado. La rotación dual `*_OLD` y el raw-body exacto siguen pendientes.
 
 ## Auditoría y retención
 

@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { sql } from '@platform/db';
 import { createDatabase, withTenantTransaction, type DatabaseHandle } from '@platform/db';
 import type { StoreTenantContext } from './identity-store.js';
@@ -48,6 +48,12 @@ export function generateApiKey(): { raw: string; prefix: string; hash: string } 
   return { raw, prefix, hash };
 }
 
+function hashesMatch(expected: string, actual: string): boolean {
+  const expectedBytes = Buffer.from(expected, 'hex');
+  const actualBytes = Buffer.from(actual, 'hex');
+  return expectedBytes.length === actualBytes.length && timingSafeEqual(expectedBytes, actualBytes);
+}
+
 export interface ApiKeyStore {
   create(
     context: StoreTenantContext,
@@ -55,7 +61,7 @@ export interface ApiKeyStore {
   ): Promise<{ record: ApiKeyRecord; raw: string }>;
   list(context: StoreTenantContext): Promise<ApiKeyRecord[]>;
   revoke(context: StoreTenantContext, id: string): Promise<void>;
-  verify(prefix: string, raw: string): Promise<ApiKeyRecord | null>;
+  verify(prefix: string, raw: string, tenantId?: string): Promise<ApiKeyRecord | null>;
   rotate(context: StoreTenantContext, id: string): Promise<{ record: ApiKeyRecord; raw: string }>;
   close?(): Promise<void>;
 }
@@ -135,12 +141,13 @@ export class InMemoryApiKeyStore implements ApiKeyStore {
     return { record, raw };
   }
 
-  async verify(prefix: string, raw: string): Promise<ApiKeyRecord | null> {
+  async verify(prefix: string, raw: string, tenantId?: string): Promise<ApiKeyRecord | null> {
     const hash = createHash('sha256').update(raw).digest('hex');
     for (const k of this.keys.values()) {
       if (
         k.prefix === prefix &&
-        k.hash === hash &&
+        (!tenantId || k.tenantId === tenantId) &&
+        hashesMatch(k.hash, hash) &&
         !k.revokedAt &&
         (!k.expiresAt || k.expiresAt > Date.now())
       )
@@ -247,41 +254,43 @@ export class PersistentApiKeyStore implements ApiKeyStore {
       if (rows.length === 0) throw new Error('api_key_not_found');
     });
   }
-  async verify(prefix: string, raw: string): Promise<ApiKeyRecord | null> {
+  async verify(prefix: string, raw: string, tenantId?: string): Promise<ApiKeyRecord | null> {
+    if (!tenantId) return null;
     const hash = createHash('sha256').update(raw).digest('hex');
-    // Need global lookup without tenant; we bypass RLS by using direct postgres without tenant config?
-    // For demo we do tenant-agnostic search via raw sql with no RLS (superuser). Instead we query as platform_app but without tenant filter? RLS will block.
-    // So we implement as application transaction scanning all keys (not RLS). Use withApplicationTransaction via direct db.
-    // Simplify: use this.db.db (no set_config) to query
-    const rows = await this.db.db.execute<{
-      id: string;
-      tenant_id: string;
-      prefix: string;
-      hash: string;
-      scopes: string;
-      name: string;
-      expires_at: string | null;
-      revoked_at: string | null;
-      created_by: string;
-      created_at: string;
-    }>(sql`
-      select id, tenant_id, prefix, hash, scopes::text as scopes, name, expires_at, revoked_at, created_by, created_at from api_keys where prefix=${prefix} and hash=${hash} and revoked_at is null limit 1
-    `);
-    const r = rows[0];
-    if (!r) return null;
-    if (r.expires_at && new Date(r.expires_at).getTime() < Date.now()) return null;
-    return {
-      id: r.id,
-      tenantId: r.tenant_id,
-      prefix: r.prefix,
-      hash: r.hash,
-      scopes: JSON.parse(r.scopes),
-      name: r.name,
-      expiresAt: r.expires_at ? new Date(r.expires_at).getTime() : null,
-      revokedAt: r.revoked_at ? new Date(r.revoked_at).getTime() : null,
-      createdBy: r.created_by,
-      createdAt: new Date(r.created_at).getTime(),
-    };
+    return withTenantTransaction(this.db, { tenantId, requestId: 'api-key-verify' }, async (tx) => {
+      const rows = await tx.execute<{
+        id: string;
+        tenant_id: string;
+        prefix: string;
+        hash: string;
+        scopes: string;
+        name: string;
+        expires_at: string | null;
+        revoked_at: string | null;
+        created_by: string;
+        created_at: string;
+      }>(sql`
+          select id, tenant_id, prefix, hash, scopes::text as scopes, name, expires_at, revoked_at, created_by, created_at
+          from api_keys
+          where tenant_id=${tenantId}::uuid and prefix=${prefix} and revoked_at is null
+          limit 1
+        `);
+      const r = rows[0];
+      if (!r || !hashesMatch(r.hash, hash)) return null;
+      if (r.expires_at && new Date(r.expires_at).getTime() <= Date.now()) return null;
+      return {
+        id: r.id,
+        tenantId: r.tenant_id,
+        prefix: r.prefix,
+        hash: r.hash,
+        scopes: JSON.parse(r.scopes),
+        name: r.name,
+        expiresAt: r.expires_at ? new Date(r.expires_at).getTime() : null,
+        revokedAt: r.revoked_at ? new Date(r.revoked_at).getTime() : null,
+        createdBy: r.created_by,
+        createdAt: new Date(r.created_at).getTime(),
+      };
+    });
   }
 
   async rotate(

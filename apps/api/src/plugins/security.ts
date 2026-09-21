@@ -76,6 +76,7 @@ export function registerSecurity(app: FastifyInstance, options: SecurityOptions)
     allowedHeaders: [
       'Content-Type',
       'Authorization',
+      'X-Api-Key',
       'Idempotency-Key',
       'X-Request-Id',
       'X-Correlation-Id',

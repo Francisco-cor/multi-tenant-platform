@@ -1,7 +1,10 @@
-import { createDatabase } from '@platform/db';
+import { rm, writeFile } from 'node:fs/promises';
+import { createDatabase, type DatabaseHandle } from '@platform/db';
 import { metrics, createLogger, initTracing } from '@platform/observability';
-import { InMemoryQueueFactory } from './queues.js';
+import { createWorkerProcessor } from './consumer.js';
+import { createBullMqFactory, type QueueFactory } from './queues.js';
 import { OutboxRelay } from './relay/outboxRelay.js';
+import { workerGlobalTransaction } from './tenant-db.js';
 
 const logger = createLogger({ service: process.env.OTEL_SERVICE_NAME ?? 'worker' });
 
@@ -14,9 +17,13 @@ await initTracing({
 
 let shuttingDown = false;
 let relay: OutboxRelay | null = null;
-let queueFactory: import('./queues.js').QueueFactory | null = null;
+let queueFactory: QueueFactory | null = null;
+let database: DatabaseHandle | null = null;
+let relayDatabase: DatabaseHandle | null = null;
+let lagTimer: NodeJS.Timeout | null = null;
+const readyFile = process.env.WORKER_READY_FILE ?? '/tmp/platform-worker-ready';
 
-const shutdown = async (signal: string) => {
+const shutdown = async (signal: string, exitCode = 0) => {
   if (shuttingDown) return;
   shuttingDown = true;
   logger.info({ signal }, 'worker_shutdown_started');
@@ -24,6 +31,10 @@ const shutdown = async (signal: string) => {
   try {
     if (relay) await relay.stop();
     if (queueFactory) await queueFactory.closeAll();
+    if (lagTimer) clearInterval(lagTimer);
+    await rm(readyFile, { force: true });
+    if (database) await database.close();
+    if (relayDatabase) await relayDatabase.close();
     logger.info({ signal }, 'worker_shutdown_completed');
   } catch (error) {
     logger.error(
@@ -33,62 +44,48 @@ const shutdown = async (signal: string) => {
   } finally {
     const remaining = deadline - Date.now();
     if (remaining > 0) await new Promise((r) => setTimeout(r, Math.min(remaining, 100)));
-    process.exit(0);
+    process.exit(exitCode);
   }
 };
 
-// Bootstrap worker if DATABASE_URL and REDIS_URL are available; otherwise idle (tests use InMemory).
+// Bootstrap worker with real DB/Redis. In-memory mode is for local development/tests only.
 async function bootstrap(): Promise<void> {
   const dbUrl = process.env.DATABASE_URL;
   const redisUrl = process.env.REDIS_URL;
-  if (!dbUrl) {
+  if (!dbUrl || !redisUrl) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('worker_database_and_redis_required');
+    }
     logger.info({ status: 'idle', reason: 'no DATABASE_URL' }, 'worker_started');
     return;
   }
 
-  const db = createDatabase(dbUrl, { role: process.env.DATABASE_ROLE ?? 'platform_app' });
-  // For now we use InMemory queues; BullMQ will be wired when REDIS_URL is present and bullmq is installed.
-  // We keep InMemory as fallback to make tests deterministic without Redis.
-  queueFactory = new InMemoryQueueFactory();
+  database = createDatabase(dbUrl, { role: process.env.DATABASE_ROLE ?? 'platform_app' });
+  relayDatabase = createDatabase(dbUrl, {
+    role: process.env.WORKER_DATABASE_ROLE ?? 'platform_worker',
+  });
+  const bullFactory = await createBullMqFactory(redisUrl);
+  if (!bullFactory) throw new Error('bullmq_unavailable');
+  queueFactory = bullFactory;
+  logger.info(
+    { mode: 'bullmq', redisUrl: redisUrl.replace(/:\/\/.*@/, '://***@') },
+    'worker_queues',
+  );
+  await queueFactory.startWorkers?.(createWorkerProcessor(database));
 
-  // If REDIS_URL is set, try to upgrade to BullMQ factory (best effort)
-  if (redisUrl) {
-    try {
-      const { createBullMqFactory } = await import('./queues.js');
-      const bullFactory = await createBullMqFactory(redisUrl);
-      if (bullFactory) {
-        await queueFactory.closeAll();
-        queueFactory = bullFactory;
-        logger.info(
-          { mode: 'bullmq', redisUrl: redisUrl.replace(/:\/\/.*@/, '://***@') },
-          'worker_queues',
-        );
-      } else {
-        logger.info({ mode: 'in-memory', reason: 'bullmq_unavailable' }, 'worker_queues');
-      }
-    } catch (error) {
-      logger.info(
-        {
-          mode: 'in-memory',
-          reason: error instanceof Error ? error.message : String(error),
-        },
-        'worker_queues',
-      );
-    }
-  } else {
-    logger.info({ mode: 'in-memory' }, 'worker_queues');
-  }
-
-  relay = new OutboxRelay(db, queueFactory, { batchSize: 100, intervalMs: 2000 });
+  relay = new OutboxRelay(relayDatabase, queueFactory, { batchSize: 100, intervalMs: 2000 });
   relay.start();
+  await writeFile(readyFile, `${process.pid}\n`, { encoding: 'utf8', mode: 0o600 });
 
   // Also start periodic GC for files and reservations (reuse existing jobs)
   // Metrics: poll outbox lag every 5s
-  const lagTimer = setInterval(async () => {
+  lagTimer = setInterval(async () => {
     try {
       const { sql } = await import('@platform/db');
-      const rows = await db.db.execute<{ lag: string; pending: string }>(
-        sql`select extract(epoch from (now() - min(created_at))) as lag, count(*) as pending from outbox_events where status='pending'`,
+      const rows = await workerGlobalTransaction(relayDatabase!, (tx) =>
+        tx.execute<{ lag: string; pending: string }>(
+          sql`select extract(epoch from (now() - min(created_at))) as lag, count(*) as pending from outbox_events where status='pending'`,
+        ),
       );
       const row = rows[0];
       const lag = row?.lag ? Number(row.lag) : 0;
@@ -110,7 +107,13 @@ async function bootstrap(): Promise<void> {
   logger.info({ relay: 'outbox', queues: 'ready' }, 'worker_started');
 }
 
-void bootstrap();
+void bootstrap().catch((error) => {
+  logger.error(
+    { error: error instanceof Error ? error.message : String(error) },
+    'worker_bootstrap_failed',
+  );
+  void shutdown('bootstrap_failed', 1);
+});
 
 process.once('SIGTERM', () => void shutdown('SIGTERM'));
 process.once('SIGINT', () => void shutdown('SIGINT'));

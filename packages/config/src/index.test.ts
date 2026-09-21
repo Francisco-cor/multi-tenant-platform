@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { loadEnvironment } from './index.js';
+import { decryptWebhookSecret, encryptWebhookSecret, loadEnvironment } from './index.js';
 
 describe('runtime configuration', () => {
   it('applies safe local defaults', () => {
@@ -23,11 +23,51 @@ describe('runtime configuration', () => {
         S3_ENDPOINT: 'https://s3.example.test',
         S3_ACCESS_KEY: 'access',
         S3_SECRET_KEY: 'secret',
+        WEBHOOK_SECRET_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
         OIDC_ISSUER_URL: 'https://issuer.example.test',
         OIDC_CLIENT_ID: 'platform',
         OIDC_REDIRECT_URI: 'https://api.example.test/v1/auth/callback',
+        PAYMENT_WEBHOOK_SECRET: 'payment-secret-for-tests',
+        WEBHOOK_INBOUND_SECRET: 'inbound-secret-for-tests',
         ALLOW_DEV_LOGIN: '1',
       }),
     ).toThrow();
+  });
+
+  it('requires the real S3 provider in production', () => {
+    expect(() =>
+      loadEnvironment({
+        NODE_ENV: 'production',
+        DATABASE_URL: 'postgresql://platform:platform@db:5432/platform',
+        REDIS_URL: 'redis://redis:6379',
+        S3_PROVIDER: 'fake',
+        S3_ENDPOINT: 'https://s3.example.test',
+        S3_ACCESS_KEY: 'access',
+        S3_SECRET_KEY: 'secret',
+        WEBHOOK_SECRET_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+        OIDC_ISSUER_URL: 'https://issuer.example.test',
+        OIDC_CLIENT_ID: 'platform',
+        OIDC_REDIRECT_URI: 'https://api.example.test/v1/auth/callback',
+        PAYMENT_WEBHOOK_SECRET: 'payment-secret-for-tests',
+        WEBHOOK_INBOUND_SECRET: 'inbound-secret-for-tests',
+      }),
+    ).toThrow(/real_s3_provider_required/);
+  });
+
+  it('encrypts and decrypts webhook secrets without storing plaintext', () => {
+    const key = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+    const encrypted = encryptWebhookSecret('whsec_test', key);
+
+    expect(encrypted).not.toContain('whsec_test');
+    expect(decryptWebhookSecret(encrypted, key)).toBe('whsec_test');
+    expect(() =>
+      decryptWebhookSecret(encrypted, 'BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB='),
+    ).toThrow();
+  });
+
+  it('rejects an encryption key with the wrong decoded size', () => {
+    expect(() => loadEnvironment({ WEBHOOK_SECRET_ENCRYPTION_KEY: 'A'.repeat(44) })).toThrow(
+      /webhook_secret_encryption_key_invalid/,
+    );
   });
 });

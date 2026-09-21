@@ -133,14 +133,12 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Dependency audit (pnpm audit --prod high)
-        run: pnpm audit --prod --audit-level=high || echo "audit found issues, check logs; see docs/security/exceptions.md"
-        continue-on-error: true
+        run: pnpm audit --prod --audit-level=high
 
       - name: Secret scanning (gitleaks)
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        continue-on-error: true
 
       - name: SAST (Semgrep)
         uses: semgrep/semgrep-action@v1
@@ -149,21 +147,17 @@ jobs:
             p/security-audit
             p/secrets
             p/owasp-top-ten
-        continue-on-error: true
 
       - name: SAST (CodeQL)
         uses: github/codeql-action/init@v3
         with:
           languages: javascript-typescript
-        continue-on-error: true
 
       - name: Autobuild CodeQL
         uses: github/codeql-action/autobuild@v3
-        continue-on-error: true
 
       - name: Analyze CodeQL
         uses: github/codeql-action/analyze@v3
-        continue-on-error: true
 
       - name: Image scan (Trivy filesystem)
         uses: aquasecurity/trivy-action@0.24.0
@@ -173,10 +167,8 @@ jobs:
           ignore-unfixed: true
           format: 'sarif'
           output: 'trivy-fs.sarif'
-        continue-on-error: true
 
       - name: Upload Trivy SARIF
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: 'trivy-fs.sarif'
-        continue-on-error: true

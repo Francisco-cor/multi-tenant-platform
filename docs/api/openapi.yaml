@@ -204,6 +204,7 @@ paths:
     post:
       tags: [Webhooks]
       operationId: inboundPaymentWebhook
+      security: [{ webhookHmac: [] }]
       parameters:
         - name: X-Webhook-Timestamp
           in: header
@@ -844,6 +845,7 @@ paths:
   /v1/webhooks/inbound:
     post:
       tags: [Webhooks]
+      security: [{ webhookHmac: [] }]
       parameters:
         - name: X-Webhook-Timestamp
           in: header
@@ -1126,6 +1128,10 @@ components:
     oidc:
       type: openIdConnect
       openIdConnectUrl: https://issuer.example.com/.well-known/openid-configuration
+    webhookHmac:
+      type: apiKey
+      in: header
+      name: X-Webhook-Signature
   parameters:
     OrganizationId:
       name: organizationId
@@ -1314,7 +1320,7 @@ components:
         data: { type: array, items: { $ref: '#/components/schemas/PaymentAttempt' } }
     PaymentWebhookRequest:
       type: object
-      required: [eventId, providerRef, status]
+      required: [eventId, providerRef, status, tenantId]
       properties:
         eventId: { type: string, minLength: 8, maxLength: 128 }
         providerRef: { type: string, minLength: 3, maxLength: 128 }
@@ -1476,7 +1482,7 @@ components:
         data: { type: array, items: { $ref: '#/components/schemas/WebhookDelivery' } }
     InboundWebhookRequest:
       type: object
-      required: [eventId]
+      required: [eventId, tenantId]
       properties:
         eventId: { type: string, minLength: 8, maxLength: 128 }
         source: { type: string }

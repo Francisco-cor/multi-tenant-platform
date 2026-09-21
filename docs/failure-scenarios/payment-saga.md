@@ -11,7 +11,7 @@
 - **API:** `apps/api/src/payment-store.ts:40` `createOrderWithPayment` en `withTenantTransaction`: `INSERT orders` + `INSERT payment_attempts(created)` + `writeOutboxEvent(order.created)` + `writeOutboxEvent(payment.created)` atómicos, sin dual write.
 - **Provider:** `apps/worker/src/providers/fakePaymentProvider.ts:30` `FakePaymentProvider` con `Map providerKey→ChargeResult`, `chargeCalls` contador, `failNextChargeAfterProvider` flag para simular `kill` tras side-effect.
 - **Worker:** `apps/worker/src/jobs/processPayment.ts:30` `processPayment` con `SELECT ... FOR UPDATE` → `pending`, `provider.charge` fuera de tx con misma key, `SELECT ... FOR UPDATE` → `paid/failed/unknown` + `UPDATE orders` + `writeOutboxEvent`.
-- **Webhook:** `apps/api/src/webhook-payment.ts:1` HMAC `sha256(secret, timestamp.rawBody)` tolerance 5m, `apps/api/src/app.ts:940` `POST /v1/webhooks/payments` dedupe `inbound_payment_events` `ON CONFLICT DO NOTHING` + global `__webhookDedupe`.
+- **Webhook:** `POST /v1/webhooks/payments` HMAC `sha256(secret, timestamp.rawBody)` tolerance 5m, `tenantId` dentro del cuerpo firmado y dedupe `inbound_payment_events` `ON CONFLICT DO NOTHING`; con DB, dedupe + transición + outbox comparten transacción.
 - **Reconciler:** `apps/worker/src/jobs/reconcilePayments.ts:10` `SELECT ... FOR UPDATE SKIP LOCKED WHERE status IN (pending,unknown) AND updated_at < now()-5m` → `provider.getStatus` → `paid/failed`.
 - **Métricas/Health:** `packages/observability/src/metrics.ts:35` `payment_unknown` gauge, `apps/api/src/health.ts:90` `checkPayments` `unknown >30m` → `degraded 503`.
 - **Tests:** `packages/domain/src/payments.test.ts` 4 tests, `apps/worker/src/payments.saga.test.ts` 4 tests, `apps/api/src/payments.test.ts` 3 suites.

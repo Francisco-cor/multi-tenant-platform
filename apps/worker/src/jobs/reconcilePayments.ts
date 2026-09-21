@@ -3,6 +3,7 @@ import type { DatabaseHandle } from '@platform/db';
 import { canTransition } from '@platform/domain';
 import { metrics } from '@platform/observability';
 import type { PaymentProvider } from '../providers/paymentProvider.js';
+import { workerGlobalTransaction } from '../tenant-db.js';
 
 export interface ReconcileResult {
   reconciled: number;
@@ -30,7 +31,7 @@ export async function reconcilePayments(
   const start = Date.now();
   const staleIso = new Date(Date.now() - staleMs).toISOString();
 
-  const batch = await db.db.transaction(async (tx) => {
+  const batch = await workerGlobalTransaction(db, async (tx) => {
     const rows = await tx.execute<{
       id: string;
       tenant_id: string;
@@ -55,9 +56,11 @@ export async function reconcilePayments(
   if (batch.length === 0) {
     // Update metrics for dashboard: count pending/unknown still
     try {
-      const counts = await db.db.execute<{ status: string; count: string }>(sql`
-        select status, count(*) as count from payment_attempts where status in ('pending','unknown') group by status
-      `);
+      const counts = await workerGlobalTransaction(db, (tx) =>
+        tx.execute<{ status: string; count: string }>(sql`
+          select status, count(*) as count from payment_attempts where status in ('pending','unknown') group by status
+        `),
+      );
       let pending = 0;
       let unknown = 0;
       for (const r of counts) {
@@ -94,7 +97,7 @@ export async function reconcilePayments(
     const target =
       providerStatus === 'paid' ? 'paid' : providerStatus === 'failed' ? 'failed' : 'unknown';
 
-    await db.db.transaction(async (tx) => {
+    await workerGlobalTransaction(db, async (tx) => {
       const currentRows = await tx.execute<{ status: string }>(sql`
         select status from payment_attempts where id=${attemptId}::uuid and tenant_id=${tenantId}::uuid for update
       `);
@@ -160,9 +163,11 @@ export async function reconcilePayments(
 
   // Update metrics
   try {
-    const counts = await db.db.execute<{ status: string; count: string }>(sql`
-      select status, count(*) as count from payment_attempts where status in ('pending','unknown') group by status
-    `);
+    const counts = await workerGlobalTransaction(db, (tx) =>
+      tx.execute<{ status: string; count: string }>(sql`
+        select status, count(*) as count from payment_attempts where status in ('pending','unknown') group by status
+      `),
+    );
     let pending = 0;
     let unknownCount = 0;
     for (const r of counts) {

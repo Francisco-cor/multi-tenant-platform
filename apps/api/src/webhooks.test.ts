@@ -309,6 +309,22 @@ describe('webhooks — tenant isolation, HMAC, dedupe, replay', () => {
     expect(create.json().apiKey.prefix).toBeDefined();
     expect(create.json().raw).toMatch(/^pk_/);
     const keyId = create.json().apiKey.id as string;
+    const rawApiKey = create.json().raw as string;
+
+    // M2M reads resolve tenant from the host and authorization from the key;
+    // no user session or client-controlled tenant header is accepted.
+    const m2mOrders = await app.inject({
+      method: 'GET',
+      url: '/v1/orders',
+      headers: { host: 'acme.app.localhost', 'x-api-key': rawApiKey },
+    });
+    expect(m2mOrders.statusCode).toBe(200);
+    const crossTenantM2m = await app.inject({
+      method: 'GET',
+      url: '/v1/orders',
+      headers: { host: 'contoso.app.localhost', 'x-api-key': rawApiKey },
+    });
+    expect(crossTenantM2m.statusCode).toBe(401);
 
     // List acme sees 1, contoso sees 0
     const listAcme = await app.inject({
@@ -338,6 +354,12 @@ describe('webhooks — tenant isolation, HMAC, dedupe, replay', () => {
       headers: { host: 'acme.app.localhost', cookie: ownerCookie },
     });
     expect(after.json().data.length).toBe(0);
+    const revokedM2m = await app.inject({
+      method: 'GET',
+      url: '/v1/orders',
+      headers: { host: 'acme.app.localhost', 'x-api-key': rawApiKey },
+    });
+    expect(revokedM2m.statusCode).toBe(401);
 
     // Automations: create versioned command
     const auto = await app.inject({

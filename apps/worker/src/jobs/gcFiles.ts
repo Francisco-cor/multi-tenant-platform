@@ -1,5 +1,6 @@
 import { sql } from '@platform/db';
 import type { DatabaseHandle } from '@platform/db';
+import { workerGlobalTransaction } from '../tenant-db.js';
 
 export interface GcFilesResult {
   expiredCount: number;
@@ -24,7 +25,7 @@ export async function gcFiles(
   const now = options.now ?? new Date();
   const start = Date.now();
 
-  const result = await db.db.transaction(async (tx) => {
+  const result = await workerGlobalTransaction(db, async (tx) => {
     const expired = await tx.execute<{ id: string; key: string; tenant_id: string }>(sql`
       select id, key, tenant_id
       from files

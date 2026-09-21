@@ -1,5 +1,6 @@
 import { sql } from '@platform/db';
 import type { DatabaseHandle } from '@platform/db';
+import { workerGlobalTransaction } from '../tenant-db.js';
 
 export interface ExpireReservationsResult {
   expiredCount: number;
@@ -23,7 +24,7 @@ export async function expireReservations(
   // Use the underlying drizzle db to begin transaction via execute.
   // For simplicity, use a direct postgres client via the handle's db.
   // Drizzle transaction is better: use db.db.transaction
-  const result = await db.db.transaction(async (tx) => {
+  const result = await workerGlobalTransaction(db, async (tx) => {
     // Select expired active reservations with lock
     const expired = await tx.execute<{
       id: string;

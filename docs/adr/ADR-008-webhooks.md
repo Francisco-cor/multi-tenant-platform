@@ -33,8 +33,8 @@ Elegir (2). Además, automatizaciones deben ser comandos versionados, no `eval` 
 
 ### Flujo inbound
 
-1. **Verify**: `POST /v1/webhooks/inbound` y `POST /v1/webhooks/payments` verifican `HMAC` **antes** de `JSON.parse` (`verifyWebhookSignature` con `rawBody = JSON.stringify(body)` canónico en demo, prod usa `fastify-raw-body` bytes), `timestamp` tolerance 5m. Secret nunca en logs/UI.
-2. **Dedupe**: `INSERT inbound_webhook_events(tenant_id,event_id) ON CONFLICT DO NOTHING` + in-memory `Set` fallback. Si dedupe hit → `200 already_processed` sin efecto.
+1. **Verify**: `POST /v1/webhooks/inbound` y `POST /v1/webhooks/payments` verifican `HMAC` antes del parse lógico y exigen `tenantId` dentro del cuerpo firmado. Hoy el runtime usa `JSON.stringify(body)` canónico; migrar a bytes HTTP exactos es un gate de producción. Secret nunca en logs/UI.
+2. **Dedupe**: `INSERT inbound_payment_events(tenant_id,event_id) ON CONFLICT DO NOTHING`; en pagos, el insert y la transición/outbox comparten transacción. El `Set` en memoria solo es una optimización de proceso, no la fuente de verdad persistente.
 3. **Effect**: solo si dedupe miss, aplica efecto idempotente (actualiza `payment_attempt` o dispara automation). Reenvío 3× mismo `eventId` → 1 efecto.
 
 ### Automatizaciones
@@ -45,7 +45,7 @@ Elegir (2). Además, automatizaciones deben ser comandos versionados, no `eval` 
 ### Consecuencias
 
 - **Pros:** firma cambia si cambia body, expiración 5m evita replay, dedupe garantiza `exactly once` effect con `at-least-once` delivery; `SKIP LOCKED` permite múltiples workers; `dead_letter` y `disabled` evitan hot endpoint bloqueando cola; `api_keys` M2M permite integraciones sin OIDC humano.
-- **Contras:** más tablas y jobs, `secret_hash` no permite recuperar secret (se devuelve solo al crear), requiere rotación versionada; HMAC con `secret_hash` como key en demo no es producción (usar vault).
+- **Contras:** más tablas y jobs; el hash no permite recuperar el secreto, por lo que outbound conserva `secret_ciphertext` cifrado con AES-GCM y requiere una futura integración KMS/Vault y rotación versionada/solapada.
 - **Alternativa descartada:** sin firma se aceptaba `X-Webhook-Signature` tampered como válido en tests.
 
 ## Validación

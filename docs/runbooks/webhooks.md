@@ -8,7 +8,7 @@ Operar endpoints, entregas, inbound dedupe y automatizaciones sin exponer secret
 
 - **Endpoints outbound**: `POST /v1/webhooks/endpoints` `{url:https://, events:[order.paid,...], secret?}` → `{endpoint, secret}` (secret solo al crear). `GET /v1/webhooks/endpoints` lista tenant-scoped. `PATCH /v1/webhooks/endpoints/:id` `{url,events,status}` versionado. `DELETE` → `status deleted`. Requiere `webhooks:manage` (owner/admin/manager no, operator no). `url` must https, `events` subset de `order.created|order.paid|payment.paid|file.ready|inventory.reserved|generic`.
 - **Entregas**: `GET /v1/webhooks/deliveries?endpointId=&limit=` tenant-scoped (`webhooks:read`). `GET /v1/webhooks/deliveries/:id` → `{id,endpointId,eventId,eventType,status,attempts}` sin secret. `POST /v1/webhooks/deliveries/:id/replay` → nuevo `pending` con mismo `eventId`, requiere `webhooks:replay` + `owner/admin` + audit `webhookReplay`. Estados: `pending|retrying|delivered|failed|dead_letter|disabled`.
-- **Inbound**: `POST /v1/webhooks/inbound` headers `X-Webhook-Timestamp` (sec) + `X-Webhook-Signature: v1,hmac` + `X-Tenant-Id`, body `{eventId, source?, payload}`. Verificación `HMAC sha256(secret, timestamp.rawBody)` antes de parse, tolerance 5m. Dedupe `inbound_webhook_events(tenant_id,event_id) UNIQUE` → `already_processed`. Secret nunca en logs/UI.
+- **Inbound**: `POST /v1/webhooks/inbound` headers `X-Webhook-Timestamp` (sec) + `X-Webhook-Signature: v1,hmac` + `X-Tenant-Id` opcional, body `{eventId, tenantId, source?, payload}`. El `tenantId` debe estar dentro del cuerpo firmado; el header solo se compara. Verificación `HMAC sha256(secret, timestamp.rawBody)` antes de parse, tolerance 5m. Dedupe `inbound_webhook_events(tenant_id,event_id) UNIQUE` → `already_processed`. Secret nunca en logs/UI.
 - **Api keys M2M**: `POST /v1/api-keys` `{name, scopes:[webhooks:read], expiresInMs?}` → `{apiKey:{id,prefix,name,scopes}, raw:pk_...}`. `GET /v1/api-keys` lista, `DELETE /v1/api-keys/:id` revoke. Requiere `webhooks:manage` + `owner/admin`. Scopes subset de `webhooks:read|orders:read|...`.
 - **Automatizaciones**: `POST /v1/automations` `{trigger:order.paid, action:{type:log|webhook|noop, params:{}}, version:1}` validado `validateAutomation`, `GET /v1/automations` tenant-scoped. No `eval`, solo objetos versionados. Requiere `automations:manage/read`.
 
@@ -60,15 +60,15 @@ curl -s http://localhost:4000/v1/api-keys -H 'host: acme.app.localhost' -H "cook
 
 ## Fallos y recuperación
 
-| Señal                                       | Causa                                   | Recuperación                                                                                                    |
-| ------------------------------------------- | --------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `webhook_deliveries retrying`               | Receptor 5xx/timeout                    | Worker reintenta con backoff exponencial, no bloquea tx. Ver `deliverWebhook.ts:80` logs.                       |
-| `dead_letter`                               | 8 fallos consecutivos                   | Inspeccionar `last_error`, corregir URL/secret, `POST /v1/webhooks/deliveries/:id/replay` auditado.             |
-| `endpoint dead_letter`                      | 5 deliveries `failure_count`            | `PATCH /v1/webhooks/endpoints/:id {status:active}` tras arreglar receptor.                                      |
-| `401 signature_mismatch` inbound            | Secret rotado o body tampered           | Verificar `WEBHOOK_INBOUND_SECRET` y que `rawBody` sea bytes exactos antes de parse (en demo `JSON.stringify`). |
-| `401 timestamp_tolerance`                   | Clock skew >5m                          | Sincronizar NTP.                                                                                                |
-| `403 Forbidden` en `/v1/webhooks/endpoints` | Operator sin `webhooks:manage`          | Asignar `manager`/`admin` vía `PATCH /v1/members/:id`.                                                          |
-| `Cross-tenant 404`                          | Intento de leer delivery de otro tenant | RLS + `WHERE tenant_id` → 404 idéntico a no existe, no filtra existencia.                                       |
+| Señal                                       | Causa                                   | Recuperación                                                                                                                                                                  |
+| ------------------------------------------- | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `webhook_deliveries retrying`               | Receptor 5xx/timeout                    | Worker reintenta con backoff exponencial, no bloquea tx. Ver `deliverWebhook.ts:80` logs.                                                                                     |
+| `dead_letter`                               | 8 fallos consecutivos                   | Inspeccionar `last_error`, corregir URL/secret, `POST /v1/webhooks/deliveries/:id/replay` auditado.                                                                           |
+| `endpoint dead_letter`                      | 5 deliveries `failure_count`            | `PATCH /v1/webhooks/endpoints/:id {status:active}` tras arreglar receptor.                                                                                                    |
+| `401 signature_mismatch` inbound            | Secret rotado o body tampered           | Verificar `WEBHOOK_INBOUND_SECRET` y la serialización enviada; la implementación actual usa `JSON.stringify` canónico y debe migrar a bytes HTTP exactos antes de producción. |
+| `401 timestamp_tolerance`                   | Clock skew >5m                          | Sincronizar NTP.                                                                                                                                                              |
+| `403 Forbidden` en `/v1/webhooks/endpoints` | Operator sin `webhooks:manage`          | Asignar `manager`/`admin` vía `PATCH /v1/members/:id`.                                                                                                                        |
+| `Cross-tenant 404`                          | Intento de leer delivery de otro tenant | RLS + `WHERE tenant_id` → 404 idéntico a no existe, no filtra existencia.                                                                                                     |
 
 ## Observabilidad
 
@@ -80,4 +80,4 @@ curl -s http://localhost:4000/v1/api-keys -H 'host: acme.app.localhost' -H "cook
 
 - InMemory: full coverage sin Docker. Persistent: `webhook_endpoints`+`webhook_deliveries`+`inbound_webhook_events`+`api_keys`+`automations` `FORCE RLS`, `webhook-store.ts` `InMemory`/`Persistent` con `FOR UPDATE SKIP LOCKED`, `deliverWebhook.ts` HMAC + backoff + dead_letter, `automations` versioned, `webhooks.test.ts` 4 suites.
 - Evidencia: `webhooks.test.ts` CRUD 403/404/409, events allowlist, deliveries replay cross-tenant 404, inbound 3x dedupe + tampered 401 + expired 401, api-keys tenant isolation + revoke, automations versioned.
-- Pendiente: integración real con `testcontainers` Postgres + `fetch` mock para `deliverWebhook` con receptor efímero (http server), y `k6` para webhook hot-tenant.
+- Pendiente: integración real con `testcontainers` Postgres + `fetch` mock para `deliverWebhook` con receptor efímero (http server), raw-body HTTP exacto, rotación por versiones/KMS y `k6` para webhook hot-tenant.

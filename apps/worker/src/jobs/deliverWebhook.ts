@@ -1,7 +1,9 @@
 import { createHmac } from 'node:crypto';
+import { decryptWebhookSecret } from '@platform/config';
 import { sql } from '@platform/db';
 import type { DatabaseHandle } from '@platform/db';
 import { metrics } from '@platform/observability';
+import { workerGlobalTransaction, workerTenantTransaction } from '../tenant-db.js';
 
 export interface DeliverResult {
   status: 'delivered' | 'retrying' | 'failed' | 'dead_letter' | 'disabled';
@@ -34,7 +36,7 @@ export async function deliverWebhook(
   const fetchFn = options.fetchFn ?? globalThis.fetch;
 
   // Load delivery + endpoint with lock
-  const ctx = await db.db.transaction(async (tx) => {
+  const ctx = await workerTenantTransaction(db, tenantId, `webhook:${deliveryId}`, async (tx) => {
     const deliveries = await tx.execute<{
       id: string;
       tenant_id: string;
@@ -56,15 +58,17 @@ export async function deliverWebhook(
     const endpoints = await tx.execute<{
       id: string;
       url: string;
-      secret_hash: string;
+      secret_ciphertext: string | null;
       status: string;
     }>(sql`
-      select id, url, secret_hash, status from webhook_endpoints where id=${del.endpoint_id}::uuid and tenant_id=${tenantId}::uuid limit 1
+      select id, url, secret_ciphertext, status from webhook_endpoints where id=${del.endpoint_id}::uuid and tenant_id=${tenantId}::uuid limit 1
     `);
     const ep = endpoints[0];
     if (!ep) throw new Error('endpoint_not_found');
-    // Use secret_hash as secret for HMAC (demo); prod should use vault
-    return { delivery: del, endpoint: ep, secret: ep.secret_hash };
+    if (!ep.secret_ciphertext) throw new Error('webhook_secret_unavailable');
+    const key = process.env.WEBHOOK_SECRET_ENCRYPTION_KEY;
+    if (!key) throw new Error('webhook_secret_encryption_key_required');
+    return { delivery: del, endpoint: ep, secret: decryptWebhookSecret(ep.secret_ciphertext, key) };
   });
 
   if (!ctx.endpoint) {
@@ -74,9 +78,11 @@ export async function deliverWebhook(
     };
   }
   if (ctx.endpoint.status !== 'active') {
-    await db.db.execute(sql`
-      update webhook_deliveries set status='disabled', updated_at=now() where id=${deliveryId}::uuid
-    `);
+    await workerTenantTransaction(db, tenantId, `webhook:${deliveryId}`, (tx) =>
+      tx.execute(sql`
+        update webhook_deliveries set status='disabled', updated_at=now() where id=${deliveryId}::uuid
+      `),
+    );
     return { status: 'disabled', attempts: ctx.delivery.attempts };
   }
 
@@ -106,7 +112,7 @@ export async function deliverWebhook(
     responseBody = await resp.text().catch(() => '');
     if (resp.ok) {
       // 2xx -> delivered
-      await db.db.transaction(async (tx) => {
+      await workerTenantTransaction(db, tenantId, `webhook:${deliveryId}`, async (tx) => {
         await tx.execute(sql`
           update webhook_deliveries set status='delivered', attempts=attempts+1, delivered_at=now(), last_error=null, updated_at=now()
           where id=${deliveryId}::uuid
@@ -137,7 +143,7 @@ export async function deliverWebhook(
   const shouldDeadLetter = attempts >= 8;
   const shouldRetry = isTransient && !shouldDeadLetter;
 
-  await db.db.transaction(async (tx) => {
+  await workerTenantTransaction(db, tenantId, `webhook:${deliveryId}`, async (tx) => {
     if (shouldDeadLetter) {
       await tx.execute(sql`
         update webhook_deliveries set status='dead_letter', attempts=${attempts}, last_error=${error}, next_attempt_at=now() + interval '1 hour', updated_at=now()
@@ -184,17 +190,21 @@ export async function deliverPendingWebhooks(
   options: { batchSize?: number; fetchFn?: typeof fetch } = {},
 ): Promise<{ processed: number; delivered: number; failed: number }> {
   const batchSize = options.batchSize ?? 10;
-  const rows = await db.db.execute<{ id: string; tenant_id: string }>(sql`
-    select id, tenant_id from webhook_deliveries
-    where status in ('pending','retrying') and next_attempt_at <= now()
-    order by created_at limit ${batchSize} for update skip locked
-  `);
+  const rows = await workerGlobalTransaction(db, (tx) =>
+    tx.execute<{ id: string; tenant_id: string }>(sql`
+      select id, tenant_id from webhook_deliveries
+      where status in ('pending','retrying') and next_attempt_at <= now()
+      order by created_at limit ${batchSize} for update skip locked
+    `),
+  );
   let delivered = 0;
   let failed = 0;
   for (const r of rows) {
     // Mark claimed to avoid double process
-    await db.db.execute(
-      sql`update webhook_deliveries set status='retrying', updated_at=now() where id=${r.id}::uuid and status in ('pending','retrying')`,
+    await workerTenantTransaction(db, r.tenant_id, `webhook:${r.id}`, (tx) =>
+      tx.execute(
+        sql`update webhook_deliveries set status='retrying', updated_at=now() where id=${r.id}::uuid and status in ('pending','retrying')`,
+      ),
     );
     const res = await deliverWebhook(db, r.id, r.tenant_id, { fetchFn: options.fetchFn });
     if (res.status === 'delivered') delivered++;

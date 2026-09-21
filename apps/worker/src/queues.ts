@@ -29,6 +29,12 @@ export interface WorkerAdapter {
   close(): Promise<void>;
 }
 
+export type QueueProcessor = (
+  queue: QueueName,
+  payload: JobPayload,
+  jobId: string,
+) => Promise<unknown>;
+
 export function deterministicJobId(
   tenantId: string,
   aggregateId: string,
@@ -80,6 +86,7 @@ export class InMemoryQueue implements QueueAdapter {
 
 export interface QueueFactory {
   getQueue(name: QueueName): QueueAdapter;
+  startWorkers?: (processor: QueueProcessor) => Promise<void>;
   closeAll(): Promise<void>;
 }
 
@@ -93,6 +100,10 @@ export class InMemoryQueueFactory implements QueueFactory {
       this.map.set(name, q);
     }
     return q;
+  }
+
+  async startWorkers(): Promise<void> {
+    // Tests deliberately keep the in-memory adapter producer-only.
   }
 
   async closeAll(): Promise<void> {
@@ -114,6 +125,7 @@ export async function createBullMqFactory(redisUrl: string): Promise<QueueFactor
     const { Queue } = await import('bullmq');
     // Dynamic import ioredis indirectly via bullmq; need connection
     const queues = new Map<QueueName, QueueAdapter>();
+    const workers = new Map<QueueName, { close: () => Promise<void> }>();
     for (const name of QUEUES) {
       const q = new Queue(name, { connection: { url: redisUrl } });
       const adapter: QueueAdapter = {
@@ -144,7 +156,28 @@ export async function createBullMqFactory(redisUrl: string): Promise<QueueFactor
         if (!q) throw new Error(`queue_not_found:${name}`);
         return q;
       },
+      async startWorkers(processor: QueueProcessor): Promise<void> {
+        if (workers.size > 0) return;
+        const { Worker } = await import('bullmq');
+        for (const name of QUEUES) {
+          const worker = new Worker(
+            name,
+            async (job) => {
+              const payload = job.data as JobPayload;
+              const jobId = String(
+                job.id ??
+                  deterministicJobId(payload.tenantId, payload.aggregateId, payload.eventType),
+              );
+              return processor(name, payload, jobId);
+            },
+            { connection: { url: redisUrl }, concurrency: 10 } as never,
+          );
+          workers.set(name, worker);
+        }
+      },
       async closeAll() {
+        for (const worker of workers.values()) await worker.close();
+        workers.clear();
         for (const q of queues.values()) await q.close();
         queues.clear();
       },

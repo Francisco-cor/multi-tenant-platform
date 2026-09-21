@@ -1,6 +1,7 @@
 import { sql } from '@platform/db';
 import type { DatabaseHandle } from '@platform/db';
 import type { QueueFactory } from './queues.js';
+import { workerTenantTransaction } from './tenant-db.js';
 
 export interface DlqRecord {
   id: string;
@@ -19,23 +20,25 @@ export async function listDlq(
   tenantId: string,
   limit = 25,
 ): Promise<DlqRecord[]> {
-  const rows = await db.db.execute<{
-    id: string;
-    job_id: string;
-    tenant_id: string;
-    queue: string;
-    payload: string;
-    cause: string;
-    attempts: number;
-    status: string;
-    created_at: string;
-  }>(sql`
+  const rows = await workerTenantTransaction(db, tenantId, `dlq:list:${tenantId}`, (tx) =>
+    tx.execute<{
+      id: string;
+      job_id: string;
+      tenant_id: string;
+      queue: string;
+      payload: string;
+      cause: string;
+      attempts: number;
+      status: string;
+      created_at: string;
+    }>(sql`
     select id, job_id, tenant_id, queue, payload, cause, attempts, status, created_at
     from dlq_jobs
     where tenant_id = ${tenantId}::uuid
     order by created_at desc
     limit ${limit}
-  `);
+  `),
+  );
   return rows.map((r) => ({
     id: r.id,
     jobId: r.job_id,
@@ -54,20 +57,26 @@ export async function replayDlq(
   queueFactory: QueueFactory,
   input: { tenantId: string; dlqId: string; actorUserId?: string },
 ): Promise<{ jobId: string; queue: string }> {
-  const rows = await db.db.execute<{
-    id: string;
-    job_id: string;
-    tenant_id: string;
-    queue: string;
-    payload: string;
-    cause: string;
-    attempts: number;
-  }>(sql`
+  const rows = await workerTenantTransaction(
+    db,
+    input.tenantId,
+    `dlq:replay:${input.dlqId}`,
+    (tx) =>
+      tx.execute<{
+        id: string;
+        job_id: string;
+        tenant_id: string;
+        queue: string;
+        payload: string;
+        cause: string;
+        attempts: number;
+      }>(sql`
     select id, job_id, tenant_id, queue, payload, cause, attempts
     from dlq_jobs
     where id = ${input.dlqId}::uuid and tenant_id = ${input.tenantId}::uuid
     limit 1
-  `);
+  `),
+  );
   const row = rows[0];
   if (!row) throw new Error('dlq_not_found');
 
@@ -78,13 +87,17 @@ export async function replayDlq(
   const queue = queueFactory.getQueue(queueName);
 
   // Clear dedup so replay can re-run
-  await db.db.execute(
-    sql`delete from processed_jobs where job_id = ${row.job_id} and tenant_id = ${input.tenantId}::uuid`,
+  await workerTenantTransaction(db, input.tenantId, `dlq:replay:${input.dlqId}`, (tx) =>
+    tx.execute(
+      sql`delete from processed_jobs where job_id = ${row.job_id} and tenant_id = ${input.tenantId}::uuid`,
+    ),
   );
 
   // Mark dlq as replayed
-  await db.db.execute(
-    sql`update dlq_jobs set status = 'replayed', updated_at = now() where id = ${row.id}::uuid`,
+  await workerTenantTransaction(db, input.tenantId, `dlq:replay:${input.dlqId}`, (tx) =>
+    tx.execute(
+      sql`update dlq_jobs set status = 'replayed', updated_at = now() where id = ${row.id}::uuid`,
+    ),
   );
 
   // Also reset originating outbox if it was dead_letter (optional)
@@ -108,8 +121,10 @@ export async function discardDlq(
   db: DatabaseHandle,
   input: { tenantId: string; dlqId: string },
 ): Promise<void> {
-  await db.db.execute(sql`
-    update dlq_jobs set status = 'discarded', updated_at = now()
-    where id = ${input.dlqId}::uuid and tenant_id = ${input.tenantId}::uuid
-  `);
+  await workerTenantTransaction(db, input.tenantId, `dlq:discard:${input.dlqId}`, (tx) =>
+    tx.execute(sql`
+      update dlq_jobs set status = 'discarded', updated_at = now()
+      where id = ${input.dlqId}::uuid and tenant_id = ${input.tenantId}::uuid
+    `),
+  );
 }

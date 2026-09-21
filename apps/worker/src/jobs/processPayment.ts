@@ -4,6 +4,7 @@ import { canTransition } from '@platform/domain';
 import { metrics } from '@platform/observability';
 import type { JobPayload } from '../queues.js';
 import type { PaymentProvider } from '../providers/paymentProvider.js';
+import { workerTenantTransaction } from '../tenant-db.js';
 
 export interface ProcessPaymentResult {
   status: string;
@@ -34,7 +35,7 @@ export async function processPayment(
   const expectedProviderKey = inner.providerKey as string | undefined;
 
   // Step 1: load and lock attempt, move created->pending if needed
-  const attemptMeta = await db.db.transaction(async (tx) => {
+  const attemptMeta = await workerTenantTransaction(db, tenantId, correlationId, async (tx) => {
     const rows = await tx.execute<{
       id: string;
       tenant_id: string;
@@ -119,7 +120,7 @@ export async function processPayment(
     // We will persist unknown below with last_error
     // Fall through to second tx with unknown status
     const errMsg = msg;
-    await db.db.transaction(async (tx) => {
+    await workerTenantTransaction(db, tenantId, correlationId, async (tx) => {
       const current = await tx.execute<{ status: string }>(sql`
         select status from payment_attempts where id=${attemptId}::uuid and tenant_id=${tenantId}::uuid for update
       `);
@@ -173,7 +174,7 @@ export async function processPayment(
   }
 
   // Step 3: second tx to persist result and update order
-  const result = await db.db.transaction(async (tx) => {
+  const result = await workerTenantTransaction(db, tenantId, correlationId, async (tx) => {
     const currentRows = await tx.execute<{
       id: string;
       status: string;

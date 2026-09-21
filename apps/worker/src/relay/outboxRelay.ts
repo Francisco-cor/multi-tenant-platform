@@ -1,5 +1,5 @@
 import { sql, nextAttemptDelayMs } from '@platform/db';
-import type { DatabaseHandle } from '@platform/db';
+import type { DatabaseExecutor, DatabaseHandle } from '@platform/db';
 import {
   deterministicJobId,
   getQueueForAggregate,
@@ -19,9 +19,19 @@ export interface OutboxRelayResult {
   durationMs: number;
 }
 
+async function globalTransaction<T>(
+  db: DatabaseHandle,
+  callback: (tx: DatabaseExecutor) => Promise<T>,
+): Promise<T> {
+  return db.db.transaction(async (tx) => {
+    if (db.role) await tx.execute(sql.raw(`set local role "${db.role}"`));
+    return callback(tx);
+  });
+}
+
 /**
  * Poll `outbox_events` with `FOR UPDATE SKIP LOCKED` and publish to BullMQ.
- * - Claims batch where status='pending' and next_attempt_at <= now()
+ * - Claims pending rows and recovers rows left in `claimed` by a dead relay
  * - For each event, computes deterministic jobId = sha256(tenantId:aggregateId:eventType)
  * - Publishes to queue derived from aggregate_type
  * - On success: updates status='done', published_at=now()
@@ -37,7 +47,7 @@ export async function runOutboxRelayOnce(
   const batchSize = options.batchSize ?? 100;
   const start = Date.now();
 
-  const events = await db.db.transaction(async (tx) => {
+  const events = await globalTransaction(db, async (tx) => {
     const rows = await tx.execute<{
       id: string;
       tenant_id: string;
@@ -50,7 +60,10 @@ export async function runOutboxRelayOnce(
     }>(sql`
       select id, tenant_id, aggregate_type, aggregate_id, event_type, payload, attempts, correlation_id
       from outbox_events
-      where status = 'pending' and next_attempt_at <= now()
+      where (
+        (status = 'pending' and next_attempt_at <= now())
+        or (status = 'claimed' and updated_at <= now() - interval '5 minutes')
+      )
       order by created_at
       limit ${batchSize}
       for update skip locked
@@ -63,7 +76,7 @@ export async function runOutboxRelayOnce(
     await tx.execute(sql`
       update outbox_events
       set status = 'claimed', updated_at = now()
-      where id = any(${ids}::uuid[]) and status = 'pending'
+      where id = any(${ids}::uuid[]) and status in ('pending', 'claimed')
     `);
 
     return rows;
@@ -96,33 +109,39 @@ export async function runOutboxRelayOnce(
     try {
       await queue.add(payload, { jobId });
       // Mark done
-      await db.db.execute(sql`
-        update outbox_events
-        set status = 'done', published_at = now(), updated_at = now()
-        where id = ${ev.id}::uuid
-      `);
+      await globalTransaction(db, (tx) =>
+        tx.execute(sql`
+          update outbox_events
+          set status = 'done', published_at = now(), updated_at = now()
+          where id = ${ev.id}::uuid
+        `),
+      );
       published++;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const nextDelay = nextAttemptDelayMs(ev.attempts, 1000, 60000, 0.2);
       const shouldDeadLetter = ev.attempts + 1 >= 5;
       if (shouldDeadLetter) {
-        await db.db.execute(sql`
-          update outbox_events
-          set status = 'dead_letter', last_error = ${message}, attempts = attempts + 1, next_attempt_at = now() + interval '1 hour', updated_at = now()
-          where id = ${ev.id}::uuid
-        `);
-        // Also insert into dlq_jobs for operational replay
-        await db.db.execute(sql`
-          insert into dlq_jobs (job_id, tenant_id, queue, payload, cause, attempts)
-          values (${jobId}, ${ev.tenant_id}::uuid, ${queueName}, ${JSON.stringify(payload)}::jsonb, ${message}, ${ev.attempts + 1})
-        `);
+        await globalTransaction(db, async (tx) => {
+          await tx.execute(sql`
+            update outbox_events
+            set status = 'dead_letter', last_error = ${message}, attempts = attempts + 1, next_attempt_at = now() + interval '1 hour', updated_at = now()
+            where id = ${ev.id}::uuid
+          `);
+          // Also insert into dlq_jobs for operational replay
+          await tx.execute(sql`
+            insert into dlq_jobs (job_id, tenant_id, queue, payload, cause, attempts)
+            values (${jobId}, ${ev.tenant_id}::uuid, ${queueName}, ${JSON.stringify(payload)}::jsonb, ${message}, ${ev.attempts + 1})
+          `);
+        });
       } else {
-        await db.db.execute(sql`
-          update outbox_events
-          set status = 'pending', last_error = ${message}, attempts = attempts + 1, next_attempt_at = now() + (${nextDelay}::text || ' ms')::interval, updated_at = now()
-          where id = ${ev.id}::uuid
-        `);
+        await globalTransaction(db, (tx) =>
+          tx.execute(sql`
+            update outbox_events
+            set status = 'pending', last_error = ${message}, attempts = attempts + 1, next_attempt_at = now() + (${nextDelay}::text || ' ms')::interval, updated_at = now()
+            where id = ${ev.id}::uuid
+          `),
+        );
       }
       failed++;
     }

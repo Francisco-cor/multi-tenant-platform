@@ -59,7 +59,7 @@ Elegir **(2) presigned URLs + metadata tenant-scoped**, con:
 
 - `GET /v1/files` lista paginada cursor por `created_at` tenant-scoped (usado en tests de aislamiento).
 - Legacy `POST /v1/files/presign` alias para compatibilidad con OpenAPI antiguo.
-- `PUT FakeS3Service` in-memory para tests sin Docker; `S3_ENDPOINT`/`S3_BUCKET` reales en integración con `testcontainers` MinIO.
+- `FakeS3Service` in-memory para tests/local (`S3_PROVIDER=fake`); `AwsS3Service` firma MinIO/AWS con SigV4 cuando `S3_PROVIDER=s3`. `S3_ENDPOINT`/`S3_BUCKET` reales deben validarse en integración con MinIO y el bucket debe provisionarse fuera del request path.
 
 ## Consecuencias
 

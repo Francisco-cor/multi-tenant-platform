@@ -1,4 +1,10 @@
+import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { z } from 'zod';
+
+const WEBHOOK_SECRET_KEY_BYTES = 32;
+const WEBHOOK_SECRET_IV_BYTES = 12;
+const WEBHOOK_SECRET_ALGORITHM = 'aes-256-gcm';
+const WEBHOOK_SECRET_FORMAT_VERSION = 'v1';
 
 const environmentSchemaBase = z.object({
   NODE_ENV: z.enum(['development', 'test', 'staging', 'production']).default('development'),
@@ -18,16 +24,26 @@ const environmentSchemaBase = z.object({
     .regex(/^[a-z_][a-z0-9_]*$/i)
     .optional(),
   REDIS_URL: z.string().url().optional(),
+  S3_PROVIDER: z.enum(['fake', 's3']).default('fake'),
   S3_ENDPOINT: z.string().url().optional(),
   S3_REGION: z.string().default('us-east-1'),
   S3_BUCKET: z.string().min(3).default('platform-local'),
   S3_ACCESS_KEY: z.string().optional(),
   S3_SECRET_KEY: z.string().optional(),
+  WEBHOOK_SECRET_ENCRYPTION_KEY: z
+    .string()
+    .min(43)
+    .refine((value) => Buffer.from(value, 'base64url').length === WEBHOOK_SECRET_KEY_BYTES, {
+      message: 'webhook_secret_encryption_key_invalid',
+    })
+    .optional(),
   OIDC_ISSUER_URL: z.string().url().optional(),
   OIDC_CLIENT_ID: z.string().optional(),
   OIDC_CLIENT_SECRET: z.string().optional(),
   OIDC_REDIRECT_URI: z.string().url().optional(),
   OIDC_AUTHORIZATION_ENDPOINT: z.string().url().optional(),
+  PAYMENT_WEBHOOK_SECRET: z.string().min(16).optional(),
+  WEBHOOK_INBOUND_SECRET: z.string().min(16).optional(),
   OTEL_SERVICE_NAME: z.string().default('platform-api'),
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
   LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
@@ -51,11 +67,15 @@ export const environmentSchema = environmentSchemaBase.superRefine((value, ctx) 
     'DATABASE_URL',
     'REDIS_URL',
     'S3_ENDPOINT',
+    'S3_PROVIDER',
     'S3_ACCESS_KEY',
     'S3_SECRET_KEY',
+    'WEBHOOK_SECRET_ENCRYPTION_KEY',
     'OIDC_ISSUER_URL',
     'OIDC_CLIENT_ID',
     'OIDC_REDIRECT_URI',
+    'PAYMENT_WEBHOOK_SECRET',
+    'WEBHOOK_INBOUND_SECRET',
   ];
   for (const name of required) {
     const current = value[name];
@@ -66,6 +86,13 @@ export const environmentSchema = environmentSchemaBase.superRefine((value, ctx) 
         message: 'required_in_production',
       });
     }
+  }
+  if (value.S3_PROVIDER !== 's3') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['S3_PROVIDER'],
+      message: 'real_s3_provider_required_in_production',
+    });
   }
   if (value.ALLOW_DEV_LOGIN === '1') {
     ctx.addIssue({
@@ -80,4 +107,45 @@ export type Environment = z.infer<typeof environmentSchema>;
 
 export function loadEnvironment(source: NodeJS.ProcessEnv = process.env): Environment {
   return environmentSchema.parse(source);
+}
+
+function decodeWebhookSecretKey(keyMaterial: string): Buffer {
+  const key = Buffer.from(keyMaterial, 'base64url');
+  if (key.length !== WEBHOOK_SECRET_KEY_BYTES) {
+    throw new Error('webhook_secret_encryption_key_invalid');
+  }
+  return key;
+}
+
+/** Encrypt a webhook signing secret for storage; the key must come from KMS/Vault-backed config. */
+export function encryptWebhookSecret(secret: string, keyMaterial: string): string {
+  const key = decodeWebhookSecretKey(keyMaterial);
+  const iv = randomBytes(WEBHOOK_SECRET_IV_BYTES);
+  const cipher = createCipheriv(WEBHOOK_SECRET_ALGORITHM, key, iv);
+  const ciphertext = Buffer.concat([cipher.update(secret, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return [
+    WEBHOOK_SECRET_FORMAT_VERSION,
+    iv.toString('base64url'),
+    tag.toString('base64url'),
+    ciphertext.toString('base64url'),
+  ].join('.');
+}
+
+/** Decrypt a webhook signing secret in the worker; never log the returned value. */
+export function decryptWebhookSecret(ciphertext: string, keyMaterial: string): string {
+  const [version, ivEncoded, tagEncoded, dataEncoded] = ciphertext.split('.');
+  if (version !== WEBHOOK_SECRET_FORMAT_VERSION || !ivEncoded || !tagEncoded || !dataEncoded) {
+    throw new Error('webhook_secret_ciphertext_invalid');
+  }
+  const key = decodeWebhookSecretKey(keyMaterial);
+  const iv = Buffer.from(ivEncoded, 'base64url');
+  const tag = Buffer.from(tagEncoded, 'base64url');
+  const data = Buffer.from(dataEncoded, 'base64url');
+  if (iv.length !== WEBHOOK_SECRET_IV_BYTES || tag.length !== 16 || data.length === 0) {
+    throw new Error('webhook_secret_ciphertext_invalid');
+  }
+  const decipher = createDecipheriv(WEBHOOK_SECRET_ALGORITHM, key, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
 }
