@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { decryptWebhookSecret, encryptWebhookSecret, loadEnvironment } from './index.js';
+import {
+  decryptWebhookSecret,
+  encryptWebhookSecret,
+  loadEnvironment,
+  loadWorkerEnvironment,
+} from './index.js';
 
 describe('runtime configuration', () => {
   it('applies safe local defaults', () => {
@@ -69,5 +74,31 @@ describe('runtime configuration', () => {
     expect(() => loadEnvironment({ WEBHOOK_SECRET_ENCRYPTION_KEY: 'A'.repeat(44) })).toThrow(
       /webhook_secret_encryption_key_invalid/,
     );
+  });
+
+  it('keeps worker configuration independent from API-only OIDC settings', () => {
+    const worker = loadWorkerEnvironment({
+      DATABASE_URL: 'postgresql://platform:platform@db:5432/platform',
+      REDIS_URL: 'redis://redis:6379',
+    });
+    expect(worker.WORKER_DATABASE_ROLE).toBe('platform_worker');
+    expect(worker.PAYMENT_PROVIDER).toBe('fake');
+  });
+
+  it('rejects fake payments in production worker configuration', () => {
+    expect(() =>
+      loadWorkerEnvironment({
+        NODE_ENV: 'production',
+        DATABASE_URL: 'postgresql://platform:platform@db:5432/platform',
+        REDIS_URL: 'redis://redis:6379',
+        S3_PROVIDER: 's3',
+        S3_ENDPOINT: 'https://s3.example.test',
+        S3_ACCESS_KEY: 'access',
+        S3_SECRET_KEY: 'secret',
+        WEBHOOK_SECRET_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+        PAYMENT_PROVIDER: 'fake',
+        PAYMENT_PROVIDER_API_KEY: 'placeholder',
+      }),
+    ).toThrow(/real_payment_provider_required_in_production/);
   });
 });

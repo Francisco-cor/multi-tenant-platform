@@ -1,4 +1,5 @@
 import { rm, writeFile } from 'node:fs/promises';
+import { loadWorkerEnvironment } from '@platform/config';
 import { createDatabase, sql, type DatabaseHandle } from '@platform/db';
 import { metrics, createLogger, initTracing } from '@platform/observability';
 import { createWorkerProcessor } from './consumer.js';
@@ -62,19 +63,23 @@ const shutdown = async (signal: string, exitCode = 0) => {
 
 // Bootstrap worker with real DB/Redis. In-memory mode is for local development/tests only.
 async function bootstrap(): Promise<void> {
-  const dbUrl = process.env.DATABASE_URL;
-  const redisUrl = process.env.REDIS_URL;
+  const environment = loadWorkerEnvironment();
+  const dbUrl = environment.DATABASE_URL;
+  const redisUrl = environment.REDIS_URL;
   if (!dbUrl || !redisUrl) {
-    if (process.env.NODE_ENV === 'production') {
+    if (environment.NODE_ENV === 'production') {
       throw new Error('worker_database_and_redis_required');
     }
     logger.info({ status: 'idle', reason: 'no DATABASE_URL' }, 'worker_started');
     return;
   }
 
-  database = createDatabase(dbUrl, { role: process.env.DATABASE_ROLE ?? 'platform_app' });
+  if (environment.NODE_ENV === 'production' && environment.PAYMENT_PROVIDER === 'stripe') {
+    throw new Error('payment_provider_adapter_not_implemented');
+  }
+  database = createDatabase(dbUrl, { role: environment.DATABASE_ROLE ?? 'platform_app' });
   relayDatabase = createDatabase(dbUrl, {
-    role: process.env.WORKER_DATABASE_ROLE ?? 'platform_worker',
+    role: environment.WORKER_DATABASE_ROLE,
   });
   await workerGlobalTransaction(relayDatabase, (tx) => tx.execute(sql`select 1`));
   readiness.setDatabase(true);
@@ -89,7 +94,7 @@ async function bootstrap(): Promise<void> {
   readiness.setConsumers(true);
 
   maintenanceScheduler = startMaintenanceScheduler(queueFactory, {
-    paymentProviderConfigured: process.env.PAYMENT_PROVIDER === 'fake',
+    paymentProviderConfigured: environment.PAYMENT_PROVIDER === 'fake',
   });
   readiness.setScheduler(true);
 

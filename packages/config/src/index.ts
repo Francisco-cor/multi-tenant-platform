@@ -105,8 +105,79 @@ export const environmentSchema = environmentSchemaBase.superRefine((value, ctx) 
 
 export type Environment = z.infer<typeof environmentSchema>;
 
+export const workerEnvironmentSchema = z
+  .object({
+    NODE_ENV: z.enum(['development', 'test', 'staging', 'production']).default('development'),
+    DATABASE_URL: z.string().url().optional(),
+    DATABASE_ROLE: z
+      .string()
+      .regex(/^[a-z_][a-z0-9_]*$/i)
+      .optional(),
+    WORKER_DATABASE_ROLE: z
+      .string()
+      .regex(/^[a-z_][a-z0-9_]*$/i)
+      .default('platform_worker'),
+    REDIS_URL: z.string().url().optional(),
+    S3_PROVIDER: z.enum(['fake', 's3']).default('fake'),
+    S3_ENDPOINT: z.string().url().optional(),
+    S3_REGION: z.string().default('us-east-1'),
+    S3_BUCKET: z.string().min(3).default('platform-local'),
+    S3_ACCESS_KEY: z.string().optional(),
+    S3_SECRET_KEY: z.string().optional(),
+    WEBHOOK_SECRET_ENCRYPTION_KEY: environmentSchemaBase.shape.WEBHOOK_SECRET_ENCRYPTION_KEY,
+    PAYMENT_PROVIDER: z.enum(['fake', 'stripe']).default('fake'),
+    PAYMENT_PROVIDER_API_KEY: z.string().min(1).optional(),
+    WORKER_HEALTH_HOST: z.string().default('0.0.0.0'),
+    WORKER_HEALTH_PORT: z.coerce.number().int().min(1).max(65_535).default(4010),
+    WORKER_READY_FILE: z.string().min(1).default('/tmp/platform-worker-ready'),
+    OTEL_SERVICE_NAME: z.string().default('platform-worker'),
+    OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.NODE_ENV !== 'production') return;
+    const required: Array<keyof typeof value> = [
+      'DATABASE_URL',
+      'REDIS_URL',
+      'S3_ENDPOINT',
+      'S3_ACCESS_KEY',
+      'S3_SECRET_KEY',
+      'WEBHOOK_SECRET_ENCRYPTION_KEY',
+      'PAYMENT_PROVIDER_API_KEY',
+    ];
+    for (const name of required) {
+      const current = value[name];
+      if (typeof current !== 'string' || current.trim().length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [name],
+          message: 'required_in_production',
+        });
+      }
+    }
+    if (value.S3_PROVIDER !== 's3') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['S3_PROVIDER'],
+        message: 'real_s3_provider_required_in_production',
+      });
+    }
+    if (value.PAYMENT_PROVIDER === 'fake') {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['PAYMENT_PROVIDER'],
+        message: 'real_payment_provider_required_in_production',
+      });
+    }
+  });
+
+export type WorkerEnvironment = z.infer<typeof workerEnvironmentSchema>;
+
 export function loadEnvironment(source: NodeJS.ProcessEnv = process.env): Environment {
   return environmentSchema.parse(source);
+}
+
+export function loadWorkerEnvironment(source: NodeJS.ProcessEnv = process.env): WorkerEnvironment {
+  return workerEnvironmentSchema.parse(source);
 }
 
 function decodeWebhookSecretKey(keyMaterial: string): Buffer {
