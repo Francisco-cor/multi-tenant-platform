@@ -208,6 +208,7 @@ export async function createBullMqFactory(redisUrl: string): Promise<QueueFactor
       async getHealth(): Promise<QueueHealth> {
         let redis: QueueHealth['redis'] = 'ok';
         try {
+          if (healthRedis.status === 'wait') await healthRedis.connect();
           await healthRedis.ping();
         } catch {
           redis = 'fail';

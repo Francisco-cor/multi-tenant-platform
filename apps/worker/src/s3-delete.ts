@@ -68,7 +68,8 @@ export class AwsWorkerObjectStore implements WorkerObjectStore {
     const canonicalHeaders = Object.entries(headers)
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([name, value]) => `${name}:${value}`)
-      .join('\n');
+      .join('\n')
+      .concat('\n');
     const signedHeaders = Object.keys(headers).sort().join(';');
     const canonicalRequest = [
       'DELETE',

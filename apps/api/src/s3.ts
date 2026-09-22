@@ -77,6 +77,11 @@ function objectPath(endpoint: URL, bucket: string, key: string): string {
   return `${prefix}/${awsEncode(bucket)}/${encodedKey}`;
 }
 
+function bucketPath(endpoint: URL, bucket: string): string {
+  const prefix = endpoint.pathname.replace(/\/+$/, '');
+  return `${prefix}/${awsEncode(bucket)}`;
+}
+
 function canonicalHeaders(headers: Record<string, string>): {
   value: string;
   signed: string;
@@ -85,7 +90,7 @@ function canonicalHeaders(headers: Record<string, string>): {
     .map(([name, value]) => [name.toLowerCase(), value.trim().replace(/\s+/g, ' ')] as const)
     .sort(([left], [right]) => left.localeCompare(right));
   return {
-    value: entries.map(([name, value]) => `${name}:${value}`).join('\n'),
+    value: entries.map(([name, value]) => `${name}:${value}`).join('\n') + '\n',
     signed: entries.map(([name]) => name).join(';'),
   };
 }
@@ -288,9 +293,8 @@ export class AwsS3Service implements S3Service {
     };
   }
 
-  private signedObjectRequest(method: 'HEAD' | 'DELETE', key: string): Promise<Response> {
+  private signedRequest(method: 'PUT' | 'HEAD' | 'DELETE', path: string): Promise<Response> {
     const endpoint = new URL(this.endpoint);
-    const path = objectPath(endpoint, this.bucket, key);
     const date = awsDate(new Date());
     const scope = `${date.short}/${this.region}/s3/aws4_request`;
     const headers = {
@@ -324,6 +328,11 @@ export class AwsS3Service implements S3Service {
     });
   }
 
+  private signedObjectRequest(method: 'HEAD' | 'DELETE', key: string): Promise<Response> {
+    const endpoint = new URL(this.endpoint);
+    return this.signedRequest(method, objectPath(endpoint, this.bucket, key));
+  }
+
   async headObject(key: string): Promise<{
     contentLength: number;
     contentType?: string | undefined;
@@ -345,7 +354,13 @@ export class AwsS3Service implements S3Service {
   }
 
   async ensureBucket(): Promise<void> {
-    // Bucket provisioning belongs to infrastructure/bootstrap, not request handling.
+    const endpoint = new URL(this.endpoint);
+    const response = await this.signedRequest('PUT', bucketPath(endpoint, this.bucket));
+    // MinIO/S3 returns a conflict when the bucket already exists; that is a
+    // successful bootstrap outcome and must not block the application.
+    if (!response.ok && response.status !== 409) {
+      throw new Error(`s3_bucket_ensure_failed:${response.status}`);
+    }
   }
 }
 

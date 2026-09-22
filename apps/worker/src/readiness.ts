@@ -1,4 +1,4 @@
-import { createServer, type Server } from 'node:http';
+import { createServer } from 'node:http';
 import { metrics } from '@platform/observability';
 import type { QueueFactory, QueueHealth } from './queues.js';
 

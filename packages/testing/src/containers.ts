@@ -21,7 +21,8 @@
 export const DEFAULT_IMAGES = {
   postgres: 'postgres:16-alpine',
   redis: 'redis:7-alpine',
-  minio: 'minio/minio:latest',
+  minio:
+    'quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e',
 } as const;
 
 export interface ManagedContainer {
