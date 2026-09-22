@@ -6,6 +6,7 @@ export interface ChargeInput {
   idempotencyKey: string;
   orderId: string;
   tenantId: string;
+  paymentMethodId?: string | undefined;
 }
 
 export interface ChargeResult {

@@ -339,6 +339,7 @@ export const paymentAttempts = pgTable(
     providerKey: text('provider_key').notNull(),
     status: text('status').notNull().default('created'),
     providerRef: text('provider_ref'),
+    paymentMethodId: text('payment_method_id'),
     amountCents: integer('amount_cents').notNull(),
     currency: text('currency').notNull().default('USD'),
     attempts: integer('attempts').notNull().default(0),

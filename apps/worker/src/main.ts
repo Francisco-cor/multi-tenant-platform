@@ -74,9 +74,6 @@ async function bootstrap(): Promise<void> {
     return;
   }
 
-  if (environment.NODE_ENV === 'production' && environment.PAYMENT_PROVIDER === 'stripe') {
-    throw new Error('payment_provider_adapter_not_implemented');
-  }
   database = createDatabase(dbUrl, { role: environment.DATABASE_ROLE ?? 'platform_app' });
   relayDatabase = createDatabase(dbUrl, {
     role: environment.WORKER_DATABASE_ROLE,
@@ -94,7 +91,7 @@ async function bootstrap(): Promise<void> {
   readiness.setConsumers(true);
 
   maintenanceScheduler = startMaintenanceScheduler(queueFactory, {
-    paymentProviderConfigured: environment.PAYMENT_PROVIDER === 'fake',
+    paymentProviderConfigured: true,
   });
   readiness.setScheduler(true);
 

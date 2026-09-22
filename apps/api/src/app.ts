@@ -187,6 +187,7 @@ const OrderCreateSchema = z
     branchId: z.string().min(1).max(100),
     amountCents: z.number().int().min(1).max(100000000),
     currency: z.string().min(3).max(10).default('USD').optional(),
+    paymentMethodId: z.string().min(3).max(128).optional(),
     idempotencyKey: z.string().min(8).max(64).optional(),
   })
   .strict();
@@ -1671,6 +1672,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           branchId: body.branchId,
           amountCents: body.amountCents,
           currency: body.currency ?? 'USD',
+          ...(body.paymentMethodId ? { paymentMethodId: body.paymentMethodId } : {}),
           correlationId: getCorrelationId(request),
           createdBy: context.user.id,
         },

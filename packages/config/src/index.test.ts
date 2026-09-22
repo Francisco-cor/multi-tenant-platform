@@ -101,4 +101,36 @@ describe('runtime configuration', () => {
       }),
     ).toThrow(/real_payment_provider_required_in_production/);
   });
+
+  it('accepts the Stripe provider only over HTTPS in production', () => {
+    expect(() =>
+      loadWorkerEnvironment({
+        NODE_ENV: 'production',
+        DATABASE_URL: 'postgresql://platform:platform@db:5432/platform',
+        REDIS_URL: 'redis://redis:6379',
+        S3_PROVIDER: 's3',
+        S3_ENDPOINT: 'https://s3.example.test',
+        S3_ACCESS_KEY: 'access',
+        S3_SECRET_KEY: 'secret',
+        WEBHOOK_SECRET_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+        PAYMENT_PROVIDER: 'stripe',
+        PAYMENT_PROVIDER_API_KEY: 'sk_test_placeholder',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      loadWorkerEnvironment({
+        NODE_ENV: 'production',
+        DATABASE_URL: 'postgresql://platform:platform@db:5432/platform',
+        REDIS_URL: 'redis://redis:6379',
+        S3_PROVIDER: 's3',
+        S3_ENDPOINT: 'https://s3.example.test',
+        S3_ACCESS_KEY: 'access',
+        S3_SECRET_KEY: 'secret',
+        WEBHOOK_SECRET_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+        PAYMENT_PROVIDER: 'stripe',
+        PAYMENT_PROVIDER_API_KEY: 'sk_test_placeholder',
+        PAYMENT_PROVIDER_BASE_URL: 'http://stripe.internal',
+      }),
+    ).toThrow(/payment_provider_https_required/);
+  });
 });

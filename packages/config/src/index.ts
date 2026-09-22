@@ -127,6 +127,8 @@ export const workerEnvironmentSchema = z
     WEBHOOK_SECRET_ENCRYPTION_KEY: environmentSchemaBase.shape.WEBHOOK_SECRET_ENCRYPTION_KEY,
     PAYMENT_PROVIDER: z.enum(['fake', 'stripe']).default('fake'),
     PAYMENT_PROVIDER_API_KEY: z.string().min(1).optional(),
+    PAYMENT_PROVIDER_BASE_URL: z.string().url().default('https://api.stripe.com'),
+    PAYMENT_PROVIDER_TIMEOUT_MS: z.coerce.number().int().min(1000).max(30_000).default(5000),
     WORKER_HEALTH_HOST: z.string().default('0.0.0.0'),
     WORKER_HEALTH_PORT: z.coerce.number().int().min(1).max(65_535).default(4010),
     WORKER_READY_FILE: z.string().min(1).default('/tmp/platform-worker-ready'),
@@ -166,6 +168,16 @@ export const workerEnvironmentSchema = z
         code: z.ZodIssueCode.custom,
         path: ['PAYMENT_PROVIDER'],
         message: 'real_payment_provider_required_in_production',
+      });
+    }
+    if (
+      value.PAYMENT_PROVIDER === 'stripe' &&
+      !value.PAYMENT_PROVIDER_BASE_URL.startsWith('https://')
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['PAYMENT_PROVIDER_BASE_URL'],
+        message: 'payment_provider_https_required',
       });
     }
   });

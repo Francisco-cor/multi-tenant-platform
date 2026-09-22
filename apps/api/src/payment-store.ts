@@ -34,6 +34,7 @@ export interface CreateOrderWithPaymentInput {
   branchId: string;
   amountCents: number;
   currency?: string;
+  paymentMethodId?: string | undefined;
   correlationId: string;
   createdBy: string;
 }
@@ -243,8 +244,8 @@ export class PersistentPaymentStore implements PaymentStore {
         created_at: string;
         updated_at: string;
       }>(sql`
-        insert into payment_attempts (id, tenant_id, order_id, provider_key, status, amount_cents, currency)
-        values (${attemptId}::uuid, ${context.tenantId}::uuid, ${orderId}::uuid, ${providerKey}, 'created', ${input.amountCents}, ${currency})
+        insert into payment_attempts (id, tenant_id, order_id, provider_key, payment_method_id, status, amount_cents, currency)
+        values (${attemptId}::uuid, ${context.tenantId}::uuid, ${orderId}::uuid, ${providerKey}, ${input.paymentMethodId ?? null}, 'created', ${input.amountCents}, ${currency})
         returning id, tenant_id, order_id, provider_key, status, provider_ref, amount_cents, currency, attempts, last_error, created_at, updated_at
       `);
       const attemptRow = attemptRows[0];

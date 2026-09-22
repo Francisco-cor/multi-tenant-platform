@@ -11,7 +11,8 @@ import { expireReservations } from './jobs/expireReservations.js';
 import { gcFiles } from './jobs/gcFiles.js';
 import { processPayment } from './jobs/processPayment.js';
 import { reconcilePayments } from './jobs/reconcilePayments.js';
-import { FakePaymentProvider } from './providers/fakePaymentProvider.js';
+import { createPaymentProvider } from './providers/createPaymentProvider.js';
+import type { PaymentProvider } from './providers/paymentProvider.js';
 import { createWorkerObjectStore } from './s3-delete.js';
 import { processJob } from './processor.js';
 import type { JobPayload, QueueName, QueueProcessor } from './queues.js';
@@ -38,7 +39,7 @@ function payloadRecord(payload: JobPayload): Record<string, unknown> {
 async function processGlobalMaintenance(
   db: DatabaseHandle,
   payload: JobPayload,
-  paymentProvider: FakePaymentProvider | null,
+  paymentProvider: PaymentProvider | null,
 ): Promise<unknown> {
   switch (payload.eventType) {
     case 'maintenance.expire_reservations':
@@ -60,10 +61,7 @@ export function createWorkerProcessor(
   db: DatabaseHandle,
   globalDb: DatabaseHandle = db,
 ): QueueProcessor {
-  const paymentProvider =
-    process.env.PAYMENT_PROVIDER === 'fake'
-      ? new FakePaymentProvider({ mode: 'deterministic' })
-      : null;
+  const paymentProvider = createPaymentProvider();
 
   return async (
     queue: QueueName,

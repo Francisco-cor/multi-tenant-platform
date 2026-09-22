@@ -43,10 +43,11 @@ export async function processPayment(
       provider_key: string;
       status: string;
       provider_ref: string | null;
+      payment_method_id: string | null;
       amount_cents: number;
       currency: string;
     }>(sql`
-      select id, tenant_id, order_id, provider_key, status, provider_ref, amount_cents, currency
+      select id, tenant_id, order_id, provider_key, status, provider_ref, payment_method_id, amount_cents, currency
       from payment_attempts
       where id = ${attemptId}::uuid and tenant_id = ${tenantId}::uuid
       for update
@@ -100,6 +101,7 @@ export async function processPayment(
       idempotencyKey: providerKey,
       orderId,
       tenantId,
+      ...(row.payment_method_id ? { paymentMethodId: row.payment_method_id } : {}),
     });
     providerResult = { providerRef: chargeRes.providerRef, status: chargeRes.status };
   } catch (error) {
