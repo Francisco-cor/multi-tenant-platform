@@ -136,8 +136,9 @@ export async function deliverWebhook(
       status: string;
       attempts: number;
       claim_token: string | null;
+      secret_version: number;
     }>(sql`
-      select id, tenant_id, endpoint_id, event_id, event_type, payload::text as payload, status, attempts
+      select id, tenant_id, endpoint_id, event_id, event_type, payload::text as payload, status, attempts, secret_version
       from webhook_deliveries where id=${deliveryId}::uuid and tenant_id=${tenantId}::uuid for update
     `);
     const del = deliveries[0];
@@ -152,16 +153,32 @@ export async function deliverWebhook(
       id: string;
       url: string;
       secret_ciphertext: string | null;
+      secret_version: number;
+      previous_secret_ciphertext: string | null;
+      previous_secret_version: number | null;
+      previous_secret_expires_at: string | null;
       status: string;
     }>(sql`
-      select id, url, secret_ciphertext, status from webhook_endpoints where id=${del.endpoint_id}::uuid and tenant_id=${tenantId}::uuid limit 1
+      select id, url, secret_ciphertext, secret_version, previous_secret_ciphertext,
+             previous_secret_version, previous_secret_expires_at, status
+      from webhook_endpoints where id=${del.endpoint_id}::uuid and tenant_id=${tenantId}::uuid limit 1
     `);
     const ep = endpoints[0];
     if (!ep) throw new Error('endpoint_not_found');
-    if (!ep.secret_ciphertext) throw new Error('webhook_secret_unavailable');
+    const isCurrent = del.secret_version === ep.secret_version;
+    const isPrevious =
+      ep.previous_secret_version === del.secret_version &&
+      ep.previous_secret_expires_at !== null &&
+      new Date(ep.previous_secret_expires_at).getTime() > Date.now();
+    const ciphertext = isCurrent
+      ? ep.secret_ciphertext
+      : isPrevious
+        ? ep.previous_secret_ciphertext
+        : null;
+    if (!ciphertext) throw new Error('webhook_secret_version_unavailable');
     const key = process.env.WEBHOOK_SECRET_ENCRYPTION_KEY;
     if (!key) throw new Error('webhook_secret_encryption_key_required');
-    return { delivery: del, endpoint: ep, secret: decryptWebhookSecret(ep.secret_ciphertext, key) };
+    return { delivery: del, endpoint: ep, secret: decryptWebhookSecret(ciphertext, key) };
   });
 
   if (!ctx.endpoint) {

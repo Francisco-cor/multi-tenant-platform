@@ -590,7 +590,15 @@ export class PersistentWebhookStore implements WebhookStore {
         updated_at: string;
         last_delivery_at: string | null;
       }>(sql`
-        update webhook_endpoints set secret_hash=${secretHash}, secret_ciphertext=${secretCiphertext}, version=version+1, updated_at=now()
+        update webhook_endpoints set
+          secret_hash=${secretHash},
+          previous_secret_ciphertext=secret_ciphertext,
+          previous_secret_version=secret_version,
+          previous_secret_expires_at=now() + interval '24 hours',
+          secret_ciphertext=${secretCiphertext},
+          secret_version=secret_version+1,
+          version=version+1,
+          updated_at=now()
         where id=${id}::uuid and tenant_id=${context.tenantId}::uuid
         returning id, tenant_id, url, secret_hash, events::text as events, status, version, failure_count, created_by, created_at, updated_at, last_delivery_at
       `);
@@ -732,8 +740,9 @@ export class PersistentWebhookStore implements WebhookStore {
         event_id: string;
         event_type: string;
         payload: string;
+        secret_version: number;
       }>(sql`
-        select id, tenant_id, endpoint_id, event_id, event_type, payload::text as payload from webhook_deliveries
+        select id, tenant_id, endpoint_id, event_id, event_type, payload::text as payload, secret_version from webhook_deliveries
         where id=${deliveryId}::uuid and tenant_id=${context.tenantId}::uuid for update
       `);
       const r = rows[0];
@@ -754,8 +763,8 @@ export class PersistentWebhookStore implements WebhookStore {
         created_at: string;
         last_error: string | null;
       }>(sql`
-        insert into webhook_deliveries (id, tenant_id, endpoint_id, event_id, event_type, payload, status, attempts, next_attempt_at)
-        values (${newId}::uuid, ${r.tenant_id}::uuid, ${r.endpoint_id}::uuid, ${r.event_id}, ${r.event_type}, ${r.payload}::jsonb, 'pending', 0, now())
+        insert into webhook_deliveries (id, tenant_id, endpoint_id, delivery_key, event_id, event_type, payload, secret_version, status, attempts, next_attempt_at)
+        values (${newId}::uuid, ${r.tenant_id}::uuid, ${r.endpoint_id}::uuid, ${newId}, ${r.event_id}, ${r.event_type}, ${r.payload}::jsonb, ${r.secret_version}, 'pending', 0, now())
         returning id, tenant_id, endpoint_id, event_id, event_type, payload::text as payload, status, attempts, next_attempt_at, delivered_at, created_at, last_error
       `);
       const nr = newRows[0];

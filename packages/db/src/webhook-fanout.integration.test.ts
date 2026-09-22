@@ -1,7 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { sql, createDatabase, withTenantTransaction, writeOutboxEvent, type DatabaseHandle } from './index.js';
+import {
+  sql,
+  createDatabase,
+  withTenantTransaction,
+  writeOutboxEvent,
+  type DatabaseHandle,
+} from './index.js';
 
 const enabled = process.env.RUN_DB_INTEGRATION === '1' && Boolean(process.env.DATABASE_URL);
 const suite = enabled ? describe : describe.skip;
@@ -59,14 +65,11 @@ suite('transactional webhook outbox fanout', () => {
     expect(rows[0]?.event_type).toBe('order.paid');
     expect(JSON.parse(rows[0]?.payload ?? '{}')).toMatchObject({ orderId: aggregateId });
 
-    await withTenantTransaction(
-      database,
-      { tenantId, requestId: 'webhook-fanout-repeat' },
-      (tx) =>
-        tx.execute(sql`
-          insert into webhook_deliveries (tenant_id, endpoint_id, event_id, event_type, payload)
-          values (${tenantId}::uuid, ${endpointId}::uuid, ${eventId}, 'order.paid', '{}'::jsonb)
-          on conflict (endpoint_id, event_id) do nothing
+    await withTenantTransaction(database, { tenantId, requestId: 'webhook-fanout-repeat' }, (tx) =>
+      tx.execute(sql`
+          insert into webhook_deliveries (tenant_id, endpoint_id, delivery_key, event_id, event_type, payload)
+          values (${tenantId}::uuid, ${endpointId}::uuid, ${eventId}, ${eventId}, 'order.paid', '{}'::jsonb)
+          on conflict (endpoint_id, delivery_key) do nothing
         `),
     );
     const repeated = await admin`

@@ -70,14 +70,16 @@ export async function writeOutboxEvent(
   // eventually-running worker to discover subscriptions after the fact.
   await tx.execute(sql`
     insert into webhook_deliveries (
-      tenant_id, endpoint_id, event_id, event_type, payload, status, attempts, next_attempt_at
+      tenant_id, endpoint_id, delivery_key, event_id, event_type, payload, secret_version, status, attempts, next_attempt_at
     )
     select
       ${input.tenantId}::uuid,
       endpoint.id,
       ${row.id},
+      ${row.id},
       ${input.eventType},
       ${payloadStr}::jsonb,
+      endpoint.secret_version,
       'pending',
       0,
       now()
@@ -89,7 +91,7 @@ export async function writeOutboxEvent(
         or endpoint.events ? '*'
         or endpoint.events ? 'generic'
       )
-    on conflict (endpoint_id, event_id) do nothing
+    on conflict (endpoint_id, delivery_key) do nothing
   `);
   return row.id;
 }

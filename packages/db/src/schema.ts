@@ -388,6 +388,11 @@ export const webhookEndpoints = pgTable(
       .references(() => organizations.id, { onDelete: 'cascade' }),
     url: text('url').notNull(),
     secretHash: text('secret_hash').notNull(),
+    secretCiphertext: text('secret_ciphertext'),
+    secretVersion: integer('secret_version').notNull().default(1),
+    previousSecretCiphertext: text('previous_secret_ciphertext'),
+    previousSecretVersion: integer('previous_secret_version'),
+    previousSecretExpiresAt: timestamp('previous_secret_expires_at', { withTimezone: true }),
     events: text('events').notNull(),
     status: text('status').notNull().default('active'),
     version: integer('version').notNull().default(1),
@@ -414,9 +419,11 @@ export const webhookDeliveries = pgTable(
     endpointId: uuid('endpoint_id')
       .notNull()
       .references(() => webhookEndpoints.id, { onDelete: 'cascade' }),
+    deliveryKey: text('delivery_key').notNull(),
     eventId: text('event_id').notNull(),
     eventType: text('event_type').notNull(),
     payload: text('payload').notNull(),
+    secretVersion: integer('secret_version').notNull().default(1),
     status: text('status').notNull().default('pending'),
     attempts: integer('attempts').notNull().default(0),
     lastError: text('last_error'),
@@ -428,7 +435,10 @@ export const webhookDeliveries = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
-    uniqueIndex('webhook_delivery_endpoint_event_unique').on(table.endpointId, table.eventId),
+    uniqueIndex('webhook_delivery_endpoint_delivery_key_unique').on(
+      table.endpointId,
+      table.deliveryKey,
+    ),
     index('webhook_deliveries_tenant_status_next_idx')
       .on(table.tenantId, table.status, table.nextAttemptAt)
       .where(sql`status in ('pending','retrying')`),
