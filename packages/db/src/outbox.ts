@@ -64,6 +64,33 @@ export async function writeOutboxEvent(
   `);
   const row = rows[0];
   if (!row) throw new Error('outbox_write_failed');
+
+  // Fan out while the business transaction is still open. This makes webhook
+  // creation durable with the event itself and avoids relying on an
+  // eventually-running worker to discover subscriptions after the fact.
+  await tx.execute(sql`
+    insert into webhook_deliveries (
+      tenant_id, endpoint_id, event_id, event_type, payload, status, attempts, next_attempt_at
+    )
+    select
+      ${input.tenantId}::uuid,
+      endpoint.id,
+      ${row.id},
+      ${input.eventType},
+      ${payloadStr}::jsonb,
+      'pending',
+      0,
+      now()
+    from webhook_endpoints endpoint
+    where endpoint.tenant_id=${input.tenantId}::uuid
+      and endpoint.status='active'
+      and (
+        endpoint.events ? ${input.eventType}
+        or endpoint.events ? '*'
+        or endpoint.events ? 'generic'
+      )
+    on conflict (endpoint_id, event_id) do nothing
+  `);
   return row.id;
 }
 
