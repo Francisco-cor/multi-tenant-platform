@@ -1,4 +1,6 @@
+import { randomUUID } from 'node:crypto';
 import { sql } from '@platform/db';
+import { metrics } from '@platform/observability';
 import type { DatabaseHandle } from '@platform/db';
 import type { QueueFactory } from './queues.js';
 import { workerTenantTransaction } from './tenant-db.js';
@@ -56,7 +58,7 @@ export async function replayDlq(
   db: DatabaseHandle,
   queueFactory: QueueFactory,
   input: { tenantId: string; dlqId: string; actorUserId?: string },
-): Promise<{ jobId: string; queue: string }> {
+): Promise<{ jobId: string; queue: string; correlationId: string }> {
   const rows = await workerTenantTransaction(
     db,
     input.tenantId,
@@ -85,6 +87,7 @@ export async function replayDlq(
   // We'll reuse same jobId but first delete processed_jobs entry if exists, and mark dlq as replayed.
   const queueName = row.queue as Parameters<QueueFactory['getQueue']>[0];
   const queue = queueFactory.getQueue(queueName);
+  const correlationId = `dlq-replay:${randomUUID()}`;
 
   // Clear dedup so replay can re-run
   await workerTenantTransaction(db, input.tenantId, `dlq:replay:${input.dlqId}`, (tx) =>
@@ -96,7 +99,11 @@ export async function replayDlq(
   // Mark dlq as replayed
   await workerTenantTransaction(db, input.tenantId, `dlq:replay:${input.dlqId}`, (tx) =>
     tx.execute(
-      sql`update dlq_jobs set status = 'replayed', updated_at = now() where id = ${row.id}::uuid`,
+      sql`update dlq_jobs
+          set status = 'replayed', replay_count = replay_count + 1,
+              last_replayed_at = now(), last_replay_correlation_id = ${correlationId},
+              updated_at = now()
+          where id = ${row.id}::uuid`,
     ),
   );
 
@@ -109,12 +116,19 @@ export async function replayDlq(
       aggregateType: (payload as { aggregateType?: string }).aggregateType ?? 'generic',
       eventType: (payload as { eventType?: string }).eventType ?? 'replay',
       eventId: row.job_id,
+      correlationId,
+      payloadVersion:
+        typeof (payload as { payloadVersion?: unknown }).payloadVersion === 'number'
+          ? (payload as { payloadVersion: number }).payloadVersion
+          : 1,
       payload,
     },
     { jobId: row.job_id },
   );
 
-  return { jobId: row.job_id, queue: row.queue };
+  metrics.recordDlqReplay(row.queue);
+
+  return { jobId: row.job_id, queue: row.queue, correlationId };
 }
 
 export async function discardDlq(

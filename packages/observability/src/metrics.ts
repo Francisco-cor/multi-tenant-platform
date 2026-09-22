@@ -15,6 +15,10 @@ export interface MetricsSnapshot {
   outboxPending: number;
   jobDurationMs: Map<string, number[]>;
   jobRetries: Map<string, number>;
+  jobFinalFailures: Map<string, number>;
+  dlqReplays: Map<string, number>;
+  webhookLeaseRenewals: number;
+  webhookLeaseLosses: number;
   dlqSize: number;
   paymentUnknown: number;
   paymentPending: number;
@@ -34,6 +38,10 @@ class InMemoryMetrics {
   public outboxPending = 0;
   public jobDurationMs = new Map<string, number[]>();
   public jobRetries = new Map<string, number>();
+  public jobFinalFailures = new Map<string, number>();
+  public dlqReplays = new Map<string, number>();
+  public webhookLeaseRenewals = 0;
+  public webhookLeaseLosses = 0;
   public dlqSize = 0;
   public paymentUnknown = 0;
   public paymentPending = 0;
@@ -66,6 +74,22 @@ class InMemoryMetrics {
 
   recordRetry(queue: string): void {
     this.jobRetries.set(queue, (this.jobRetries.get(queue) ?? 0) + 1);
+  }
+
+  recordFinalFailure(queue: string): void {
+    this.jobFinalFailures.set(queue, (this.jobFinalFailures.get(queue) ?? 0) + 1);
+  }
+
+  recordDlqReplay(queue: string): void {
+    this.dlqReplays.set(queue, (this.dlqReplays.get(queue) ?? 0) + 1);
+  }
+
+  recordWebhookLeaseRenewal(): void {
+    this.webhookLeaseRenewals += 1;
+  }
+
+  recordWebhookLeaseLoss(): void {
+    this.webhookLeaseLosses += 1;
   }
 
   recordDlq(size: number): void {
@@ -226,6 +250,14 @@ class InMemoryMetrics {
     for (const [q, c] of this.jobRetries) {
       lines.push(`job_retries_total{queue="${q}"} ${c}`);
     }
+    for (const [q, c] of this.jobFinalFailures) {
+      lines.push(`job_final_failures_total{queue="${q}"} ${c}`);
+    }
+    for (const [q, c] of this.dlqReplays) {
+      lines.push(`dlq_replays_total{queue="${q}"} ${c}`);
+    }
+    lines.push(`webhook_lease_renewals_total ${this.webhookLeaseRenewals}`);
+    lines.push(`webhook_lease_losses_total ${this.webhookLeaseLosses}`);
     for (const [q] of this.jobDurationMs) {
       const p95 = this.p95(q);
       lines.push(`job_duration_p95_seconds{queue="${q}"} ${(p95 / 1000).toFixed(3)}`);
@@ -266,6 +298,10 @@ class InMemoryMetrics {
     this.outboxPending = 0;
     this.jobDurationMs.clear();
     this.jobRetries.clear();
+    this.jobFinalFailures.clear();
+    this.dlqReplays.clear();
+    this.webhookLeaseRenewals = 0;
+    this.webhookLeaseLosses = 0;
     this.dlqSize = 0;
     this.paymentUnknown = 0;
     this.paymentPending = 0;
@@ -288,6 +324,10 @@ class InMemoryMetrics {
       outboxPending: this.outboxPending,
       jobDurationMs: new Map(this.jobDurationMs),
       jobRetries: new Map(this.jobRetries),
+      jobFinalFailures: new Map(this.jobFinalFailures),
+      dlqReplays: new Map(this.dlqReplays),
+      webhookLeaseRenewals: this.webhookLeaseRenewals,
+      webhookLeaseLosses: this.webhookLeaseLosses,
       dlqSize: this.dlqSize,
       paymentUnknown: this.paymentUnknown,
       paymentPending: this.paymentPending,

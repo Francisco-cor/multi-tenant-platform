@@ -6,6 +6,7 @@ import {
   type QueueFactory,
   type JobPayload,
 } from '../queues.js';
+import { metrics } from '@platform/observability';
 
 export interface OutboxRelayOptions {
   batchSize?: number | undefined;
@@ -54,11 +55,12 @@ export async function runOutboxRelayOnce(
       aggregate_type: string;
       aggregate_id: string;
       event_type: string;
+      payload_version: number;
       payload: string;
       attempts: number;
       correlation_id: string | null;
     }>(sql`
-      select id, tenant_id, aggregate_type, aggregate_id, event_type, payload, attempts, correlation_id
+      select id, tenant_id, aggregate_type, aggregate_id, event_type, payload_version, payload, attempts, correlation_id
       from outbox_events
       where (
         (status = 'pending' and next_attempt_at <= now())
@@ -98,6 +100,7 @@ export async function runOutboxRelayOnce(
       aggregateType: ev.aggregate_type,
       eventType: ev.event_type,
       eventId: ev.id,
+      payloadVersion: ev.payload_version,
       ...(ev.correlation_id ? { correlationId: ev.correlation_id } : {}),
       payload: ev.payload
         ? typeof ev.payload === 'string'
@@ -130,10 +133,16 @@ export async function runOutboxRelayOnce(
           `);
           // Also insert into dlq_jobs for operational replay
           await tx.execute(sql`
-            insert into dlq_jobs (job_id, tenant_id, queue, payload, cause, attempts)
-            values (${jobId}, ${ev.tenant_id}::uuid, ${queueName}, ${JSON.stringify(payload)}::jsonb, ${message}, ${ev.attempts + 1})
+            insert into dlq_jobs (job_id, tenant_id, queue, payload, cause, attempts, correlation_id)
+            values (${jobId}, ${ev.tenant_id}::uuid, ${queueName}, ${JSON.stringify(payload)}::jsonb, ${message}, ${ev.attempts + 1}, ${payload.correlationId ?? null})
+            on conflict (job_id) where status='pending' do update
+            set cause=excluded.cause,
+                attempts=greatest(dlq_jobs.attempts, excluded.attempts),
+                correlation_id=coalesce(excluded.correlation_id, dlq_jobs.correlation_id),
+                updated_at=now()
           `);
         });
+        metrics.recordFinalFailure(queueName);
       } else {
         await globalTransaction(db, (tx) =>
           tx.execute(sql`

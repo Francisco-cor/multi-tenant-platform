@@ -287,10 +287,19 @@ export const dlqJobs = pgTable(
     cause: text('cause').notNull(),
     attempts: integer('attempts').notNull().default(0),
     status: text('status').notNull().default('pending'),
+    correlationId: text('correlation_id'),
+    replayCount: integer('replay_count').notNull().default(0),
+    lastReplayedAt: timestamp('last_replayed_at', { withTimezone: true }),
+    lastReplayCorrelationId: text('last_replay_correlation_id'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [index('dlq_tenant_queue_idx').on(table.tenantId, table.queue, table.status)],
+  (table) => [
+    index('dlq_tenant_queue_idx').on(table.tenantId, table.queue, table.status),
+    uniqueIndex('dlq_jobs_pending_job_unique')
+      .on(table.jobId)
+      .where(sql`status = 'pending'`),
+  ],
 );
 
 export const orders = pgTable(

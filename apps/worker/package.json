@@ -13,6 +13,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@platform/contracts": "workspace:*",
     "@platform/config": "workspace:*",
     "@platform/db": "workspace:*",
     "@platform/domain": "workspace:*",

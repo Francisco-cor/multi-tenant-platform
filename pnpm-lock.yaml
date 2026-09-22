@@ -121,6 +121,9 @@ importers:
       '@platform/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@platform/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@platform/db':
         specifier: workspace:*
         version: link:../../packages/db

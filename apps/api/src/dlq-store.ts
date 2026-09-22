@@ -1,5 +1,6 @@
 import { sql } from '@platform/db';
 import { createDatabase, type DatabaseHandle } from '@platform/db';
+import { metrics } from '@platform/observability';
 import type { StoreTenantContext } from './identity-store.js';
 
 export interface DlqRecordApi {
@@ -142,7 +143,10 @@ export class PersistentDlqStore implements DlqStore {
     if (!rec) throw new Error('dlq_not_found');
     // Mark replayed and clear dedupe so job can be retried
     await this.db.db.execute(
-      sql`update dlq_jobs set status='replayed', updated_at=now() where id=${id}::uuid and tenant_id=${context.tenantId}::uuid`,
+      sql`update dlq_jobs
+          set status='replayed', replay_count=replay_count + 1,
+              last_replayed_at=now(), last_replay_correlation_id=${context.requestId}, updated_at=now()
+          where id=${id}::uuid and tenant_id=${context.tenantId}::uuid`,
     );
     await this.db.db.execute(
       sql`delete from processed_jobs where job_id=${rec.jobId} and tenant_id=${context.tenantId}::uuid`,
@@ -161,6 +165,7 @@ export class PersistentDlqStore implements DlqStore {
         values (${context.tenantId}::uuid, ${payload.aggregateType}, ${payload.aggregateId}::uuid, ${payload.eventType}, ${JSON.stringify(rec.payload)}::jsonb, ${context.requestId})
       `);
     }
+    metrics.recordDlqReplay(rec.queue);
     return { jobId: rec.jobId };
   }
 

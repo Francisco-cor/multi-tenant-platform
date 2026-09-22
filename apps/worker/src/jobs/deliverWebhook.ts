@@ -90,8 +90,10 @@ function startLeaseHeartbeat(
           `),
       );
       if (renewed.length === 0) throw new Error('webhook_claim_lost');
+      metrics.recordWebhookLeaseRenewal();
     } catch (error) {
       hasLostLease = true;
+      metrics.recordWebhookLeaseLoss();
       abortController.abort();
       rejectLeaseLoss?.(error instanceof Error ? error : new Error(String(error)));
     }

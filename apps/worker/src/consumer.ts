@@ -1,4 +1,9 @@
 import type { DatabaseHandle } from '@platform/db';
+import {
+  EVENT_CONTRACTS,
+  getEventContract,
+  supportsEventPayloadVersion,
+} from '@platform/contracts';
 import { metrics } from '@platform/observability';
 import { deliverWebhook } from './jobs/deliverWebhook.js';
 import { deliverPendingWebhooks } from './jobs/deliverWebhook.js';
@@ -17,27 +22,7 @@ import type { JobPayload, QueueName, QueueProcessor } from './queues.js';
  * acknowledgements below; an event outside this registry must fail and be
  * retried/DLQ'd instead of being silently discarded.
  */
-export const REGISTERED_EVENT_TYPES = new Set([
-  'file.created',
-  'inventory.reserved',
-  'order.created',
-  'order.paid',
-  'order.failed',
-  'order.reconciled_paid',
-  'payment.created',
-  'payment.paid',
-  'payment.failed',
-  'payment.unknown',
-  'payment.webhook_paid',
-  'payment.webhook_failed',
-  'payment.webhook_unknown',
-  'payment.reconciled_paid',
-  'payment.reconciled_failed',
-  'payment.reconciled_unknown',
-  'webhook.created',
-  'webhook.secret_rotated',
-  'webhook.replayed',
-]);
+export const REGISTERED_EVENT_TYPES = new Set(Object.keys(EVENT_CONTRACTS));
 
 export function isRegisteredEventType(eventType: string): boolean {
   return REGISTERED_EVENT_TYPES.has(eventType);
@@ -97,6 +82,16 @@ export function createWorkerProcessor(
       ...(attempt ? { attemptsMade: attempt.attemptsMade, maxAttempts: attempt.maxAttempts } : {}),
       handler: async (jobPayload) => {
         const inner = payloadRecord(jobPayload);
+        const contract = getEventContract(jobPayload.eventType);
+        if (!contract || !isRegisteredEventType(jobPayload.eventType)) {
+          throw new Error(`event_handler_not_registered:${jobPayload.eventType}`);
+        }
+        const payloadVersion = jobPayload.payloadVersion ?? 1;
+        if (!supportsEventPayloadVersion(jobPayload.eventType, payloadVersion)) {
+          throw new Error(
+            `event_payload_version_unsupported:${jobPayload.eventType}:${payloadVersion}`,
+          );
+        }
         if (jobPayload.eventType === 'webhook.replayed') {
           const deliveryId = typeof inner.deliveryId === 'string' ? inner.deliveryId : null;
           if (!deliveryId) throw new Error('webhook_delivery_id_required');
@@ -105,9 +100,6 @@ export function createWorkerProcessor(
         if (jobPayload.eventType === 'payment.created') {
           if (!paymentProvider) throw new Error('payment_provider_not_configured');
           return processPayment(db, jobPayload, paymentProvider);
-        }
-        if (!isRegisteredEventType(jobPayload.eventType)) {
-          throw new Error(`event_handler_not_registered:${jobPayload.eventType}`);
         }
         metrics.recordJobDuration(queue, 0);
         return {

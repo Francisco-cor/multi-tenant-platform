@@ -38,8 +38,13 @@ async function writeFinalFailureToDlq(
   const cause = input.error instanceof Error ? input.error.message : String(input.error);
   await workerTenantTransaction(db, input.payload.tenantId, `dlq:${input.jobId}`, (tx) =>
     tx.execute(sql`
-      insert into dlq_jobs (job_id, tenant_id, queue, payload, cause, attempts)
-      values (${input.jobId}, ${input.payload.tenantId}::uuid, ${input.queue}, ${JSON.stringify(input.payload)}::jsonb, ${cause.slice(0, 2000)}, ${input.attempts})
+      insert into dlq_jobs (job_id, tenant_id, queue, payload, cause, attempts, correlation_id)
+      values (${input.jobId}, ${input.payload.tenantId}::uuid, ${input.queue}, ${JSON.stringify(input.payload)}::jsonb, ${cause.slice(0, 2000)}, ${input.attempts}, ${input.payload.correlationId ?? null})
+      on conflict (job_id) where status='pending' do update
+      set cause=excluded.cause,
+          attempts=greatest(dlq_jobs.attempts, excluded.attempts),
+          correlation_id=coalesce(excluded.correlation_id, dlq_jobs.correlation_id),
+          updated_at=now()
     `),
   );
 }
@@ -100,6 +105,7 @@ export async function processJob(
           attempts: attemptsMade,
           error,
         });
+        metrics.recordFinalFailure(options.queue);
       } catch (dlqError) {
         logger.error(
           {

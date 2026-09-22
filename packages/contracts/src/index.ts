@@ -73,3 +73,5 @@ export const metaResponse = {
   service: 'api',
   status: 'ok',
 } as const;
+
+export * from './events.js';

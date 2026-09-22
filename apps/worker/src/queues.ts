@@ -10,6 +10,7 @@ export interface JobPayload {
   aggregateType: string;
   eventType: string;
   eventId: string;
+  payloadVersion?: number | undefined;
   correlationId?: string | undefined;
   scope?: 'tenant' | 'global' | undefined;
   payload: unknown;
