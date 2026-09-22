@@ -134,6 +134,12 @@ jobs:
           REDIS_URL: redis://localhost:6379
           RUN_WORKER_INTEGRATION: '1'
 
+      - name: API key integration (persistent PostgreSQL/RLS lifecycle)
+        run: pnpm --filter @platform/api test:integration
+        env:
+          DATABASE_URL: postgresql://platform:platform@localhost:5432/platform
+          RUN_API_INTEGRATION: '1'
+
       - name: MinIO integration (SigV4 upload, HEAD, GET and DELETE)
         run: pnpm --filter @platform/api test:integration
         env:
