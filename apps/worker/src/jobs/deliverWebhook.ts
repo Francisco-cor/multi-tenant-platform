@@ -4,6 +4,7 @@ import { sql } from '@platform/db';
 import type { DatabaseHandle } from '@platform/db';
 import { metrics } from '@platform/observability';
 import { workerGlobalTransaction, workerTenantTransaction } from '../tenant-db.js';
+import { fetchWebhook, type WebhookFetch } from '../webhook-egress.js';
 
 export interface DeliverResult {
   status: 'delivered' | 'retrying' | 'failed' | 'dead_letter' | 'disabled';
@@ -24,12 +25,93 @@ function backoffMs(attempt: number): number {
 }
 
 export interface DeliverWebhookOptions {
-  fetchFn?: typeof fetch | undefined;
+  fetchFn?: WebhookFetch | undefined;
   claimToken?: string | undefined;
+  leaseDurationMs?: number | undefined;
+  leaseRenewalMs?: number | undefined;
 }
+
+export const WEBHOOK_LEASE_DURATION_MS = 5 * 60 * 1000;
+export const WEBHOOK_LEASE_RENEWAL_MS = 60 * 1000;
 
 function claimGuard(claimToken: string | undefined) {
   return claimToken ? sql`and claim_token=${claimToken}` : sql``;
+}
+
+interface LeaseHeartbeat {
+  lost: () => boolean;
+  loss: Promise<never>;
+  stop: () => Promise<void>;
+}
+
+function startLeaseHeartbeat(
+  db: DatabaseHandle,
+  tenantId: string,
+  deliveryId: string,
+  claimToken: string | undefined,
+  options: Pick<DeliverWebhookOptions, 'leaseDurationMs' | 'leaseRenewalMs'>,
+  abortController: AbortController,
+): LeaseHeartbeat {
+  if (!claimToken) {
+    return {
+      lost: () => false,
+      loss: new Promise<never>(() => undefined),
+      stop: async () => undefined,
+    };
+  }
+
+  const durationMs = options.leaseDurationMs ?? WEBHOOK_LEASE_DURATION_MS;
+  const renewalMs = options.leaseRenewalMs ?? WEBHOOK_LEASE_RENEWAL_MS;
+  let hasLostLease = false;
+  let active = true;
+  let renewalInFlight = Promise.resolve();
+  let rejectLeaseLoss: ((error: Error) => void) | undefined;
+  const leaseLost = new Promise<never>((_, reject) => {
+    rejectLeaseLoss = reject;
+  });
+
+  const renew = async (): Promise<void> => {
+    if (!active || hasLostLease) return;
+    try {
+      const renewed = await workerTenantTransaction(
+        db,
+        tenantId,
+        `webhook-lease:${deliveryId}`,
+        (tx) =>
+          tx.execute<{ id: string }>(sql`
+            update webhook_deliveries
+            set claim_until=now() + (${durationMs}::text || ' milliseconds')::interval,
+                updated_at=now()
+            where id=${deliveryId}::uuid
+              and tenant_id=${tenantId}::uuid
+              and claim_token=${claimToken}
+              and claim_until > now()
+            returning id
+          `),
+      );
+      if (renewed.length === 0) throw new Error('webhook_claim_lost');
+    } catch (error) {
+      hasLostLease = true;
+      abortController.abort();
+      rejectLeaseLoss?.(error instanceof Error ? error : new Error(String(error)));
+    }
+  };
+
+  const timer = setInterval(() => {
+    if (!active) return;
+    renewalInFlight = renewalInFlight.then(renew, renew);
+  }, renewalMs);
+  timer.unref?.();
+
+  return {
+    lost: () => hasLostLease,
+    loss: leaseLost,
+    stop: async () => {
+      active = false;
+      clearInterval(timer);
+      await renewalInFlight;
+    },
+  };
 }
 
 export async function deliverWebhook(
@@ -38,7 +120,7 @@ export async function deliverWebhook(
   tenantId: string,
   options: DeliverWebhookOptions = {},
 ): Promise<DeliverResult> {
-  const fetchFn = options.fetchFn ?? globalThis.fetch;
+  const fetchFn = options.fetchFn ?? fetchWebhook;
 
   // Load delivery + endpoint with lock
   const ctx = await workerTenantTransaction(db, tenantId, `webhook:${deliveryId}`, async (tx) => {
@@ -87,11 +169,13 @@ export async function deliverWebhook(
     };
   }
   if (ctx.endpoint.status !== 'active') {
-    await workerTenantTransaction(db, tenantId, `webhook:${deliveryId}`, (tx) =>
-      tx.execute(sql`
+    await workerTenantTransaction(db, tenantId, `webhook:${deliveryId}`, async (tx) => {
+      const updated = await tx.execute<{ id: string }>(sql`
         update webhook_deliveries set status='disabled', claim_token=null, claim_until=null, updated_at=now() where id=${deliveryId}::uuid ${claimGuard(options.claimToken)}
-      `),
-    );
+        returning id
+      `);
+      if (options.claimToken && updated.length === 0) throw new Error('webhook_claim_lost');
+    });
     return { status: 'disabled', attempts: ctx.delivery.attempts };
   }
 
@@ -110,13 +194,26 @@ export async function deliverWebhook(
   let responseBody = '';
   let error: string | null = null;
   let isTransient = false;
+  const abortController = new AbortController();
+  const lease = startLeaseHeartbeat(
+    db,
+    tenantId,
+    deliveryId,
+    options.claimToken,
+    options,
+    abortController,
+  );
 
   try {
-    const resp = await fetchFn(ctx.endpoint.url, {
-      method: 'POST',
-      headers,
-      body: payloadStr,
-    });
+    const resp = await Promise.race([
+      fetchFn(ctx.endpoint.url, {
+        method: 'POST',
+        headers,
+        body: payloadStr,
+        signal: abortController.signal,
+      }),
+      lease.loss,
+    ]);
     responseStatus = resp.status;
     responseBody = await resp.text().catch(() => '');
     if (resp.ok) {
@@ -143,9 +240,14 @@ export async function deliverWebhook(
       isTransient = false;
     }
   } catch (e) {
+    if (lease.lost()) throw new Error('webhook_claim_lost');
     error = e instanceof Error ? e.message : String(e);
     isTransient = true; // network error is transient
+  } finally {
+    await lease.stop();
   }
+
+  if (lease.lost()) throw new Error('webhook_claim_lost');
 
   // Handle failure
   const attempts = ctx.delivery.attempts + 1;
@@ -154,10 +256,12 @@ export async function deliverWebhook(
 
   await workerTenantTransaction(db, tenantId, `webhook:${deliveryId}`, async (tx) => {
     if (shouldDeadLetter) {
-      await tx.execute(sql`
+      const updated = await tx.execute<{ id: string }>(sql`
         update webhook_deliveries set status='dead_letter', attempts=${attempts}, last_error=${error}, next_attempt_at=now() + interval '1 hour', claim_token=null, claim_until=null, updated_at=now()
         where id=${deliveryId}::uuid ${claimGuard(options.claimToken)}
+        returning id
       `);
+      if (options.claimToken && updated.length === 0) throw new Error('webhook_claim_lost');
       await tx.execute(sql`
         update webhook_endpoints set failure_count=failure_count+1, updated_at=now()
         where id=${ctx.endpoint!.id}::uuid
@@ -173,19 +277,23 @@ export async function deliverWebhook(
       }
     } else if (shouldRetry) {
       const delay = backoffMs(attempts);
-      await tx.execute(sql`
+      const updated = await tx.execute<{ id: string }>(sql`
         update webhook_deliveries set status='retrying', attempts=${attempts}, last_error=${error}, next_attempt_at=now() + (${delay}::text || ' ms')::interval, claim_token=null, claim_until=null, updated_at=now()
         where id=${deliveryId}::uuid ${claimGuard(options.claimToken)}
+        returning id
       `);
+      if (options.claimToken && updated.length === 0) throw new Error('webhook_claim_lost');
       await tx.execute(
         sql`update webhook_endpoints set failure_count=failure_count+1, updated_at=now() where id=${ctx.endpoint!.id}::uuid`,
       );
     } else {
       // 4xx failed
-      await tx.execute(sql`
+      const updated = await tx.execute<{ id: string }>(sql`
         update webhook_deliveries set status='failed', attempts=${attempts}, last_error=${error}, claim_token=null, claim_until=null, updated_at=now()
         where id=${deliveryId}::uuid ${claimGuard(options.claimToken)}
+        returning id
       `);
+      if (options.claimToken && updated.length === 0) throw new Error('webhook_claim_lost');
     }
   });
 
@@ -194,9 +302,10 @@ export async function deliverWebhook(
   return { status: 'failed', attempts };
 }
 
+
 export async function deliverPendingWebhooks(
   db: DatabaseHandle,
-  options: { batchSize?: number; fetchFn?: typeof fetch } = {},
+  options: { batchSize?: number; fetchFn?: WebhookFetch } = {},
 ): Promise<{ processed: number; delivered: number; failed: number }> {
   const batchSize = options.batchSize ?? 10;
   const rows = await workerGlobalTransaction(
