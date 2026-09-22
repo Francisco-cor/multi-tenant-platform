@@ -138,7 +138,7 @@ export async function deliverWebhook(
       claim_token: string | null;
       secret_version: number;
     }>(sql`
-      select id, tenant_id, endpoint_id, event_id, event_type, payload::text as payload, status, attempts, secret_version
+      select id, tenant_id, endpoint_id, event_id, event_type, payload::text as payload, status, attempts, claim_token, secret_version
       from webhook_deliveries where id=${deliveryId}::uuid and tenant_id=${tenantId}::uuid for update
     `);
     const del = deliveries[0];
