@@ -4,7 +4,11 @@ import { encryptWebhookSecret } from '@platform/config';
 import { createDatabase, sql, type DatabaseHandle } from '@platform/db';
 import { metrics } from '@platform/observability';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { deliverWebhook, type DeliverWebhookOptions } from './jobs/deliverWebhook.js';
+import {
+  deliverPendingWebhooks,
+  deliverWebhook,
+  type DeliverWebhookOptions,
+} from './jobs/deliverWebhook.js';
 
 const enabled = process.env.RUN_WORKER_INTEGRATION === '1' && Boolean(process.env.DATABASE_URL);
 const suite = enabled ? describe : describe.skip;
@@ -13,11 +17,13 @@ const encryptionKey = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 suite('real HTTP webhook delivery with a renewable lease', () => {
   let admin: DatabaseHandle;
   let database: DatabaseHandle;
+  let workerDatabase: DatabaseHandle;
   let server: Server;
   let httpUrl: string;
   const tenantId = randomUUID();
   const endpointId = randomUUID();
   const deliveryId = randomUUID();
+  const recoveryDeliveryId = randomUUID();
   const userId = randomUUID();
   const claimToken = 'lease-test-claim';
 
@@ -26,6 +32,11 @@ suite('real HTTP webhook delivery with a renewable lease', () => {
     if (!connectionString) throw new Error('DATABASE_URL is required');
     admin = createDatabase(connectionString, { maxConnections: 1 });
     database = createDatabase(connectionString, { role: 'platform_app', maxConnections: 2 });
+    workerDatabase = createDatabase(connectionString, {
+      role: 'platform_worker',
+      maxConnections: 2,
+    });
+    await admin.db.execute(sql`delete from organizations where slug like 'webhook-lease-%'`);
 
     await new Promise<void>((resolve) => {
       server = createServer(async (request, response) => {
@@ -82,6 +93,7 @@ suite('real HTTP webhook delivery with a renewable lease', () => {
       );
     }
     if (database) await database.close();
+    if (workerDatabase) await workerDatabase.close();
     if (admin) {
       await admin.db.execute(sql`delete from organizations where id=${tenantId}`);
       await admin.close();
@@ -114,6 +126,34 @@ suite('real HTTP webhook delivery with a renewable lease', () => {
       claim_token: string | null;
     }>(sql`
       select status, attempts, claim_token from webhook_deliveries where id=${deliveryId}
+    `);
+    expect(rows[0]).toEqual({ status: 'delivered', attempts: 1, claim_token: null });
+  });
+
+  it('reclaims an expired lease and delivers the stale job once', async () => {
+    await admin.db.execute(sql`
+      insert into webhook_deliveries (
+        id, tenant_id, endpoint_id, delivery_key, event_id, event_type, payload,
+        secret_version, status, attempts, next_attempt_at, claim_token, claim_until
+      ) values (
+        ${recoveryDeliveryId}, ${tenantId}, ${endpointId}, ${`delivery-${recoveryDeliveryId}`},
+        ${`event-${recoveryDeliveryId}`}, 'order.paid', ${JSON.stringify({ orderId: recoveryDeliveryId })}::jsonb,
+        1, 'pending', 0, now() - interval '1 minute', 'stale-process-claim', now() - interval '1 minute'
+      )
+    `);
+
+    await expect(
+      deliverPendingWebhooks(workerDatabase, {
+        fetchFn: async (_url, init) => fetch(httpUrl, init),
+      }),
+    ).resolves.toMatchObject({ processed: 1, delivered: 1, failed: 0 });
+
+    const rows = await admin.db.execute<{
+      status: string;
+      attempts: number;
+      claim_token: string | null;
+    }>(sql`
+      select status, attempts, claim_token from webhook_deliveries where id=${recoveryDeliveryId}
     `);
     expect(rows[0]).toEqual({ status: 'delivered', attempts: 1, claim_token: null });
   });

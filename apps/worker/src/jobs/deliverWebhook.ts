@@ -340,11 +340,15 @@ export async function deliverPendingWebhooks(
     `);
       if (candidates.length === 0) return [];
       const ids = candidates.map((row) => row.id);
+      const idList = sql.join(
+        ids.map((id) => sql`${id}::uuid`),
+        sql`, `,
+      );
       return tx.execute<{ id: string; tenant_id: string; claim_token: string }>(sql`
       update webhook_deliveries
       set status='retrying', claim_token=gen_random_uuid()::text,
           claim_until=now() + interval '5 minutes', updated_at=now()
-      where id = any(${ids}::uuid[])
+      where id in (${idList})
         and status in ('pending','retrying')
         and (claim_until is null or claim_until <= now())
       returning id, tenant_id, claim_token
