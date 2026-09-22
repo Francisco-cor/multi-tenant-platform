@@ -83,7 +83,7 @@ import {
   PersistentPaymentStore,
   type PaymentStore,
 } from './payment-store.js';
-import { verifyWebhookSignature } from './webhook-payment.js';
+import { verifyStripeWebhookSignature, verifyWebhookSignature } from './webhook-payment.js';
 import { sql, createDatabase, withTenantTransaction, writeOutboxEvent } from '@platform/db';
 import {
   InMemoryWebhookStore,
@@ -1757,6 +1757,8 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   app.post('/v1/webhooks/payments', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
     const rawBody =
       rawBodyByRequest.get(request) ?? Buffer.from(JSON.stringify(request.body ?? {}), 'utf8');
+    const providerIsStripe = process.env.PAYMENT_PROVIDER === 'stripe';
+    const stripeSignature = request.headers['stripe-signature'] as string | undefined;
     const timestamp =
       (request.headers['x-webhook-timestamp'] as string) ??
       (request.headers['x-timestamp'] as string) ??
@@ -1765,21 +1767,60 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       (request.headers['x-webhook-signature'] as string) ??
       (request.headers['x-signature'] as string) ??
       '';
-    const configuredSecret = process.env.PAYMENT_WEBHOOK_SECRET;
+    const configuredSecret = providerIsStripe
+      ? process.env.PAYMENT_PROVIDER_WEBHOOK_SECRET
+      : process.env.PAYMENT_WEBHOOK_SECRET;
     if (!configuredSecret && process.env.NODE_ENV === 'production') {
       throw new RequestProblem(503, 'WEBHOOK_NOT_CONFIGURED', 'Payment webhook is not configured');
     }
     const secret = configuredSecret ?? 'test_webhook_secret';
-    const verify = verifyWebhookSignature({
-      secret,
-      timestamp,
-      rawBody,
-      signatureHeader,
-    });
+    const verify = providerIsStripe
+      ? verifyStripeWebhookSignature({ secret, rawBody, signatureHeader: stripeSignature })
+      : verifyWebhookSignature({ secret, timestamp, rawBody, signatureHeader });
     if (!verify.valid) {
       throw new RequestProblem(401, 'UNAUTHORIZED', `Webhook signature invalid: ${verify.reason}`);
     }
-    const body = parseOrThrow(PaymentWebhookSchema, request.body);
+    let body: z.infer<typeof PaymentWebhookSchema>;
+    if (providerIsStripe) {
+      const stripeEvent = request.body as {
+        id?: unknown;
+        type?: unknown;
+        data?: { object?: Record<string, unknown> };
+      };
+      const eventId = typeof stripeEvent.id === 'string' ? stripeEvent.id : null;
+      const eventType = typeof stripeEvent.type === 'string' ? stripeEvent.type : null;
+      const paymentIntent = stripeEvent.data?.object;
+      const providerRef = typeof paymentIntent?.id === 'string' ? paymentIntent.id : null;
+      if (!eventId || !eventType || !paymentIntent || !providerRef) {
+        throw new RequestProblem(400, 'BAD_REQUEST', 'Stripe payment event is malformed');
+      }
+      const status =
+        eventType === 'payment_intent.succeeded'
+          ? 'paid'
+          : eventType === 'payment_intent.payment_failed' || eventType === 'payment_intent.canceled'
+            ? 'failed'
+            : eventType === 'payment_intent.processing' ||
+                eventType === 'payment_intent.requires_action'
+              ? 'unknown'
+              : null;
+      if (!status) return reply.status(200).send({ status: 'ignored', eventId });
+      const metadata: Record<string, unknown> =
+        paymentIntent.metadata && typeof paymentIntent.metadata === 'object'
+          ? (paymentIntent.metadata as Record<string, unknown>)
+          : {};
+      body = parseOrThrow(PaymentWebhookSchema, {
+        eventId,
+        providerRef,
+        status,
+        ...(typeof metadata.provider_key === 'string'
+          ? { providerKey: metadata.provider_key }
+          : {}),
+        ...(typeof metadata.tenant_id === 'string' ? { tenantId: metadata.tenant_id } : {}),
+        ...(typeof paymentIntent.amount === 'number' ? { amountCents: paymentIntent.amount } : {}),
+      });
+    } else {
+      body = parseOrThrow(PaymentWebhookSchema, request.body);
+    }
     // Tenant identity must be inside the signed body. A header alone is not covered by HMAC.
     const headerTenantId = (request.headers['x-tenant-id'] as string) ?? null;
     const bodyWithTenant = request.body as Record<string, unknown>;

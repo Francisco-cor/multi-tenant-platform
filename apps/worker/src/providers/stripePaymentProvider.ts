@@ -96,6 +96,7 @@ export class StripePaymentProvider implements PaymentProvider {
       confirm: input.paymentMethodId ? 'true' : 'false',
       'metadata[order_id]': input.orderId,
       'metadata[tenant_id]': input.tenantId,
+      'metadata[provider_key]': input.idempotencyKey,
     });
     if (input.paymentMethodId) body.set('payment_method', input.paymentMethodId);
     const intent = await this.request('/v1/payment_intents', {

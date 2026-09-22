@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 
 export const WEBHOOK_TOLERANCE_MS = 5 * 60 * 1000;
 
@@ -58,4 +58,34 @@ export function verifyWebhookSignature(input: {
     mismatch |= expected.charCodeAt(i) ^ parsed.signature.charCodeAt(i);
   if (mismatch !== 0) return { valid: false, reason: 'signature_mismatch' };
   return { valid: true };
+}
+
+export function verifyStripeWebhookSignature(input: {
+  secret: string;
+  rawBody: string | Buffer;
+  signatureHeader: string | undefined;
+  nowMs?: number;
+}): { valid: boolean; reason?: string } {
+  if (!input.signatureHeader) return { valid: false, reason: 'signature_missing' };
+  const timestamp = input.signatureHeader.match(/(?:^|,)t=(\d+)/)?.[1];
+  const signatures = [...input.signatureHeader.matchAll(/(?:^|,)v1=([a-f0-9]{64})/gi)].map(
+    (match) => match[1]!.toLowerCase(),
+  );
+  if (!timestamp || signatures.length === 0) {
+    return { valid: false, reason: 'signature_malformed' };
+  }
+  if (!isTimestampFresh(timestamp, input.nowMs)) {
+    return { valid: false, reason: 'timestamp_tolerance' };
+  }
+  const expected = computeWebhookSignature(input.secret, timestamp, input.rawBody);
+  const expectedBytes = Buffer.from(expected, 'hex');
+  const valid = signatures.some((candidate) => {
+    const candidateBytes = Buffer.from(candidate, 'hex');
+    return (
+      candidateBytes.length === expectedBytes.length &&
+      candidateBytes.length > 0 &&
+      timingSafeEqual(candidateBytes, expectedBytes)
+    );
+  });
+  return valid ? { valid: true } : { valid: false, reason: 'signature_mismatch' };
 }

@@ -43,6 +43,8 @@ const environmentSchemaBase = z.object({
   OIDC_REDIRECT_URI: z.string().url().optional(),
   OIDC_AUTHORIZATION_ENDPOINT: z.string().url().optional(),
   PAYMENT_WEBHOOK_SECRET: z.string().min(16).optional(),
+  PAYMENT_PROVIDER: z.enum(['fake', 'stripe']).default('fake'),
+  PAYMENT_PROVIDER_WEBHOOK_SECRET: z.string().min(16).optional(),
   WEBHOOK_INBOUND_SECRET: z.string().min(16).optional(),
   OTEL_SERVICE_NAME: z.string().default('platform-api'),
   OTEL_EXPORTER_OTLP_ENDPOINT: z.string().url().optional(),
@@ -74,7 +76,6 @@ export const environmentSchema = environmentSchemaBase.superRefine((value, ctx) 
     'OIDC_ISSUER_URL',
     'OIDC_CLIENT_ID',
     'OIDC_REDIRECT_URI',
-    'PAYMENT_WEBHOOK_SECRET',
     'WEBHOOK_INBOUND_SECRET',
   ];
   for (const name of required) {
@@ -99,6 +100,20 @@ export const environmentSchema = environmentSchemaBase.superRefine((value, ctx) 
       code: z.ZodIssueCode.custom,
       path: ['ALLOW_DEV_LOGIN'],
       message: 'dev_login_forbidden_in_production',
+    });
+  }
+  if (value.PAYMENT_PROVIDER === 'stripe' && !value.PAYMENT_PROVIDER_WEBHOOK_SECRET) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['PAYMENT_PROVIDER_WEBHOOK_SECRET'],
+      message: 'stripe_webhook_secret_required_in_production',
+    });
+  }
+  if (value.PAYMENT_PROVIDER !== 'stripe' && !value.PAYMENT_WEBHOOK_SECRET) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['PAYMENT_WEBHOOK_SECRET'],
+      message: 'payment_webhook_secret_required_in_production',
     });
   }
 });

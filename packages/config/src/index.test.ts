@@ -59,6 +59,26 @@ describe('runtime configuration', () => {
     ).toThrow(/real_s3_provider_required/);
   });
 
+  it('requires the Stripe webhook secret when the API uses Stripe', () => {
+    expect(() =>
+      loadEnvironment({
+        NODE_ENV: 'production',
+        PAYMENT_PROVIDER: 'stripe',
+        DATABASE_URL: 'postgresql://platform:platform@db:5432/platform',
+        REDIS_URL: 'redis://redis:6379',
+        S3_PROVIDER: 's3',
+        S3_ENDPOINT: 'https://s3.example.test',
+        S3_ACCESS_KEY: 'access',
+        S3_SECRET_KEY: 'secret',
+        WEBHOOK_SECRET_ENCRYPTION_KEY: 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=',
+        OIDC_ISSUER_URL: 'https://issuer.example.test',
+        OIDC_CLIENT_ID: 'platform',
+        OIDC_REDIRECT_URI: 'https://api.example.test/v1/auth/callback',
+        WEBHOOK_INBOUND_SECRET: 'inbound-secret-for-tests',
+      }),
+    ).toThrow(/stripe_webhook_secret_required_in_production/);
+  });
+
   it('encrypts and decrypts webhook secrets without storing plaintext', () => {
     const key = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
     const encrypted = encryptWebhookSecret('whsec_test', key);
