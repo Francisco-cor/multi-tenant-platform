@@ -59,7 +59,9 @@ function ipv6Groups(address: string): number[] | null {
     const embedded = ipv4Parts(normalized.slice(lastColon + 1));
     if (!embedded) return null;
     const [a, b, c, d] = embedded;
-    return ipv6Groups(`${normalized.slice(0, lastColon)}:${((a ?? 0) << 8) | (b ?? 0)}:${((c ?? 0) << 8) | (d ?? 0)}`);
+    return ipv6Groups(
+      `${normalized.slice(0, lastColon)}:${((a ?? 0) << 8) | (b ?? 0)}:${((c ?? 0) << 8) | (d ?? 0)}`,
+    );
   }
   const halves = normalized.split('::');
   if (halves.length > 2) return null;
@@ -145,7 +147,8 @@ export async function fetchWebhook(
   const url = new URL(rawUrl);
   const headers = new Headers(init.headers);
   headers.set('host', url.host);
-  const body = typeof init.body === 'string' ? init.body : init.body ? String(init.body) : undefined;
+  const body =
+    typeof init.body === 'string' ? init.body : init.body ? String(init.body) : undefined;
 
   return new Promise<Response>((resolve, reject) => {
     const request = httpsRequest(

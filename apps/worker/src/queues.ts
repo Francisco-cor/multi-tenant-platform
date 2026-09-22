@@ -31,6 +31,13 @@ export interface WorkerAdapter {
   close(): Promise<void>;
 }
 
+export interface QueueHealth {
+  redis: 'ok' | 'fail' | 'not_configured';
+  configuredWorkers: number;
+  runningWorkers: number;
+  queues: QueueName[];
+}
+
 export type QueueProcessor = (
   queue: QueueName,
   payload: JobPayload,
@@ -90,6 +97,7 @@ export class InMemoryQueue implements QueueAdapter {
 export interface QueueFactory {
   getQueue(name: QueueName): QueueAdapter;
   startWorkers?: (processor: QueueProcessor) => Promise<void>;
+  getHealth?: () => Promise<QueueHealth>;
   closeAll(): Promise<void>;
 }
 
@@ -109,6 +117,15 @@ export class InMemoryQueueFactory implements QueueFactory {
     // Tests deliberately keep the in-memory adapter producer-only.
   }
 
+  async getHealth(): Promise<QueueHealth> {
+    return {
+      redis: 'not_configured',
+      configuredWorkers: 0,
+      runningWorkers: 0,
+      queues: [...this.map.keys()],
+    };
+  }
+
   async closeAll(): Promise<void> {
     for (const q of this.map.values()) await q.close();
     this.map.clear();
@@ -126,9 +143,15 @@ export class InMemoryQueueFactory implements QueueFactory {
 export async function createBullMqFactory(redisUrl: string): Promise<QueueFactory | null> {
   try {
     const { Queue } = await import('bullmq');
+    const Redis = (await import('ioredis')).default;
     // Dynamic import ioredis indirectly via bullmq; need connection
     const queues = new Map<QueueName, QueueAdapter>();
-    const workers = new Map<QueueName, { close: () => Promise<void> }>();
+    const workers = new Map<QueueName, { close: () => Promise<void>; isRunning: () => boolean }>();
+    const healthRedis = new Redis(redisUrl, {
+      lazyConnect: true,
+      maxRetriesPerRequest: 1,
+      enableOfflineQueue: false,
+    });
     for (const name of QUEUES) {
       const q = new Queue(name, { connection: { url: redisUrl } });
       const adapter: QueueAdapter = {
@@ -181,11 +204,27 @@ export async function createBullMqFactory(redisUrl: string): Promise<QueueFactor
           workers.set(name, worker);
         }
       },
+      async getHealth(): Promise<QueueHealth> {
+        let redis: QueueHealth['redis'] = 'ok';
+        try {
+          await healthRedis.ping();
+        } catch {
+          redis = 'fail';
+        }
+        const runningWorkers = [...workers.values()].filter((worker) => worker.isRunning()).length;
+        return {
+          redis,
+          configuredWorkers: QUEUES.length,
+          runningWorkers,
+          queues: [...QUEUES],
+        };
+      },
       async closeAll() {
         for (const worker of workers.values()) await worker.close();
         workers.clear();
         for (const q of queues.values()) await q.close();
         queues.clear();
+        await healthRedis.quit().catch(() => healthRedis.disconnect());
       },
     };
   } catch {

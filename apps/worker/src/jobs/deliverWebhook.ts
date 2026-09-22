@@ -302,7 +302,6 @@ export async function deliverWebhook(
   return { status: 'failed', attempts };
 }
 
-
 export async function deliverPendingWebhooks(
   db: DatabaseHandle,
   options: { batchSize?: number; fetchFn?: WebhookFetch } = {},
