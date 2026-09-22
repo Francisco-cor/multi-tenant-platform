@@ -1,6 +1,7 @@
 import { lookup as dnsLookup } from 'node:dns/promises';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
+import { metrics } from '@platform/observability';
 
 export interface ResolvedWebhookTarget {
   hostname: string;
@@ -110,20 +111,30 @@ export async function resolvePublicWebhookTarget(
   try {
     url = new URL(rawUrl);
   } catch {
+    metrics.recordWebhookEgressDenied('invalid_url');
     throw new Error('webhook_url_invalid');
   }
-  if (url.protocol !== 'https:' || url.username || url.password)
+  if (url.protocol !== 'https:' || url.username || url.password) {
+    metrics.recordWebhookEgressDenied('invalid_url');
     throw new Error('webhook_url_invalid');
+  }
 
   const hostname = url.hostname.replace(/^\[|\]$/gu, '');
   const records = isIP(hostname)
     ? [{ address: hostname, family: isIP(hostname) as 4 | 6 }]
     : await lookup(hostname, { all: true, verbatim: true }).catch(() => {
+        metrics.recordWebhookEgressDenied('dns_resolution_failed');
         throw new Error('webhook_dns_resolution_failed');
       });
-  if (records.length === 0) throw new Error('webhook_dns_resolution_failed');
+  if (records.length === 0) {
+    metrics.recordWebhookEgressDenied('dns_resolution_failed');
+    throw new Error('webhook_dns_resolution_failed');
+  }
   const publicRecord = records.find((record) => !isForbiddenWebhookAddress(record.address));
-  if (!publicRecord) throw new Error('webhook_egress_private_blocked');
+  if (!publicRecord) {
+    metrics.recordWebhookEgressDenied('private_blocked');
+    throw new Error('webhook_egress_private_blocked');
+  }
 
   return {
     hostname,

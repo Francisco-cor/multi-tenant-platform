@@ -19,6 +19,7 @@ export interface MetricsSnapshot {
   dlqReplays: Map<string, number>;
   webhookLeaseRenewals: number;
   webhookLeaseLosses: number;
+  webhookEgressDenials: Map<string, number>;
   dlqSize: number;
   paymentUnknown: number;
   paymentPending: number;
@@ -42,6 +43,7 @@ class InMemoryMetrics {
   public dlqReplays = new Map<string, number>();
   public webhookLeaseRenewals = 0;
   public webhookLeaseLosses = 0;
+  public webhookEgressDenials = new Map<string, number>();
   public dlqSize = 0;
   public paymentUnknown = 0;
   public paymentPending = 0;
@@ -90,6 +92,10 @@ class InMemoryMetrics {
 
   recordWebhookLeaseLoss(): void {
     this.webhookLeaseLosses += 1;
+  }
+
+  recordWebhookEgressDenied(reason: string): void {
+    this.webhookEgressDenials.set(reason, (this.webhookEgressDenials.get(reason) ?? 0) + 1);
   }
 
   recordDlq(size: number): void {
@@ -258,6 +264,11 @@ class InMemoryMetrics {
     }
     lines.push(`webhook_lease_renewals_total ${this.webhookLeaseRenewals}`);
     lines.push(`webhook_lease_losses_total ${this.webhookLeaseLosses}`);
+    lines.push(`# HELP webhook_egress_denials_total Webhook egress requests denied by policy`);
+    lines.push(`# TYPE webhook_egress_denials_total counter`);
+    for (const [reason, count] of this.webhookEgressDenials) {
+      lines.push(`webhook_egress_denials_total{reason="${reason}"} ${count}`);
+    }
     for (const [q] of this.jobDurationMs) {
       const p95 = this.p95(q);
       lines.push(`job_duration_p95_seconds{queue="${q}"} ${(p95 / 1000).toFixed(3)}`);
@@ -302,6 +313,7 @@ class InMemoryMetrics {
     this.dlqReplays.clear();
     this.webhookLeaseRenewals = 0;
     this.webhookLeaseLosses = 0;
+    this.webhookEgressDenials.clear();
     this.dlqSize = 0;
     this.paymentUnknown = 0;
     this.paymentPending = 0;
@@ -328,6 +340,7 @@ class InMemoryMetrics {
       dlqReplays: new Map(this.dlqReplays),
       webhookLeaseRenewals: this.webhookLeaseRenewals,
       webhookLeaseLosses: this.webhookLeaseLosses,
+      webhookEgressDenials: new Map(this.webhookEgressDenials),
       dlqSize: this.dlqSize,
       paymentUnknown: this.paymentUnknown,
       paymentPending: this.paymentPending,

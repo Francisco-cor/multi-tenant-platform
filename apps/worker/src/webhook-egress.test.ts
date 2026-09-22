@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { isForbiddenWebhookAddress, resolvePublicWebhookTarget } from './webhook-egress.js';
+import { metrics } from '@platform/observability';
 
 describe('webhook egress SSRF guard', () => {
   it('blocks private, loopback, link-local, mapped and reserved addresses', () => {
@@ -24,11 +25,16 @@ describe('webhook egress SSRF guard', () => {
   });
 
   it('rejects a DNS answer that resolves to a private address', async () => {
+    metrics.reset();
     await expect(
       resolvePublicWebhookTarget('https://hooks.example.test/path', async () => [
         { address: '169.254.169.254', family: 4 },
       ]),
     ).rejects.toThrow('webhook_egress_private_blocked');
+    expect(metrics.snapshot().webhookEgressDenials.get('private_blocked')).toBe(1);
+    expect(metrics.toPrometheus()).toContain(
+      'webhook_egress_denials_total{reason="private_blocked"} 1',
+    );
   });
 
   it('returns a fixed public target for a hostname with multiple public answers', async () => {
