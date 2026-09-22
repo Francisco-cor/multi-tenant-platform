@@ -28,6 +28,67 @@ export interface MigrationRunResult {
 const migrationKinds: MigrationKind[] = ['schema', 'data', 'indexes'];
 const migrationsDirectory = join(dirname(fileURLToPath(import.meta.url)), '../migrations');
 
+/** Split only the non-transactional migration files, preserving quoted SQL. */
+function splitNonTransactionalSql(source: string): string[] {
+  const statements: string[] = [];
+  let start = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    const next = source[index + 1];
+    if (inLineComment) {
+      if (character === '\n') inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      if (character === '*' && next === '/') {
+        inBlockComment = false;
+        index += 1;
+      }
+      continue;
+    }
+    if (!inSingleQuote && !inDoubleQuote && character === '-' && next === '-') {
+      inLineComment = true;
+      index += 1;
+      continue;
+    }
+    if (!inSingleQuote && !inDoubleQuote && character === '/' && next === '*') {
+      inBlockComment = true;
+      index += 1;
+      continue;
+    }
+    if (!inDoubleQuote && character === "'" && source[index - 1] !== '\\') {
+      if (inSingleQuote && next === "'") {
+        index += 1;
+      } else {
+        inSingleQuote = !inSingleQuote;
+      }
+      continue;
+    }
+    if (!inSingleQuote && character === '"' && source[index - 1] !== '\\') {
+      if (inDoubleQuote && next === '"') {
+        index += 1;
+      } else {
+        inDoubleQuote = !inDoubleQuote;
+      }
+      continue;
+    }
+    if (!inSingleQuote && !inDoubleQuote && character === ';') {
+      const statement = source.slice(start, index).trim();
+      if (statement) statements.push(statement);
+      start = index + 1;
+    }
+  }
+
+  const last = source.slice(start).trim();
+  if (last) statements.push(last);
+  return statements;
+}
+
 async function readMigrationFiles(): Promise<MigrationFile[]> {
   const files: MigrationFile[] = [];
   const rootEntries = await readdir(migrationsDirectory, { withFileTypes: true });
@@ -246,7 +307,14 @@ export async function runMigrations(
         if (migration.transactional) {
           await client.begin(async (transaction) => apply(transaction));
         } else {
-          await apply(client);
+          for (const statement of splitNonTransactionalSql(migrationSql)) {
+            await client.unsafe(statement);
+          }
+          const durationMs = Date.now() - migrationStart;
+          await client.unsafe(
+            'insert into schema_migrations (id, kind, checksum, duration_ms) values ($1, $2, $3, $4)',
+            [migration.id, migration.kind, migration.checksum, durationMs],
+          );
         }
         const durationMsLog = Date.now() - migrationStart;
         applied.push(migration.id);
