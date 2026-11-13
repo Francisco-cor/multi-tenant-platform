@@ -1,5 +1,11 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { getCorrelation, runWithCorrelation, type CorrelationContext } from './correlation.js';
+import {
+  getCorrelation,
+  isValidSpanId,
+  isValidTraceId,
+  runWithCorrelation,
+  type CorrelationContext,
+} from './correlation.js';
 import { createLogger } from './logger.js';
 
 const logger = createLogger({ service: 'tracing' });
@@ -8,31 +14,61 @@ export interface TracingOptions {
   serviceName?: string;
   exporterEndpoint?: string;
   sampleRatio?: number; // 0-1, default 0.1 prod 1 dev
+  /** Test seam: wraps the OTel sampler constructor. */
+  samplerFactory?: (ratio: number) => unknown;
+}
+
+interface OtelSpanLike {
+  setAttribute?: (key: string, value: unknown) => void;
+  setStatus?: (status: { code: number; message?: string }) => void;
+  recordException?: (error: unknown) => void;
+  end: () => void;
+}
+
+interface OtelTracerLike {
+  startActiveSpan: (
+    name: string,
+    options: { attributes?: Record<string, unknown> },
+    fn: (span: OtelSpanLike) => void,
+  ) => void;
 }
 
 let tracingInitialized = false;
 let currentServiceName = 'api';
+let activeTracer: OtelTracerLike | null = null;
+let effectiveSampleRatio = 1;
 
 /**
- * Generate OTel-compatible traceId (32 hex chars)
+ * Generate OTel-compatible traceId (32 hex chars, never all zeros).
  */
 export function generateTraceId(): string {
-  return randomBytes(16).toString('hex');
+  let traceId = randomBytes(16).toString('hex');
+  while (traceId === '0'.repeat(32)) traceId = randomBytes(16).toString('hex');
+  return traceId;
 }
 
-/**
- * Generate spanId (16 hex chars)
- */
+/** Generate spanId (16 hex chars, never all zeros). */
 export function generateSpanId(): string {
   return randomBytes(8).toString('hex');
 }
 
+function assertValidTraceId(traceId: string): string {
+  if (!isValidTraceId(traceId)) throw new Error('traceparent_invalid_trace_id');
+  return traceId.toLowerCase();
+}
+
+function assertValidSpanId(spanId: string): string {
+  if (!isValidSpanId(spanId)) throw new Error('traceparent_invalid_span_id');
+  return spanId.toLowerCase();
+}
+
 /**
- * Build W3C traceparent header from correlation
+ * Build a valid W3C traceparent header. Invalid ids are rejected instead of
+ * being padded into a forged/zero identifier.
  */
 export function buildTraceparent(traceId: string, spanId?: string, sampled = true): string {
-  const tid = traceId.padStart(32, '0').slice(-32);
-  const sid = (spanId ?? generateSpanId()).padStart(16, '0').slice(-16);
+  const tid = assertValidTraceId(traceId);
+  const sid = spanId ? assertValidSpanId(spanId) : generateSpanId();
   const flags = sampled ? '01' : '00';
   return `00-${tid}-${sid}-${flags}`;
 }
@@ -40,8 +76,9 @@ export function buildTraceparent(traceId: string, spanId?: string, sampled = tru
 export function parseTraceparent(
   header: string,
 ): { traceId: string; spanId: string; sampled: boolean } | null {
-  const m = header.match(/^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i);
+  const m = header.match(/^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/iu);
   if (!m || !m[1] || !m[2] || !m[3]) return null;
+  if (!isValidTraceId(m[1]) || !isValidSpanId(m[2])) return null;
   return {
     traceId: m[1].toLowerCase(),
     spanId: m[2].toLowerCase(),
@@ -49,10 +86,53 @@ export function parseTraceparent(
   };
 }
 
+/** Effective trace sampling ratio, validated and clamped to [0, 1]. */
+export function resolveSampleRatio(explicit?: number): number {
+  const raw =
+    explicit ??
+    (process.env.OTEL_TRACES_SAMPLER_ARG
+      ? Number(process.env.OTEL_TRACES_SAMPLER_ARG)
+      : process.env.NODE_ENV === 'production'
+        ? 0.1
+        : 1);
+  if (!Number.isFinite(raw)) return process.env.NODE_ENV === 'production' ? 0.1 : 1;
+  return Math.min(1, Math.max(0, raw));
+}
+
+/**
+ * Create the OTel sampler for the effective ratio. Returns `undefined` when
+ * the SDK package is not installed (the caller then keeps the SDK default, and
+ * logs that no local sampler was applied).
+ */
+export async function createTraceSampler(
+  ratio: number,
+  factory?: (ratio: number) => unknown,
+): Promise<unknown> {
+  if (factory) return factory(ratio);
+  try {
+    const mod = (await import('@opentelemetry/sdk-trace-base' as string).catch(
+      () => null,
+    )) as unknown as { TraceIdRatioBasedSampler?: new (ratio: number) => unknown } | null;
+    if (mod?.TraceIdRatioBasedSampler) return new mod.TraceIdRatioBasedSampler(ratio);
+  } catch {
+    // ignore: SDK not installed
+  }
+  return undefined;
+}
+
+/** Test seam / integration point: install a tracer that creates real spans. */
+export function configureTracer(tracer: OtelTracerLike | null): void {
+  activeTracer = tracer;
+}
+
+export function getEffectiveSampleRatio(): number {
+  return effectiveSampleRatio;
+}
+
 /**
  * Initialize tracing SDK.
- * If OTEL_EXPORTER_OTLP_ENDPOINT is set, tries to load @opentelemetry/sdk-node dynamically.
- * Falls back to lightweight console instrumentation if not available.
+ * If OTEL_EXPORTER_OTLP_ENDPOINT is set, tries to load @opentelemetry/sdk-node
+ * dynamically. Falls back to correlation-only logging when not installed.
  */
 export async function initTracing(options: TracingOptions = {}): Promise<void> {
   if (tracingInitialized) return;
@@ -65,28 +145,23 @@ export async function initTracing(options: TracingOptions = {}): Promise<void> {
     process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT ??
     '';
 
-  const sampleRatio =
-    options.sampleRatio ??
-    (process.env.OTEL_TRACES_SAMPLER_ARG
-      ? Number(process.env.OTEL_TRACES_SAMPLER_ARG)
-      : process.env.NODE_ENV === 'production'
-        ? 0.1
-        : 1);
+  const sampleRatio = resolveSampleRatio(options.sampleRatio);
+  effectiveSampleRatio = sampleRatio;
+  const sampler = await createTraceSampler(sampleRatio, options.samplerFactory);
 
-  // If no endpoint, use lightweight logger tracing (still propagates correlation)
   if (!endpoint) {
     logger.info(
       {
         service: currentServiceName,
         sampling: sampleRatio,
+        sampler: sampler ? 'ratio' : 'none',
         exporter: 'console',
       },
-      'tracing initialized (console, no OTLP endpoint)',
+      'tracing initialized (correlation only, no OTLP endpoint)',
     );
     return;
   }
 
-  // Try to load OTel SDK dynamically; if not installed, fallback to console
   try {
     const sdkModule = (await import('@opentelemetry/sdk-node' as string).catch(
       () => null,
@@ -99,13 +174,12 @@ export async function initTracing(options: TracingOptions = {}): Promise<void> {
 
     if (!sdkModule) {
       logger.warn(
-        { endpoint },
-        'OTEL SDK not installed, falling back to console tracing. Install @opentelemetry/sdk-node for full tracing',
+        { endpoint, sampling: sampleRatio },
+        'OTEL SDK not installed; spans fall back to structured logs',
       );
       return;
     }
 
-    // Lazy load instrumentations if available
     let instrumentations: unknown[] = [];
     try {
       const autoMod = (await import('@opentelemetry/auto-instrumentations-node' as string).catch(
@@ -163,15 +237,30 @@ export async function initTracing(options: TracingOptions = {}): Promise<void> {
       ...(resource ? { resource } : {}),
       traceExporter: traceExporter as never,
       instrumentations,
+      // The sampler is only passed when the SDK package is present; otherwise
+      // the OTel default (ParentBased AlwaysOn) would silently override us.
+      ...(sampler ? { sampler } : {}),
     });
 
     sdk.start();
+    try {
+      const api = (await import('@opentelemetry/api' as string).catch(() => null)) as unknown as {
+        trace?: { getTracer: (name: string) => OtelTracerLike };
+      } | null;
+      if (api?.trace?.getTracer) configureTracer(api.trace.getTracer(currentServiceName));
+    } catch {
+      // ignore
+    }
     logger.info(
-      { service: currentServiceName, endpoint, sampling: sampleRatio },
+      {
+        service: currentServiceName,
+        endpoint,
+        sampling: sampleRatio,
+        sampler: sampler ? 'ratio' : 'none',
+      },
       'OTEL tracing initialized',
     );
 
-    // graceful shutdown
     const shutdown = async () => {
       try {
         await sdk.shutdown();
@@ -183,13 +272,19 @@ export async function initTracing(options: TracingOptions = {}): Promise<void> {
     globalThis.process?.once?.('SIGTERM', () => void shutdown());
     globalThis.process?.once?.('SIGINT', () => void shutdown());
   } catch (error) {
-    logger.error({ err: error, endpoint }, 'failed to init OTEL, fallback to console');
+    logger.error({ err: error, endpoint, sampling: sampleRatio }, 'failed to init OTEL');
   }
 }
 
+function emitFallbackSpanLog(level: 'debug', data: Record<string, unknown>, message: string): void {
+  logger[level](data, message);
+}
+
 /**
- * Execute fn within a span context, automatically creates traceId/spanId if missing.
- * For lightweight mode, just enriches correlation and logs start/end.
+ * Execute `fn` inside a span. When an OTel tracer is configured this creates a
+ * real span (parent/child, attributes and status). Without the SDK it degrades
+ * to correlation propagation plus debug-level logs; it never pretends to
+ * create a span.
  */
 export async function withSpan<T>(
   name: string,
@@ -205,46 +300,71 @@ export async function withSpan<T>(
   const spanId = generateSpanId();
   const start = Date.now();
 
-  const span = {
-    traceId,
-    spanId,
-    end: (attrs?: Record<string, unknown>) => {
-      const duration = Date.now() - start;
-      logger.info(
-        {
-          span: name,
-          traceId,
-          spanId,
-          durationMs: duration,
-          tenantHash: parent?.tenantHash,
-          ...(attrs ?? {}),
-          ...opts.attributes,
-        },
-        `span ${name} completed`,
-      );
-    },
-  };
-
-  // run with correlation enriched
   const nextCtx: CorrelationContext = {
     requestId: parent?.requestId ?? traceId.slice(0, 8),
     traceId,
     ...(parent?.tenantId ? { tenantId: parent.tenantId } : {}),
     ...(parent?.userId ? { userId: parent.userId } : {}),
+    ...(parent?.sampled !== undefined ? { sampled: parent.sampled } : {}),
     parentSpanId: spanId,
   };
 
   return runWithCorrelation(nextCtx, async () => {
-    logger.info(
-      {
-        span: name,
-        traceId,
-        spanId,
-        parentTraceId: parent?.traceId,
-        ...opts.attributes,
+    const attributes = { ...(opts.attributes ?? {}) };
+    if (activeTracer) {
+      return new Promise<T>((resolve, reject) => {
+        activeTracer?.startActiveSpan(name, { attributes }, (otelSpan) => {
+          let ended = false;
+          const end = (attrs?: Record<string, unknown>) => {
+            if (ended) return;
+            ended = true;
+            for (const [key, value] of Object.entries(attrs ?? {})) {
+              otelSpan.setAttribute?.(key, value as never);
+            }
+            otelSpan.end();
+          };
+          const span = { traceId, spanId, end };
+          fn(span)
+            .then((result) => {
+              end({ 'span.outcome': 'ok' });
+              resolve(result);
+            })
+            .catch((error: unknown) => {
+              try {
+                otelSpan.recordException?.(error);
+                otelSpan.setStatus?.({
+                  code: 2,
+                  message: error instanceof Error ? error.message : String(error),
+                });
+              } catch {
+                // ignore instrumentation failures
+              }
+              end({ 'span.outcome': 'error' });
+              reject(error);
+            });
+        });
+      });
+    }
+
+    const span = {
+      traceId,
+      spanId,
+      end: (attrs?: Record<string, unknown>) => {
+        emitFallbackSpanLog(
+          'debug',
+          {
+            span: name,
+            traceId,
+            spanId,
+            durationMs: Date.now() - start,
+            otel: false,
+            ...attributes,
+            ...(attrs ?? {}),
+          },
+          `span ${name} completed (no OTel SDK)`,
+        );
       },
-      `span ${name} started`,
-    );
+    };
     try {
       const result = await fn(span);
       span.end({ status: 'ok' });

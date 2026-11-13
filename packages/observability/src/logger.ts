@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { getCorrelation, hashTenant } from './correlation.js';
 
 export type LogLevel = 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal' | 'silent';
@@ -12,56 +13,173 @@ const LEVEL_ORDER: Record<LogLevel, number> = {
   silent: 100,
 };
 
-const REDACT_KEYS = new Set([
-  'password',
-  'secret',
-  'authorization',
-  'cookie',
-  'token',
-  'set-cookie',
-  'x-api-key',
-  'api_key',
-  'secret_hash',
-  'token_hash',
-  'access_token',
-  'refresh_token',
-  'client_secret',
-  'rawsecret',
-  'raw_secret',
-]);
-
-function shouldRedactKey(key: string): boolean {
-  const lower = key.toLowerCase();
-  if (REDACT_KEYS.has(lower)) return true;
-  // also redact any key containing secret/password/token
-  if (
-    lower.includes('secret') ||
-    lower.includes('password') ||
-    lower === 'authorization' ||
-    lower === 'cookie'
-  )
-    return true;
-  return false;
+/**
+ * Key normalisation: lower-case and strip separators so `api_key`, `apiKey`
+ * and `API-KEY` all reduce to `apikey`.
+ */
+export function normalizeRedactionKey(key: string): string {
+  return key.toLowerCase().replace(/[_-]/gu, '');
 }
 
-function redactValue(_key: string, value: unknown): unknown {
-  if (shouldRedactKey(String(_key))) return '[REDACTED]';
-  if (typeof value === 'string') {
-    // also redact long bearer tokens
-    if (value.startsWith('Bearer ') || value.length > 200) {
-      // if looks like token, redact
-      if (
-        value.includes('eyJ') ||
-        /^pk_[a-z0-9]+_[a-z0-9]+/i.test(value) ||
-        /^sk_[a-z0-9]+/i.test(value)
-      )
-        return '[REDACTED]';
-    }
+const EXACT_SENSITIVE_KEYS = new Set(
+  [
+    'password',
+    'passwd',
+    'pwd',
+    'secret',
+    'clientsecret',
+    'authorization',
+    'proxyauthorization',
+    'cookie',
+    'setcookie',
+    'token',
+    'accesstoken',
+    'refreshtoken',
+    'idtoken',
+    'sessiontoken',
+    'apikey',
+    'accesskey',
+    'privatekey',
+    'secretkey',
+    'encryptionkey',
+    'signingkey',
+    'webhooksecret',
+    'credential',
+    'credentials',
+    'dsn',
+    'connectionstring',
+    'databaseurl',
+    'redisurl',
+    'authorizationheader',
+    'xapikey',
+    'sig',
+    'signature',
+    'signingsecret',
+  ].map(normalizeRedactionKey),
+);
+
+const SENSITIVE_SUFFIXES = ['key', 'token', 'secret', 'password', 'passwd', 'pwd', 'credential'];
+const SENSITIVE_CONTAINS = [
+  'secret',
+  'password',
+  'credential',
+  'apikey',
+  'privatekey',
+  'accesskey',
+];
+const SENSITIVE_CONTAINERS = new Set([
+  'config',
+  'env',
+  'environment',
+  'secrets',
+  'credentials',
+  'settings',
+]);
+
+/** Keys whose values are structural and must not be entropy-redacted. */
+const SAFE_VALUE_KEYS = new Set([
+  'msg',
+  'level',
+  'time',
+  'service',
+  'requestid',
+  'traceid',
+  'spanid',
+  'parentspanid',
+  'tenanthash',
+  'useridhash',
+  'route',
+  'method',
+  'url',
+  'statuscode',
+  'durationms',
+  'span',
+  'event',
+  'action',
+  'queue',
+  'errorname',
+  'stack',
+  'message',
+  'code',
+  'reason',
+  'description',
+  'svc',
+]);
+
+export function shouldRedactKey(key: string): boolean {
+  const normalized = normalizeRedactionKey(key);
+  if (normalized.length === 0) return false;
+  if (EXACT_SENSITIVE_KEYS.has(normalized)) return true;
+  if (SENSITIVE_CONTAINS.some((fragment) => normalized.includes(fragment))) return true;
+  return SENSITIVE_SUFFIXES.some((suffix) => normalized.endsWith(suffix));
+}
+
+function shannonEntropy(value: string): number {
+  const counts = new Map<string, number>();
+  for (const character of value) counts.set(character, (counts.get(character) ?? 0) + 1);
+  let entropy = 0;
+  for (const count of counts.values()) {
+    const probability = count / value.length;
+    entropy -= probability * Math.log2(probability);
+  }
+  return entropy;
+}
+
+function characterClasses(value: string): number {
+  let classes = 0;
+  if (/[a-z]/u.test(value)) classes += 1;
+  if (/[A-Z]/u.test(value)) classes += 1;
+  if (/[0-9]/u.test(value)) classes += 1;
+  if (/[^A-Za-z0-9]/u.test(value)) classes += 1;
+  return classes;
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
+const ISO_TIMESTAMP_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?$/u;
+const URL_PATTERN = /^[a-z][a-z0-9+.-]*:\/\//iu;
+const JWT_PATTERN = /^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$/u;
+const PREFIXED_SECRET_PATTERN = /^(?:sk|pk|rk|whsec|ghp|gho|xox[baprs])_[A-Za-z0-9_-]{8,}/iu;
+const URL_WITH_CREDENTIALS_PATTERN = /^[a-z][a-z0-9+.-]*:\/\/[^/@\s]+:[^/@\s]+@/iu;
+
+/**
+ * A long, structured string that is likely to be a credential. UUIDs,
+ * timestamps, emails and credential-free URLs are explicitly safe so that
+ * normal request logs stay useful.
+ */
+export function looksLikeHighEntropySecret(value: string): boolean {
+  if (value.length < 20 || value.length > 4_096) return false;
+  if (UUID_PATTERN.test(value) || EMAIL_PATTERN.test(value) || ISO_TIMESTAMP_PATTERN.test(value)) {
+    return false;
+  }
+  if (URL_PATTERN.test(value) && !URL_WITH_CREDENTIALS_PATTERN.test(value)) return false;
+  if (JWT_PATTERN.test(value)) return true;
+  if (PREFIXED_SECRET_PATTERN.test(value)) return true;
+  if (URL_WITH_CREDENTIALS_PATTERN.test(value)) return true;
+  if (characterClasses(value) < 3) return false;
+  return shannonEntropy(value) >= 4;
+}
+
+function isSensitiveContainer(context: readonly string[]): boolean {
+  return context.some((segment) => SENSITIVE_CONTAINERS.has(normalizeRedactionKey(segment)));
+}
+
+function redactValue(key: string, value: unknown, sensitiveContext = false): unknown {
+  if (shouldRedactKey(key)) return '[REDACTED]';
+  if (typeof value !== 'string') return value;
+  const normalized = normalizeRedactionKey(key);
+  if (SAFE_VALUE_KEYS.has(normalized)) return value;
+  if (value.startsWith('Bearer ') || value.startsWith('Basic ')) return '[REDACTED]';
+  if (looksLikeHighEntropySecret(value)) return '[REDACTED]';
+  // Inside config/env/secrets containers an opaque 20+ char value is treated
+  // as a credential even if it does not match a known prefix.
+  if (sensitiveContext && value.length >= 20 && characterClasses(value) >= 2) {
+    if (!URL_PATTERN.test(value) || URL_WITH_CREDENTIALS_PATTERN.test(value)) return '[REDACTED]';
   }
   return value;
 }
 
-function cloneAndRedact(obj: unknown, depth = 0): unknown {
+function cloneAndRedact(obj: unknown, depth = 0, context: readonly string[] = []): unknown {
   if (depth > 6) return '[MAX_DEPTH]';
   if (obj === null || obj === undefined) return obj;
   if (typeof obj === 'string' || typeof obj === 'number' || typeof obj === 'boolean') return obj;
@@ -73,29 +191,20 @@ function cloneAndRedact(obj: unknown, depth = 0): unknown {
     };
   }
   if (Array.isArray(obj)) {
-    return obj.map((v) => cloneAndRedact(v, depth + 1));
+    return obj.map((value) => cloneAndRedact(value, depth + 1, context));
   }
   if (typeof obj === 'object') {
     const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-      // also check dotted paths
-      const redactedKey = shouldRedactKey(k);
-      if (redactedKey) {
-        out[k] = '[REDACTED]';
+    const sensitiveContext = isSensitiveContainer(context);
+    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
+      if (shouldRedactKey(key)) {
+        out[key] = '[REDACTED]';
         continue;
       }
-      // special handling for headers objects
-      if (k === 'headers' && typeof v === 'object' && v !== null) {
-        const headers = v as Record<string, unknown>;
-        const redactedHeaders: Record<string, unknown> = {};
-        for (const [hk, hv] of Object.entries(headers)) {
-          if (shouldRedactKey(hk)) redactedHeaders[hk] = '[REDACTED]';
-          else redactedHeaders[hk] = hv;
-        }
-        out[k] = redactedHeaders;
-        continue;
-      }
-      out[k] = cloneAndRedact(redactValue(k, v), depth + 1);
+      out[key] = cloneAndRedact(redactValue(key, value, sensitiveContext), depth + 1, [
+        ...context,
+        key,
+      ]);
     }
     return out;
   }
@@ -140,7 +249,6 @@ function formatLog(
     else if (typeof obj.msg === 'string') msg = obj.msg as string;
   }
 
-  // inject correlation
   if (correlation) {
     if (correlation.requestId) obj.requestId = correlation.requestId;
     if (correlation.traceId) obj.traceId = correlation.traceId;
@@ -149,17 +257,10 @@ function formatLog(
     if (correlation.userId) obj.userIdHash = hashTenant(correlation.userId);
   }
 
-  // inject service
   obj.service = service;
 
-  // also hash tenantId if present directly in log
   if (typeof obj.tenantId === 'string' && !obj.tenantHash) {
     obj.tenantHash = hashTenant(obj.tenantId as string);
-    // optionally keep tenantId redacted? We keep hash only, delete raw if hash present and not explicitly allowed
-    // For audit, we keep raw tenantId is not PII, but for privacy we hash.
-    // Keep both? We hash and keep raw for debug? Policy: logs use hash, not raw.
-    // So we remove raw to avoid high cardinality? Keep hash only.
-    // But for debugging, keep raw if env LOG_PII=1. Default redact.
     if (process.env.LOG_PII !== '1') {
       delete obj.tenantId;
     }
@@ -182,83 +283,55 @@ function shouldLog(current: LogLevel, target: LogLevel): boolean {
   return LEVEL_ORDER[target] >= LEVEL_ORDER[current];
 }
 
+function write(level: LogLevel, line: string): void {
+  if (level === 'error' || level === 'fatal') {
+    console.error(line);
+  } else if (level === 'warn') {
+    console.warn(line);
+  } else {
+    console.log(line);
+  }
+}
+
+/** Stable, non-reversible fingerprint used for debugging without leaking data. */
+export function redactionFingerprint(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 8);
+}
+
 export function createLogger(options: LoggerOptions = {}): StructuredLogger {
   const level: LogLevel =
     (options.level as LogLevel) ?? (process.env.LOG_LEVEL as LogLevel) ?? 'info';
   const service = options.service ?? 'api';
   const baseBindings: Record<string, unknown> = {};
 
-  const sink = (lvl: LogLevel, a: Record<string, unknown> | string, b?: string) => {
-    if (!shouldLog(level, lvl)) return;
-    const line = formatLog(lvl, service, baseBindings, a, b);
-    // Use appropriate console method but always JSON to stdout/stderr
-    if (lvl === 'error' || lvl === 'fatal') {
-      console.error(line);
-    } else if (lvl === 'warn') {
-      console.warn(line);
-    } else {
-      console.log(line);
-    }
+  const makeLogger = (bindings: Record<string, unknown>): StructuredLogger => {
+    const emit = (lvl: LogLevel, a: Record<string, unknown> | string, b?: string) => {
+      if (!shouldLog(level, lvl)) return;
+      write(lvl, formatLog(lvl, service, bindings, a as never, b));
+    };
+    return {
+      level,
+      service,
+      trace: (a, b) => emit('trace', a, b),
+      debug: (a, b) => emit('debug', a, b),
+      info: (a, b) => emit('info', a, b),
+      warn: (a, b) => emit('warn', a, b),
+      error: (a, b) => emit('error', a, b),
+      fatal: (a, b) => emit('fatal', a, b),
+      child: (childBindings) =>
+        makeLogger({
+          ...bindings,
+          ...(cloneAndRedact(childBindings) as Record<string, unknown>),
+        }),
+    };
   };
 
-  const logger: StructuredLogger = {
-    level,
-    service,
-    trace: (a, b) => sink('trace', a as never, b),
-    debug: (a, b) => sink('debug', a as never, b),
-    info: (a, b) => sink('info', a as never, b),
-    warn: (a, b) => sink('warn', a as never, b),
-    error: (a, b) => sink('error', a as never, b),
-    fatal: (a, b) => sink('fatal', a as never, b),
-    child: (bindings) => {
-      const childBindings = {
-        ...baseBindings,
-        ...(cloneAndRedact(bindings) as Record<string, unknown>),
-      };
-      // create child that merges bindings
-      const childOpts: LoggerOptions = { level, service };
-      const child = createLogger(childOpts);
-      // override format to include child bindings
-      const childLogger: StructuredLogger = {
-        ...child,
-        trace: (a, b) => {
-          const line = formatLog('trace', service, childBindings, a as never, b);
-          if (shouldLog(level, 'trace')) console.log(line);
-        },
-        debug: (a, b) => {
-          const line = formatLog('debug', service, childBindings, a as never, b);
-          if (shouldLog(level, 'debug')) console.log(line);
-        },
-        info: (a, b) => {
-          const line = formatLog('info', service, childBindings, a as never, b);
-          if (shouldLog(level, 'info')) console.log(line);
-        },
-        warn: (a, b) => {
-          const line = formatLog('warn', service, childBindings, a as never, b);
-          if (shouldLog(level, 'warn')) console.warn(line);
-        },
-        error: (a, b) => {
-          const line = formatLog('error', service, childBindings, a as never, b);
-          if (shouldLog(level, 'error')) console.error(line);
-        },
-        fatal: (a, b) => {
-          const line = formatLog('fatal', service, childBindings, a as never, b);
-          if (shouldLog(level, 'fatal')) console.error(line);
-        },
-        child: (b2) => createLogger({ level, service }).child({ ...childBindings, ...b2 }),
-      };
-      return childLogger;
-    },
-  };
-
+  const logger = makeLogger(baseBindings);
   // expose pino-like interface for Fastify compatibility
-  // Fastify checks logger.child and logger.level
   (logger as unknown as Record<string, unknown>).child = logger.child;
-
   return logger;
 }
 
-// Default logger for worker/api shared
 export const logger = createLogger({ service: process.env.OTEL_SERVICE_NAME ?? 'api' });
 
 // Re-export hash for tests

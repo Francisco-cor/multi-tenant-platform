@@ -10,7 +10,7 @@
     "build": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "lint": "eslint --config ../../eslint.config.mjs src",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",

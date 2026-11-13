@@ -7,6 +7,9 @@ export {
   extractCorrelation,
   correlationHeaders,
   hashTenant,
+  sanitizeRequestId,
+  isValidTraceId,
+  isValidSpanId,
 } from './correlation.js';
 export * from './logger.js';
 export * from './metrics.js';
@@ -19,6 +22,10 @@ export {
   withSpan,
   getActiveTraceId,
   spanHash,
+  resolveSampleRatio,
+  createTraceSampler,
+  configureTracer,
+  getEffectiveSampleRatio,
 } from './tracing.js';
 
 import { correlationHeaders } from './correlation.js';
