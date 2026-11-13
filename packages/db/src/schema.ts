@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   boolean,
   index,
   integer,
@@ -282,7 +283,7 @@ export const processedJobs = pgTable(
     leaseUntil: timestamp('lease_until', { withTimezone: true }),
     leaseToken: text('lease_token'),
     /** Monotonic takeover counter: every new lease claim increments it. */
-    leaseFence: integer('lease_fence').notNull().default(0),
+    leaseFence: bigint('lease_fence', { mode: 'number' }).notNull().default(0),
   },
   (table) => [index('processed_jobs_tenant_idx').on(table.tenantId, table.queue)],
 );

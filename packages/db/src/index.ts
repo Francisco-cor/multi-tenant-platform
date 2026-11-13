@@ -38,6 +38,13 @@ export {
   type PurgeSessionsResult,
 } from './jobs/purgeSessions.js';
 export {
+  claimProcessedJob,
+  completeProcessedJob,
+  heartbeatProcessedJob,
+  type ClaimJobInput,
+  type ClaimJobResult,
+} from './jobs/processedJobs.js';
+export {
   purgeDlqJobs,
   purgeOutboxEvents,
   purgeProcessedJobs,

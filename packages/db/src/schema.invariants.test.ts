@@ -2,6 +2,8 @@ import { sql } from 'drizzle-orm';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  claimProcessedJob,
+  completeProcessedJob,
   createDatabase,
   purgeExpiredSessions,
   purgeOutboxEvents,
@@ -34,7 +36,6 @@ suite('schema invariants (tenant integrity, idempotency, retention)', () => {
   let tenantB: string;
   let userA: string;
   let branchA: string;
-  let productA: string;
 
   beforeAll(async () => {
     const connectionString = process.env.DATABASE_URL;
@@ -60,12 +61,6 @@ suite('schema invariants (tenant integrity, idempotency, retention)', () => {
       await admin`
         insert into branches (tenant_id, slug, name)
         values (${tenantA}, 'inv-branch', 'Invariants branch') returning id
-      `
-    )[0]!.id;
-    productA = (
-      await admin`
-        insert into products (tenant_id, sku, name)
-        values (${tenantA}, 'inv-sku', 'Invariants product') returning id
       `
     )[0]!.id;
   });
@@ -276,6 +271,58 @@ suite('schema invariants (tenant integrity, idempotency, retention)', () => {
 
     const purged = await purgeExpiredSessions(adminDb.db, { batchSize: 100 });
     expect(purged.deletedCount).toBeGreaterThanOrEqual(1);
+  });
+
+  it('claims, fences and completes worker jobs through the helper contract', async () => {
+    const jobId = 'helper-' + crypto.randomUUID();
+    const first = await withTenantTransaction(
+      appDb,
+      { tenantId: tenantA, requestId: 'claim-1' },
+      (tx) => claimProcessedJob(tx, { jobId, tenantId: tenantA, queue: 'q', token: 'token-1' }),
+    );
+    expect(first).toEqual({ claimed: true, fence: 0 });
+
+    const second = await withTenantTransaction(
+      appDb,
+      { tenantId: tenantA, requestId: 'claim-2' },
+      (tx) => claimProcessedJob(tx, { jobId, tenantId: tenantA, queue: 'q', token: 'token-2' }),
+    );
+    expect(second.claimed).toBe(false);
+
+    const lost = await withTenantTransaction(
+      appDb,
+      { tenantId: tenantA, requestId: 'complete-lost' },
+      (tx) =>
+        completeProcessedJob(tx, {
+          jobId,
+          tenantId: tenantA,
+          leaseToken: 'token-2',
+          result: { ok: true },
+        }),
+    );
+    expect(lost).toBe('lease_lost');
+
+    const completed = await withTenantTransaction(
+      appDb,
+      { tenantId: tenantA, requestId: 'complete' },
+      (tx) =>
+        completeProcessedJob(tx, {
+          jobId,
+          tenantId: tenantA,
+          leaseToken: 'token-1',
+          result: { ok: true },
+        }),
+    );
+    expect(completed).toBe('completed');
+  });
+
+  it('revokes the old definer helpers from the tenant role', async () => {
+    const rows = await admin.unsafe<{ allowed: boolean | null; legacy: string | null }[]>(
+      "select has_function_privilege('platform_app', 'platform_list_memberships_for_user(uuid)', 'EXECUTE') as allowed, " +
+        "to_regprocedure('platform_get_product_by_sku(uuid,text)')::text as legacy",
+    );
+    expect(rows[0]?.allowed).toBe(false);
+    expect(rows[0]?.legacy).toBeNull();
   });
 
   it('keeps the new table RLS-enabled and tenant-scoped', async () => {
