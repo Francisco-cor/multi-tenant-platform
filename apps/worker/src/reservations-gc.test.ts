@@ -66,6 +66,30 @@ describe('reservation expiry (P1-8)', () => {
     expect(movement).toContain('not exists');
     expect(movement).toContain("'consumed'");
   });
+
+  it('falls back to the checkout correlation when the order was not linked (P1-8)', async () => {
+    workerMetrics.reset();
+    let reservationUpdates = 0;
+    const fake = createFakeDatabase(({ text }) => {
+      if (text.includes('update inventory_reservations')) {
+        reservationUpdates++;
+        // First (order_id) pass finds nothing; the correlation fallback links it.
+        return reservationUpdates === 1
+          ? []
+          : [{ id: reservationId, branch_id: branchId, product_id: productId, quantity: 1 }];
+      }
+      return [];
+    });
+
+    const tx = { execute: fake.handle.db.execute } as never;
+    const consumed = await consumeOrderReservations(tx, { tenantId, orderId });
+    expect(consumed).toBe(1);
+    const fallback = fake.queries.filter((q) => q.includes('update inventory_reservations'))[1];
+    expect(fallback).toContain('order_id is null');
+    expect(fallback).toContain("ev.event_type = 'order.created'");
+    expect(fallback).toContain('inventory_movements');
+    expect(workerMetrics.getCounter('reservation_order_link_fallback_total')).toBe(1);
+  });
 });
 
 describe('file GC (P2-9)', () => {

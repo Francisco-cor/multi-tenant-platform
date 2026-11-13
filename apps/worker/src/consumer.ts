@@ -15,7 +15,7 @@ import { redriveDeadLetterEvents } from './relay/outboxRelay.js';
 import { createPaymentProvider } from './providers/createPaymentProvider.js';
 import type { PaymentProvider } from './providers/paymentProvider.js';
 import { createWorkerObjectStore } from './s3-delete.js';
-import { processJob, type JobContext } from './processor.js';
+import { processJob, queueConfig, runWithTimeout, type JobContext } from './processor.js';
 import type { JobPayload, QueueName, QueueProcessor } from './queues.js';
 
 /**
@@ -52,7 +52,7 @@ async function processGlobalMaintenance(
       if (!paymentProvider) throw new Error('payment_provider_not_configured');
       return reconcilePayments(globalDb, paymentProvider, signal ? { signal } : {});
     case 'maintenance.gc_files':
-      return gcFiles(globalDb, createWorkerObjectStore());
+      return gcFiles(globalDb, createWorkerObjectStore(), signal ? { signal } : {});
     case 'maintenance.redrive_dead_letter':
       return redriveDeadLetterEvents(globalDb, { limit: 100 });
     default:
@@ -82,7 +82,12 @@ export function createWorkerProcessor(
   ) => {
     if (payload.scope === 'global') {
       const start = Date.now();
-      const result = await processGlobalMaintenance(globalDb, payload, paymentProvider);
+      // Maintenance jobs do not go through `processJob`, so the deadline and its
+      // abort signal must be applied here too (P1-5).
+      const result = await runWithTimeout(
+        (signal) => processGlobalMaintenance(globalDb, payload, paymentProvider, signal),
+        queueConfig(queue).timeoutMs,
+      );
       metrics.recordJobDuration(queue, Date.now() - start);
       return { deduped: false, result };
     }

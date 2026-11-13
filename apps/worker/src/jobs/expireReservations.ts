@@ -1,11 +1,19 @@
 import { sql } from '@platform/db';
 import type { DatabaseExecutor, DatabaseHandle } from '@platform/db';
 import { workerGlobalTransaction } from '../tenant-db.js';
+import { workerMetrics } from '../worker-metrics.js';
 
 export interface ExpireReservationsResult {
   expiredCount: number;
   skippedPaidCount: number;
   durationMs: number;
+}
+
+/** Reservations consumed through the correlation fallback (API link missing). */
+export interface ConsumeReservationsResult {
+  consumed: number;
+  /** True when the reservations were matched by request correlation, not `order_id`. */
+  fallback: boolean;
 }
 
 /**
@@ -14,12 +22,18 @@ export interface ExpireReservationsResult {
  * Idempotent by construction: only `active` rows transition, and the movement
  * row is inserted only when its `consume:<reservation>` correlation id is not
  * present yet. Safe to call from every payment path (paid, recovered, replayed).
+ *
+ * The API is expected to populate `inventory_reservations.order_id` at
+ * checkout. Until it does, a paid order would silently leave its holds active
+ * and expiry would release the stock after the sale, so a bounded fallback also
+ * consumes unlinked reservations whose `inventory.reserved` movement shares the
+ * `order.created` outbox correlation id (same checkout request, same branch).
  */
 export async function consumeOrderReservations(
   tx: DatabaseExecutor,
   input: { tenantId: string; orderId: string },
 ): Promise<number> {
-  const consumed = await tx.execute<{
+  const direct = await tx.execute<{
     id: string;
     branch_id: string;
     product_id: string;
@@ -32,6 +46,45 @@ export async function consumeOrderReservations(
       and status='active'
     returning id, branch_id, product_id, quantity
   `);
+
+  let consumed = direct;
+  let fallback = false;
+  if (consumed.length === 0) {
+    consumed = await tx.execute<{
+      id: string;
+      branch_id: string;
+      product_id: string;
+      quantity: number;
+    }>(sql`
+      update inventory_reservations r
+      set status='consumed', order_id=${input.orderId}::uuid, updated_at=now()
+      where r.tenant_id=${input.tenantId}::uuid
+        and r.order_id is null
+        and r.status='active'
+        and r.branch_id = (
+          select o.branch_id from orders o
+          where o.id=${input.orderId}::uuid and o.tenant_id=${input.tenantId}::uuid
+        )
+        and exists (
+          select 1
+          from inventory_movements m
+          join outbox_events ev
+            on ev.tenant_id = m.tenant_id
+           and ev.correlation_id = m.correlation_id
+           and ev.aggregate_type = 'order'
+           and ev.aggregate_id = ${input.orderId}::uuid
+           and ev.event_type = 'order.created'
+          where m.tenant_id = r.tenant_id
+            and m.branch_id = r.branch_id
+            and m.product_id = r.product_id
+            and m.reason = 'reserve'
+        )
+      returning r.id, r.branch_id, r.product_id, r.quantity
+    `);
+    fallback = consumed.length > 0;
+    if (fallback) workerMetrics.increment('reservation_order_link_fallback_total', consumed.length);
+  }
+
   for (const reservation of consumed) {
     const correlationId = `consume:${reservation.id}`;
     await tx.execute(sql`

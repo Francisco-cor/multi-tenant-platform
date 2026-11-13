@@ -89,6 +89,22 @@ describe('webhook delivery deadline (P1-7)', () => {
     expect(failureUpdate).toBeDefined();
   });
 
+  it('enforces the deadline on the replay path without a lease (P1-7)', async () => {
+    vi.useFakeTimers();
+    process.env.WEBHOOK_SECRET_ENCRYPTION_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
+    workerMetrics.reset();
+    const fake = webhookDatabase();
+
+    const running = deliverWebhook(fake.handle, deliveryId, tenantId, {
+      deliveryTimeoutMs: 1_000,
+      fetchFn: () => new Promise<Response>(() => undefined),
+    });
+
+    await vi.advanceTimersByTimeAsync(1_100);
+    await expect(running).resolves.toMatchObject({ status: 'retrying', attempts: 1 });
+    expect(workerMetrics.getCounter('webhook_timeouts_total')).toBe(1);
+  });
+
   it('continues the batch when one delivery row is missing (P2-2)', async () => {
     process.env.WEBHOOK_SECRET_ENCRYPTION_KEY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
     const otherDeliveryId = '44444444-4444-4444-4444-444444444444';

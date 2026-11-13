@@ -88,7 +88,8 @@ export class InMemoryQueue implements QueueAdapter {
 
   async add(payload: JobPayload, opts?: QueueAddOptions): Promise<QueueAddResult> {
     const jobId =
-      opts?.jobId ?? deterministicJobId(payload.tenantId, payload.aggregateId, payload.eventType);
+      opts?.jobId ??
+      deterministicJobId(payload.tenantId, payload.aggregateId, payload.eventType, payload.eventId);
     // Dedupe by jobId deterministically: if already seen, skip (idempotent publish)
     if (this.seen.has(jobId)) return { jobId, accepted: false };
     this.seen.add(jobId);
@@ -113,7 +114,8 @@ export class InMemoryQueue implements QueueAdapter {
   // For testing: allow manual re-add of same jobId to simulate duplicate publish after relay retry
   async addForce(payload: JobPayload, opts?: QueueAddOptions): Promise<QueueAddResult> {
     const jobId =
-      opts?.jobId ?? deterministicJobId(payload.tenantId, payload.aggregateId, payload.eventType);
+      opts?.jobId ??
+      deterministicJobId(payload.tenantId, payload.aggregateId, payload.eventType, payload.eventId);
     const storedOpts: QueueAddOptions | undefined = opts ? { ...opts } : undefined;
     this.jobs.push({ payload, opts: storedOpts, jobId });
     return { jobId, accepted: true };
@@ -194,7 +196,12 @@ export async function createBullMqFactory(redisUrl: string): Promise<QueueFactor
           const config = queueConfig(name);
           const jobId =
             opts?.jobId ??
-            deterministicJobId(payload.tenantId, payload.aggregateId, payload.eventType);
+            deterministicJobId(
+              payload.tenantId,
+              payload.aggregateId,
+              payload.eventType,
+              payload.eventId,
+            );
           const existing = await q.getJob(jobId).catch(() => undefined);
           if (existing) return { jobId, accepted: false };
           const addOpts: Record<string, unknown> = {
@@ -241,7 +248,12 @@ export async function createBullMqFactory(redisUrl: string): Promise<QueueFactor
               const payload = job.data as JobPayload;
               const jobId = String(
                 job.id ??
-                  deterministicJobId(payload.tenantId, payload.aggregateId, payload.eventType),
+                  deterministicJobId(
+                    payload.tenantId,
+                    payload.aggregateId,
+                    payload.eventType,
+                    payload.eventId,
+                  ),
               );
               try {
                 return await processor(name, payload, jobId, {

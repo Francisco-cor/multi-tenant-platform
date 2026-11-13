@@ -84,7 +84,7 @@ async function writeFinalFailureToDlq(
  * promise only settles once `fn` settles, so the dedupe claim is never released
  * while the previous attempt is still running (P1-5).
  */
-async function runWithTimeout<T>(
+export async function runWithTimeout<T>(
   fn: (signal: AbortSignal) => Promise<T>,
   timeoutMs: number,
 ): Promise<T> {
