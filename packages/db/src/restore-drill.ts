@@ -49,7 +49,11 @@ function quoteIdentifier(identifier: string): string {
 }
 
 function quoteLiteral(value: string): string {
-  return String.fromCharCode(39) + value.replaceAll(String.fromCharCode(39), "''") + String.fromCharCode(39);
+  return (
+    String.fromCharCode(39) +
+    value.replaceAll(String.fromCharCode(39), "''") +
+    String.fromCharCode(39)
+  );
 }
 
 /** All business tables, derived from the catalog instead of a hand-picked list. */
@@ -195,7 +199,8 @@ async function verifyRestore(
   const missingTables = Object.keys(sourceFingerprints).filter(
     (table) => !(table in targetFingerprints),
   );
-  if (missingTables.length > 0) throw new Error('restore_missing_tables: ' + missingTables.join(','));
+  if (missingTables.length > 0)
+    throw new Error('restore_missing_tables: ' + missingTables.join(','));
 
   for (const [table, sourcePrint] of Object.entries(sourceFingerprints)) {
     const targetPrint = targetFingerprints[table];

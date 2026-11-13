@@ -55,14 +55,13 @@ export async function createBackup(
 
   // Validate the archive before it is considered a backup: a truncated custom
   // dump has a plausible size and would only fail months later, during restore.
-  await runPostgresTool('pg_restore', 'PG_RESTORE_BIN', connectionString, [
-    '--list',
-    outputPath,
-  ]);
+  await runPostgresTool('pg_restore', 'PG_RESTORE_BIN', connectionString, ['--list', outputPath]);
 
   const outputStats = await stat(outputPath);
   if (outputStats.size === 0) throw new Error('backup_empty: ' + outputPath);
-  const sha256 = createHash('sha256').update(await readFile(outputPath)).digest('hex');
+  const sha256 = createHash('sha256')
+    .update(await readFile(outputPath))
+    .digest('hex');
   const database = new URL(connectionString).pathname.replace(/^\/+/, '') || 'unknown';
   return {
     bytes: outputStats.size,

@@ -74,12 +74,7 @@ export function deterministicDedupeKey(input: {
   eventType: string;
   payload: unknown;
 }): string {
-  return deterministicEventId(
-    input.tenantId,
-    input.aggregateId,
-    input.eventType,
-    input.payload,
-  );
+  return deterministicEventId(input.tenantId, input.aggregateId, input.eventType, input.payload);
 }
 
 export async function writeOutboxEvent(

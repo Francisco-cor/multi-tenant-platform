@@ -229,7 +229,9 @@ async function findInvalidIndexes(client: postgres.Sql): Promise<string[]> {
 async function dropInvalidIndexes(client: postgres.Sql): Promise<string[]> {
   const invalid = await findInvalidIndexes(client);
   for (const relname of invalid) {
-    await client.unsafe('drop index concurrently if exists "' + relname.replaceAll('"', '""') + '"');
+    await client.unsafe(
+      'drop index concurrently if exists "' + relname.replaceAll('"', '""') + '"',
+    );
   }
   return invalid;
 }
@@ -250,11 +252,9 @@ export async function runMigrations(
   const migrationFiles = await readMigrationFiles();
   const quote = String.fromCharCode(39);
   // Advisory-lock acquisition window. Distinct from lock_timeout (DDL locks).
-  const migrationLockTimeoutMs = readTimeoutMilliseconds(
-    'MIGRATION_LOCK_TIMEOUT_MS',
-    10000,
-    { allowZero: false },
-  );
+  const migrationLockTimeoutMs = readTimeoutMilliseconds('MIGRATION_LOCK_TIMEOUT_MS', 10000, {
+    allowZero: false,
+  });
   const migrationStatementTimeoutMs = readTimeoutMilliseconds(
     'MIGRATION_STATEMENT_TIMEOUT_MS',
     30000,
@@ -413,7 +413,9 @@ export async function runMigrations(
           }
           const remaining = await findInvalidIndexes(client);
           if (remaining.length > 0) {
-            throw new Error('migration_invalid_index: ' + migration.id + ': ' + remaining.join(','));
+            throw new Error(
+              'migration_invalid_index: ' + migration.id + ': ' + remaining.join(','),
+            );
           }
           await record(client, Date.now() - migrationStart);
           await client.unsafe(`set statement_timeout = '${migrationStatementTimeoutMs}ms'`);

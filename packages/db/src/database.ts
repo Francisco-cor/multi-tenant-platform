@@ -75,10 +75,7 @@ interface RolePrivilegeRow {
   rolbypassrls: boolean;
 }
 
-export async function assertRoleIsUnprivileged(
-  client: postgres.Sql,
-  role: string,
-): Promise<void> {
+export async function assertRoleIsUnprivileged(client: postgres.Sql, role: string): Promise<void> {
   const rows = (await client.unsafe(
     'select rolsuper, rolbypassrls from pg_roles where rolname = $1',
     [role],
