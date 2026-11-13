@@ -371,6 +371,28 @@ suite('postgres RLS — last barrier (platform_app without tenant)', () => {
       expect(sqlState(error)).toBe('42501');
       const outbox = await worker.unsafe('select count(*) from outbox_events');
       expect(outbox).toHaveLength(1);
+
+      const inserted = await worker`
+        insert into outbox_events (tenant_id, aggregate_type, aggregate_id, event_type, payload)
+        values (${tenantA}::uuid, 'generic', ${branchA}::uuid, 'worker.grant', '{}'::jsonb)
+        returning id
+      `;
+      expect(inserted).toHaveLength(1);
+      const updated = await worker`
+        update outbox_events
+        set status = 'claimed', attempts = attempts + 1, updated_at = now()
+        where id = ${inserted[0]!.id}::uuid
+        returning id
+      `;
+      expect(updated).toHaveLength(1);
+
+      let deleteError: unknown;
+      try {
+        await worker`delete from outbox_events where id = ${inserted[0]!.id}::uuid`;
+      } catch (caught) {
+        deleteError = caught;
+      }
+      expect(sqlState(deleteError)).toBe('42501');
     } finally {
       await worker.unsafe('reset role').catch(() => undefined);
       await worker.end({ timeout: 5 });
