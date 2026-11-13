@@ -4,12 +4,19 @@ import { canTransition } from '@platform/domain';
 import { metrics } from '@platform/observability';
 import type { JobPayload } from '../queues.js';
 import type { PaymentProvider } from '../providers/paymentProvider.js';
+import { providerRefFromError } from '../providers/paymentProvider.js';
 import { workerTenantTransaction } from '../tenant-db.js';
+import { consumeOrderReservations } from './expireReservations.js';
 
 export interface ProcessPaymentResult {
   status: string;
   providerRef?: string | undefined;
   deduped?: boolean | undefined;
+}
+
+export interface ProcessPaymentOptions {
+  /** Aborted when the job deadline expires; forwarded to provider I/O. */
+  signal?: AbortSignal | undefined;
 }
 
 /**
@@ -19,13 +26,15 @@ export interface ProcessPaymentResult {
  * - Provider call outside tx with same key (idempotent)
  * - Second tx: SELECT ... FOR UPDATE again, applies pending->paid/failed/unknown + orders status + outbox
  * - If status already terminal, skips provider call (idempotent retry)
- * - Writes outbox payment events for downstream consumers (inventory, webhooks)
- * - Metrics for unknown/pending
+ * - Persists `provider_ref` even when the charge outcome is unknown so the
+ *   reconciler can use a real provider id (P1-4)
+ * - Consumes inventory reservations when the order is paid (P1-8)
  */
 export async function processPayment(
   db: DatabaseHandle,
   payload: JobPayload,
   provider: PaymentProvider,
+  options: ProcessPaymentOptions = {},
 ): Promise<ProcessPaymentResult> {
   const tenantId = payload.tenantId;
   const correlationId = payload.correlationId ?? payload.eventId;
@@ -93,35 +102,31 @@ export async function processPayment(
   const orderId = row.order_id;
 
   // Step 2: call provider outside tx (idempotent by providerKey)
-  let providerResult: { providerRef: string; status: string };
+  let providerResult: { providerRef?: string | undefined; status: string };
   try {
-    const chargeRes = await provider.charge({
-      amountCents,
-      currency,
-      idempotencyKey: providerKey,
-      orderId,
-      tenantId,
-      ...(row.payment_method_id ? { paymentMethodId: row.payment_method_id } : {}),
-    });
+    const chargeRes = await provider.charge(
+      {
+        amountCents,
+        currency,
+        idempotencyKey: providerKey,
+        orderId,
+        tenantId,
+        ...(row.payment_method_id ? { paymentMethodId: row.payment_method_id } : {}),
+      },
+      options.signal,
+    );
     providerResult = { providerRef: chargeRes.providerRef, status: chargeRes.status };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    // If provider threw after charge (simulated kill), the side effect is stored in FakeProvider
-    // We treat as unknown so reconciler will resolve via getStatus
-    if (msg === 'provider_killed_after_charge') {
-      // Next retry will use same key and get same ref without new charge
-      // We mark as unknown in second tx
-      providerResult = { providerRef: `killed_${providerKey.slice(0, 8)}`, status: 'unknown' };
-    } else {
-      // Network/timeout → unknown (not failed definitively)
-      providerResult = {
-        providerRef: row.provider_ref ?? `pending_${providerKey.slice(0, 8)}`,
-        status: 'unknown',
-      };
-    }
-    // We will persist unknown below with last_error
-    // Fall through to second tx with unknown status
-    const errMsg = msg;
+    // The provider may have created the charge before throwing (kill after
+    // charge, timeout after creation). Keep its real reference when it exists;
+    // never fabricate a reference that is not a provider id (P1-4).
+    const failedRef = providerRefFromError(error) ?? row.provider_ref ?? undefined;
+    providerResult = {
+      ...(failedRef ? { providerRef: failedRef } : {}),
+      status: 'unknown',
+    };
+    const errMsg = msg.slice(0, 2000);
     await workerTenantTransaction(db, tenantId, correlationId, async (tx) => {
       const current = await tx.execute<{ status: string }>(sql`
         select status from payment_attempts where id=${attemptId}::uuid and tenant_id=${tenantId}::uuid for update
@@ -138,7 +143,11 @@ export async function processPayment(
           // If invalid, force unknown
         }
         await tx.execute(sql`
-          update payment_attempts set status=${target}, last_error=${errMsg}, updated_at=now()
+          update payment_attempts
+          set status=${target},
+              provider_ref=coalesce(${providerResult.providerRef ?? null}, provider_ref),
+              last_error=left(${errMsg}, 2000),
+              updated_at=now()
           where id=${attemptId}::uuid and tenant_id=${tenantId}::uuid
         `);
         if (target === 'unknown') {
@@ -155,7 +164,7 @@ export async function processPayment(
             attemptId,
             orderId,
             providerKey,
-            providerRef: providerResult.providerRef,
+            ...(providerResult.providerRef ? { providerRef: providerResult.providerRef } : {}),
             status: target,
             error: errMsg,
           },
@@ -163,15 +172,6 @@ export async function processPayment(
         });
       }
     });
-    // For killed_after_charge we still want caller to see unknown so retry will succeed idempotently
-    // But we throw to simulate worker death? For tests we return unknown and let retry handle
-    // To simulate kill-mid-tx, the test will set provider.failNextChargeAfterProvider=true and expect first call to throw?
-    // Instead we handle: if original error was killed, we return unknown without throwing, so second retry will be deduped via provider idempotency
-    // The caller (withDedup) will mark processed; retry with same jobId will hit dedupe and not re-execute.
-    // For kill simulation where worker dies before second tx, we should throw after provider but before second tx.
-    // Our code already persisted unknown, so second retry will see providerKey same and get existing ref.
-    // To simulate true kill (no second tx), we would need to not persist second tx. But our FakeProvider already stored charge, so second retry will correctly not double charge.
-    // For simplicity, we treat killed as unknown persisted, which still demonstrates anti-double-charge.
     return { status: providerResult.status, providerRef: providerResult.providerRef };
   }
 
@@ -190,18 +190,24 @@ export async function processPayment(
     const targetStatus = providerResult.status; // paid|failed|unknown
     // If already same target, idempotent
     if (curStatus === targetStatus) {
-      return { status: curStatus, providerRef: current.provider_ref ?? providerResult.providerRef };
+      if (targetStatus === 'paid') await consumeOrderReservations(tx, { tenantId, orderId });
+      return {
+        status: curStatus,
+        providerRef: current.provider_ref ?? providerResult.providerRef,
+      };
     }
     // If current is already terminal, keep terminal
     if (curStatus === 'paid' || curStatus === 'failed') {
-      return { status: curStatus, providerRef: current.provider_ref ?? providerResult.providerRef };
+      if (curStatus === 'paid') await consumeOrderReservations(tx, { tenantId, orderId });
+      return {
+        status: curStatus,
+        providerRef: current.provider_ref ?? providerResult.providerRef,
+      };
     }
     // Validate transition
     if (!canTransition(curStatus as never, targetStatus as never)) {
-      // If invalid, map to unknown for safety rather than throw, to allow reconciler
-      // But log
-      // For example, created->paid is invalid, should go via pending
-      // We'll force unknown if transition invalid
+      // For example, created->paid is invalid, should go via pending.
+      // Force unknown if transition invalid so the reconciler can act.
       await tx.execute(sql`
         update payment_attempts set status='unknown', provider_ref=${providerResult.providerRef}, last_error=${`invalid_transition:${curStatus}->${targetStatus}`}, updated_at=now()
         where id=${attemptId}::uuid and tenant_id=${tenantId}::uuid
@@ -221,6 +227,7 @@ export async function processPayment(
         update orders set status='paid', updated_at=now()
         where id=${orderId}::uuid and tenant_id=${tenantId}::uuid and status='pending_payment'
       `);
+      await consumeOrderReservations(tx, { tenantId, orderId });
       metrics.recordPaymentPending(0);
     } else if (targetStatus === 'failed') {
       await tx.execute(sql`

@@ -69,7 +69,8 @@ export class FakePaymentProvider implements PaymentProvider {
       // Store the side effect as if provider did charge, even though caller will throw
       this.store.set(input.idempotencyKey, result);
       this.refToKey.set(providerRef, input.idempotencyKey);
-      throw new Error('provider_killed_after_charge');
+      // Carry the real provider ref so the worker can persist it before recovering.
+      throw Object.assign(new Error('provider_killed_after_charge'), { providerRef });
     }
 
     const providerRef = this.deriveRef(input.idempotencyKey);
@@ -101,6 +102,10 @@ export class FakePaymentProvider implements PaymentProvider {
       }
     }
     return stored;
+  }
+
+  async findByIdempotencyKey(idempotencyKey: string): Promise<ChargeResult | null> {
+    return this.store.get(idempotencyKey) ?? null;
   }
 
   // Test helpers
