@@ -18,7 +18,8 @@ export type WorkerCounterName =
   | 'webhook_timeouts_total'
   | 'webhook_response_too_large_total'
   | 'gc_delete_failures_total'
-  | 'dlq_replay_enqueued_total';
+  | 'dlq_replay_enqueued_total'
+  | 'reservation_order_link_fallback_total';
 
 export type WorkerGaugeName = 'dlq_oldest_age_seconds' | 'outbox_dead_letter_pending';
 

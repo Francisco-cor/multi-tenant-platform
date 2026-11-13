@@ -24,4 +24,29 @@ describe('maintenance scheduler', () => {
     expect(new Set(jobs.map((job) => job.jobId)).size).toBe(4);
     scheduler.stop();
   });
+
+  it('only reports a scheduler heartbeat when the tick enqueued (P2-6)', async () => {
+    const ticks: boolean[] = [];
+    const broken = startMaintenanceScheduler(
+      {
+        getQueue() {
+          throw new Error('redis_down');
+        },
+        closeAll: async () => undefined,
+      },
+      { startImmediately: false, onTick: (ok) => ticks.push(ok) },
+    );
+    await broken.runNow();
+    broken.stop();
+    expect(ticks).toEqual([false]);
+
+    const healthy = startMaintenanceScheduler(new InMemoryQueueFactory(), {
+      startImmediately: false,
+      paymentProviderConfigured: false,
+      onTick: (ok) => ticks.push(ok),
+    });
+    await healthy.runNow();
+    healthy.stop();
+    expect(ticks).toEqual([false, true]);
+  });
 });
