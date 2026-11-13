@@ -1,6 +1,10 @@
 export interface TenantRepositoryContext {
   tenantId: string;
   requestId: string;
+  /**
+   * Authenticated principal. Pushed to Postgres as `app.user_id` so
+   * user-scoped policies (sessions, audit actor) can be enforced by the DB.
+   */
   userId?: string;
 }
 
@@ -10,8 +14,13 @@ export function assertTenantId(tenantId: string): void {
   if (!UUID_PATTERN.test(tenantId)) throw new Error('tenant_id_invalid');
 }
 
+export function assertUserId(userId: string): void {
+  if (!UUID_PATTERN.test(userId)) throw new Error('user_id_invalid');
+}
+
 export function assertTenantRepositoryContext(context: TenantRepositoryContext): void {
   if (!context.tenantId.trim()) throw new Error('tenant_id_required');
   if (!context.requestId.trim()) throw new Error('request_id_required');
   assertTenantId(context.tenantId);
+  if (context.userId !== undefined) assertUserId(context.userId);
 }
