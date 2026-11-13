@@ -32,11 +32,9 @@ async function batchedDelete(
   keyColumn: string,
   orderColumn: string,
   options: RetentionOptions,
-  defaultDays: number,
 ): Promise<RetentionSweepResult> {
   const batchSize = options.batchSize ?? DEFAULT_BATCH_SIZE;
   const maxBatches = options.maxBatches ?? DEFAULT_MAX_BATCHES;
-  const window = intervalDays(options.olderThanDays ?? defaultDays);
   const start = Date.now();
 
   if (options.dryRun) {
@@ -91,7 +89,6 @@ export function purgeOutboxEvents(
     'id',
     'created_at',
     options,
-    7,
   );
 }
 
@@ -110,7 +107,6 @@ export function purgeWebhookDeliveries(
     'id',
     'created_at',
     options,
-    30,
   );
 }
 
@@ -126,7 +122,6 @@ export function purgeProcessedJobs(
     'job_id',
     'processed_at',
     options,
-    7,
   );
 }
 
@@ -142,7 +137,6 @@ export function purgeDlqJobs(
     'id',
     'created_at',
     options,
-    30,
   );
 }
 

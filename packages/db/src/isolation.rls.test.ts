@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  assertRoleIsUnprivileged,
   createDatabase,
   withAuthTransaction,
   withTenantTransaction,
@@ -26,7 +27,6 @@ function sqlState(error: unknown): string | undefined {
   return undefined;
 }
 
-
 suite('postgres RLS — last barrier (platform_app without tenant)', () => {
   let admin: ReturnType<typeof postgres>;
   let appDb: DatabaseHandle;
@@ -41,20 +41,19 @@ suite('postgres RLS — last barrier (platform_app without tenant)', () => {
   let productB: string;
   let appClient: ReturnType<typeof postgres>;
 
-async function tenantFailure(
-  context: { tenantId: string; requestId: string; userId?: string },
-  expected: string,
-  run: (tx: Parameters<Parameters<typeof withTenantTransaction>[2]>[0]) => Promise<unknown>,
-): Promise<void> {
-  let caught: unknown;
-  try {
-    await withTenantTransaction(appDb, context, run);
-  } catch (error) {
-    caught = error;
+  async function tenantFailure(
+    context: { tenantId: string; requestId: string; userId?: string },
+    expected: string,
+    run: (tx: Parameters<Parameters<typeof withTenantTransaction>[2]>[0]) => Promise<unknown>,
+  ): Promise<void> {
+    let caught: unknown;
+    try {
+      await withTenantTransaction(appDb, context, run);
+    } catch (error) {
+      caught = error;
+    }
+    expect(sqlState(caught)).toBe(expected);
   }
-  expect(sqlState(caught)).toBe(expected);
-}
-
 
   beforeAll(async () => {
     if (!connectionString) throw new Error('DATABASE_URL required');
@@ -122,7 +121,9 @@ async function tenantFailure(
       await admin`delete from platform_audit_log where actor_user_id in (${userA}, ${userB})`.catch(
         () => undefined,
       );
-      await admin`delete from sessions where user_id in (${userA}, ${userB})`.catch(() => undefined);
+      await admin`delete from sessions where user_id in (${userA}, ${userB})`.catch(
+        () => undefined,
+      );
       await admin`delete from memberships where tenant_id in (${tenantA}, ${tenantB})`.catch(
         () => undefined,
       );
@@ -182,14 +183,17 @@ async function tenantFailure(
   });
 
   it('enforces RLS WITH CHECK on INSERT mismatched tenant via platform_app', async () => {
-    await withTenantTransaction(appDb, { tenantId: tenantA, requestId: 'rls-check' }, async (tx) => {
-
-      const ok = await tx.execute<{ id: string }>(
-        sql`insert into branches (tenant_id, slug, name) values (${tenantA}::uuid, 'ok-branch', 'Ok') returning id`,
-      );
-      expect(ok.length).toBe(1);
-      await tx.execute(sql`delete from branches where id = ${ok[0]!.id}::uuid`);
-    });
+    await withTenantTransaction(
+      appDb,
+      { tenantId: tenantA, requestId: 'rls-check' },
+      async (tx) => {
+        const ok = await tx.execute<{ id: string }>(
+          sql`insert into branches (tenant_id, slug, name) values (${tenantA}::uuid, 'ok-branch', 'Ok') returning id`,
+        );
+        expect(ok.length).toBe(1);
+        await tx.execute(sql`delete from branches where id = ${ok[0]!.id}::uuid`);
+      },
+    );
 
     await tenantFailure({ tenantId: tenantA, requestId: 'rls-check-fail' }, '42501', (tx) =>
       tx.execute(
@@ -217,7 +221,6 @@ async function tenantFailure(
           sql`select tenant_id, user_id from platform_list_my_memberships()`,
         );
         expect(rows).toEqual([{ tenant_id: tenantB, user_id: userB }]);
-
       },
     );
 
@@ -374,6 +377,95 @@ async function tenantFailure(
     }
   });
 
+  it('keeps global audit writable by auth and readable only by the auditor', async () => {
+    const auditId = crypto.randomUUID();
+    await withAuthTransaction(
+      authDb,
+      { userId: userA, tenantId: tenantA, requestId: 'global-audit-write' },
+      async (tx) => {
+        await tx.execute(sql`
+          insert into platform_audit_log (id, actor_user_id, action, request_id, result)
+          values (${auditId}::uuid, ${userA}::uuid, 'auth.login', 'global-audit-write', 'success')
+        `);
+      },
+    );
+
+    const auditor = postgres(connectionString!, { max: 1, prepare: false });
+    try {
+      await auditor.unsafe('set role "platform_auditor"');
+      const rows = await auditor.unsafe<{ id: string }[]>(
+        `select id from platform_audit_log where id = '${auditId}'::uuid`,
+      );
+      expect(rows).toHaveLength(1);
+    } finally {
+      await auditor.unsafe('reset role').catch(() => undefined);
+      await auditor.end({ timeout: 5 });
+    }
+
+    await tenantFailure({ tenantId: tenantA, requestId: 'global-audit-read' }, '42501', (tx) =>
+      tx.execute(sql`select id from platform_audit_log limit 1`),
+    );
+  });
+
+  it('rejects privileged roles and confirms the worker has only its dispatcher grants', async () => {
+    await expect(assertRoleIsUnprivileged(admin, 'platform_app')).resolves.toBeUndefined();
+    await expect(assertRoleIsUnprivileged(admin, 'platform')).rejects.toThrow(
+      'database_role_bypasses_rls',
+    );
+
+    const privileges = await admin.unsafe<
+      {
+        delete_outbox: boolean;
+        update_status: boolean;
+        select_orders: boolean;
+        delete_dlq: boolean;
+      }[]
+    >(
+      "select has_table_privilege('platform_worker', 'outbox_events', 'DELETE') as delete_outbox, " +
+        "has_column_privilege('platform_worker', 'outbox_events', 'status', 'UPDATE') as update_status, " +
+        "has_table_privilege('platform_worker', 'orders', 'SELECT') as select_orders, " +
+        "has_table_privilege('platform_worker', 'dlq_jobs', 'DELETE') as delete_dlq",
+    );
+    expect(privileges[0]).toEqual({
+      delete_outbox: false,
+      update_status: true,
+      select_orders: false,
+      delete_dlq: false,
+    });
+  });
+
+  it('serves tenant members through tenant_users and denies global user updates', async () => {
+    const privileges = await admin.unsafe<
+      { select_email: boolean; update_email: boolean; table_update: boolean }[]
+    >(
+      "select has_column_privilege('platform_app', 'users', 'email', 'SELECT') as select_email, " +
+        "has_column_privilege('platform_app', 'users', 'email', 'UPDATE') as update_email, " +
+        "has_table_privilege('platform_app', 'users', 'UPDATE') as table_update",
+    );
+    expect(privileges[0]).toEqual({
+      select_email: true,
+      update_email: false,
+      table_update: false,
+    });
+
+    await withTenantTransaction(
+      appDb,
+      { tenantId: tenantA, requestId: 'tenant-users', userId: userA },
+      async (tx) => {
+        const rows = await tx.execute<{ id: string; email: string; membership_id: string }>(
+          sql`select id, email, membership_id from tenant_users`,
+        );
+        expect(rows.map((row) => row.id)).toEqual([userA]);
+      },
+    );
+
+    await tenantFailure(
+      { tenantId: tenantA, requestId: 'users-update', userId: userA },
+      '42501',
+      (tx) => tx.execute(sql`update users set display_name = 'forged' where id = ${userB}::uuid`),
+    );
+  });
+
   it('forces RLS even for table owner via FORCE (admin cannot bypass as platform_app)', async () => {
     const rows = await admin.unsafe<{ relrowsecurity: boolean; relforcerowsecurity: boolean }[]>(
       'select c.relrowsecurity, c.relforcerowsecurity from pg_class c ' +
@@ -381,9 +473,13 @@ async function tenantFailure(
     );
     expect(rows[0]?.relrowsecurity).toBe(true);
     expect(rows[0]?.relforcerowsecurity).toBe(true);
-    await withTenantTransaction(appDb, { tenantId: tenantA, requestId: 'force-check' }, async (tx) => {
-      const bOrg = await tx.execute(sql`select id from organizations where id = ${tenantB}`);
-      expect(bOrg.length).toBe(0);
-    });
+    await withTenantTransaction(
+      appDb,
+      { tenantId: tenantA, requestId: 'force-check' },
+      async (tx) => {
+        const bOrg = await tx.execute(sql`select id from organizations where id = ${tenantB}`);
+        expect(bOrg.length).toBe(0);
+      },
+    );
   });
 });

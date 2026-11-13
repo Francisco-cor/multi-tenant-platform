@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   claimProcessedJob,
   completeProcessedJob,
+  heartbeatProcessedJob,
   createDatabase,
   purgeExpiredSessions,
   purgeOutboxEvents,
@@ -288,6 +289,32 @@ suite('schema invariants (tenant integrity, idempotency, retention)', () => {
       (tx) => claimProcessedJob(tx, { jobId, tenantId: tenantA, queue: 'q', token: 'token-2' }),
     );
     expect(second.claimed).toBe(false);
+
+    const renewed = await withTenantTransaction(
+      appDb,
+      { tenantId: tenantA, requestId: 'heartbeat' },
+      (tx) =>
+        heartbeatProcessedJob(tx, {
+          jobId,
+          tenantId: tenantA,
+          leaseToken: 'token-1',
+          leaseMs: 60_000,
+        }),
+    );
+    expect(renewed).toBe(true);
+
+    const stale = await withTenantTransaction(
+      appDb,
+      { tenantId: tenantA, requestId: 'heartbeat-stale' },
+      (tx) =>
+        heartbeatProcessedJob(tx, {
+          jobId,
+          tenantId: tenantA,
+          leaseToken: 'token-2',
+          leaseMs: 60_000,
+        }),
+    );
+    expect(stale).toBe(false);
 
     const lost = await withTenantTransaction(
       appDb,
