@@ -44,20 +44,26 @@ suite('paid reservation consumption against Postgres (P1-8)', () => {
 
   afterAll(async () => {
     if (admin) {
-      // inventory_movements is append-only in hardened schemas: clean up what we
-      // can and never fail the suite on the immutable audit trail.
-      const cleanup = [
-        sql`delete from inventory_movements where tenant_id = ${tenantId}::uuid`,
-        sql`delete from inventory_reservations where tenant_id = ${tenantId}::uuid`,
-        sql`delete from stock_per_branch where tenant_id = ${tenantId}::uuid`,
-        sql`delete from products where tenant_id = ${tenantId}::uuid`,
-        sql`delete from outbox_events where tenant_id = ${tenantId}::uuid`,
-        sql`delete from orders where tenant_id = ${tenantId}::uuid`,
-        sql`delete from branches where tenant_id = ${tenantId}::uuid`,
-        sql`delete from organizations where id = ${tenantId}::uuid`,
-      ];
-      for (const statement of cleanup) {
-        await admin.db.execute(statement).catch(() => undefined);
+      // inventory_movements is append-only: test databases run as a privileged
+      // role, so disable triggers inside this cleanup transaction only.
+      try {
+        await admin.db.transaction(async (tx) => {
+          await tx.execute(sql`set local session_replication_role = replica`);
+          await tx.execute(
+            sql`delete from inventory_movements where tenant_id = ${tenantId}::uuid`,
+          );
+          await tx.execute(
+            sql`delete from inventory_reservations where tenant_id = ${tenantId}::uuid`,
+          );
+          await tx.execute(sql`delete from stock_per_branch where tenant_id = ${tenantId}::uuid`);
+          await tx.execute(sql`delete from products where tenant_id = ${tenantId}::uuid`);
+          await tx.execute(sql`delete from outbox_events where tenant_id = ${tenantId}::uuid`);
+          await tx.execute(sql`delete from orders where tenant_id = ${tenantId}::uuid`);
+          await tx.execute(sql`delete from branches where tenant_id = ${tenantId}::uuid`);
+          await tx.execute(sql`delete from organizations where id = ${tenantId}::uuid`);
+        });
+      } catch {
+        // Unprivileged test database: leave the audit trail behind.
       }
       await admin.close();
     }
