@@ -89,7 +89,7 @@ export async function consumeOrderReservations(
     const correlationId = `consume:${reservation.id}`;
     await tx.execute(sql`
       insert into inventory_movements (tenant_id, branch_id, product_id, delta, reason, correlation_id)
-      select ${input.tenantId}::uuid, ${reservation.branch_id}::uuid, ${reservation.product_id}::uuid, 0, 'consumed', ${correlationId}
+      select ${input.tenantId}::uuid, ${reservation.branch_id}::uuid, ${reservation.product_id}::uuid, 0, 'consume', ${correlationId}
       where not exists (
         select 1 from inventory_movements where correlation_id = ${correlationId}
       )

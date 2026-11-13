@@ -64,7 +64,8 @@ describe('reservation expiry (P1-8)', () => {
     expect(update).toContain("status='consumed'");
     const movement = fake.queries.find((q) => q.includes('insert into inventory_movements'));
     expect(movement).toContain('not exists');
-    expect(movement).toContain("'consumed'");
+    // The DB check constraint allows reason 'consume', not 'consumed'.
+    expect(movement).toContain("'consume'");
   });
 
   it('falls back to the checkout correlation when the order was not linked (P1-8)', async () => {
