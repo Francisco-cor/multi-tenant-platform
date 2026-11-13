@@ -11,17 +11,16 @@ import {
   runPostgresTool,
 } from './pg-tools.js';
 
-const verifiedTables = [
-  'users',
-  'organizations',
-  'memberships',
-  'branches',
-  'sessions',
-  'invitations',
-  'audit_log',
-  'schema_migrations',
-] as const;
-const rlsTables = ['organizations', 'memberships', 'branches', 'invitations', 'audit_log'] as const;
+interface TableFingerprint {
+  count: number;
+  digest: string;
+}
+
+interface RlsRow {
+  relname: string;
+  relrowsecurity: boolean;
+  relforcerowsecurity: boolean;
+}
 
 function argumentValue(args: string[], name: string): string | undefined {
   const index = args.indexOf(name);
@@ -49,48 +48,168 @@ function quoteIdentifier(identifier: string): string {
   return String.fromCharCode(34) + identifier + String.fromCharCode(34);
 }
 
-async function tableCounts(client: postgres.Sql): Promise<Record<string, number>> {
-  const counts: Record<string, number> = {};
-  for (const table of verifiedTables) {
-    const rows = await client.unsafe<{ count: string }[]>(
-      'select count(*)::text as count from public.' + table,
-    );
-    counts[table] = Number(rows[0]?.count ?? 0);
-  }
-  return counts;
+function quoteLiteral(value: string): string {
+  return String.fromCharCode(39) + value.replaceAll(String.fromCharCode(39), "''") + String.fromCharCode(39);
 }
 
-async function verifyRls(client: postgres.Sql): Promise<void> {
-  const rows = await client.unsafe<
-    { relname: string; relrowsecurity: boolean; relforcerowsecurity: boolean }[]
-  >(
+/** All business tables, derived from the catalog instead of a hand-picked list. */
+async function businessTables(client: postgres.Sql): Promise<string[]> {
+  const rows = await client.unsafe<{ tablename: string }[]>(
+    "select tablename from pg_tables where schemaname = 'public' " +
+      "and tablename <> 'schema_migrations' order by tablename",
+  );
+  return rows.map((row) => row.tablename);
+}
+
+/**
+ * Row counts plus an order-independent content digest. A restore that loses
+ * the payment ledger or silently truncates outbox rows cannot pass anymore.
+ */
+async function tableFingerprints(client: postgres.Sql): Promise<Record<string, TableFingerprint>> {
+  const fingerprints: Record<string, TableFingerprint> = {};
+  for (const table of await businessTables(client)) {
+    const rows = await client.unsafe<{ count: string; digest: string | null }[]>(
+      'select count(*)::text as count, ' +
+        'md5(coalesce(sum(hashtext(t::text)::bigint), 0)::text) as digest ' +
+        'from public.' +
+        quoteIdentifier(table) +
+        ' t',
+    );
+    fingerprints[table] = {
+      count: Number(rows[0]?.count ?? 0),
+      digest: rows[0]?.digest ?? '',
+    };
+  }
+  return fingerprints;
+}
+
+async function tenantTables(client: postgres.Sql): Promise<string[]> {
+  const rows = await client.unsafe<{ table_name: string }[]>(
+    'select c.relname as table_name from pg_class c ' +
+      'join pg_namespace n on n.oid = c.relnamespace ' +
+      'join pg_attribute a on a.attrelid = c.oid and a.attname = ' +
+      quoteLiteral('tenant_id') +
+      ' and not a.attisdropped ' +
+      "where n.nspname = 'public' and c.relkind = 'r'",
+  );
+  return rows.map((row) => row.table_name);
+}
+
+async function verifyRls(client: postgres.Sql): Promise<string[]> {
+  const expected = await tenantTables(client);
+  const rows = await client.unsafe<RlsRow[]>(
     'select c.relname, c.relrowsecurity, c.relforcerowsecurity ' +
       'from pg_class c join pg_namespace n on n.oid = c.relnamespace ' +
-      'where n.nspname = current_schema() and c.relname = any($1::text[])',
-    [rlsTables],
+      "where n.nspname = 'public' and c.relkind = 'r'",
   );
   const byName = new Map(rows.map((row) => [row.relname, row]));
-  for (const table of rlsTables) {
+
+  for (const table of expected) {
     const row = byName.get(table);
     if (!row?.relrowsecurity || !row.relforcerowsecurity) {
       throw new Error('rls_verification_failed: ' + table);
     }
   }
+
+  // Per-table policy assertion: a table with two policies and another with zero
+  // must not average out to "ok". WITH CHECK must be present for write paths.
+  const policies = await client.unsafe<{ tablename: string; with_check: string | null }[]>(
+    "select tablename, with_check from pg_policies where schemaname = 'public'",
+  );
+  const withCheck = new Set(
+    policies.filter((policy) => policy.with_check !== null).map((policy) => policy.tablename),
+  );
+  const missing = expected.filter((table) => !withCheck.has(table));
+  if (missing.length > 0) throw new Error('rls_policy_missing: ' + missing.join(','));
+
+  // The credential/identity tables must not be reachable without a policy even
+  // though they have no tenant_id column.
+  for (const table of ['sessions', 'platform_audit_log']) {
+    const row = byName.get(table);
+    if (!row?.relrowsecurity || !row?.relforcerowsecurity) {
+      throw new Error('rls_verification_failed: ' + table);
+    }
+  }
+
+  return expected;
+}
+
+async function verifyPrivileges(client: postgres.Sql): Promise<void> {
+  const tables = await tenantTables(client);
+  for (const table of tables) {
+    const rows = await client.unsafe<{ allowed: boolean | null }[]>(
+      'select has_table_privilege(' +
+        quoteLiteral('platform_app') +
+        ', ' +
+        quoteLiteral('public.' + table) +
+        ", 'SELECT') as allowed",
+    );
+    if (rows[0]?.allowed !== true) throw new Error('privilege_verification_failed: ' + table);
+  }
+
+  const role = await client.unsafe<{ rolsuper: boolean; rolbypassrls: boolean }[]>(
+    "select rolsuper, rolbypassrls from pg_roles where rolname = 'platform_worker'",
+  );
+  if (role[0]?.rolbypassrls || role[0]?.rolsuper) {
+    throw new Error('worker_role_bypasses_rls');
+  }
+}
+
+/**
+ * Actually uses the restored database as a tenant would: assume platform_app,
+ * bind one tenant and assert the isolation policy hides the others.
+ */
+async function verifyTenantIsolation(client: postgres.Sql): Promise<{ tenantId: string | null }> {
+  const organizations = await client.unsafe<{ id: string; total: string }[]>(
+    'select (select id::text from organizations order by id limit 1) as id, ' +
+      'count(*)::text as total from organizations',
+  );
+  const tenantId = organizations[0]?.id ?? null;
+  if (!tenantId) return { tenantId: null };
+
+  await client.begin(async (tx) => {
+    await tx.unsafe('set local role platform_app');
+    await tx.unsafe("select set_config('app.tenant_id', " + quoteLiteral(tenantId) + ', true)');
+    const visible = await tx.unsafe<{ count: string }[]>(
+      'select count(*)::text as count from organizations',
+    );
+    if (Number(visible[0]?.count ?? 0) !== 1) throw new Error('tenant_probe_visible_orgs');
+    const other = await tx.unsafe<{ count: string }[]>(
+      'select count(*)::text as count from organizations where id <> ' +
+        quoteLiteral(tenantId) +
+        '::uuid',
+    );
+    if (Number(other[0]?.count ?? 0) !== 0) throw new Error('tenant_probe_cross_tenant_rows');
+  });
+
+  return { tenantId };
 }
 
 async function verifyRestore(
   source: postgres.Sql,
   target: postgres.Sql,
 ): Promise<Record<string, unknown>> {
-  const sourceCounts = await tableCounts(source);
-  const targetCounts = await tableCounts(target);
-  if (JSON.stringify(sourceCounts) !== JSON.stringify(targetCounts)) {
-    throw new Error(
-      'row_count_mismatch: ' + JSON.stringify({ source: sourceCounts, target: targetCounts }),
-    );
+  const sourceFingerprints = await tableFingerprints(source);
+  const targetFingerprints = await tableFingerprints(target);
+
+  const missingTables = Object.keys(sourceFingerprints).filter(
+    (table) => !(table in targetFingerprints),
+  );
+  if (missingTables.length > 0) throw new Error('restore_missing_tables: ' + missingTables.join(','));
+
+  for (const [table, sourcePrint] of Object.entries(sourceFingerprints)) {
+    const targetPrint = targetFingerprints[table];
+    if (!targetPrint) throw new Error('restore_missing_table: ' + table);
+    if (sourcePrint.count !== targetPrint.count) {
+      throw new Error(
+        'row_count_mismatch: ' + table + ' ' + sourcePrint.count + ' -> ' + targetPrint.count,
+      );
+    }
+    if (sourcePrint.digest !== targetPrint.digest) {
+      throw new Error('row_digest_mismatch: ' + table);
+    }
   }
 
-  await verifyRls(target);
   const sourceMigrations = await source.unsafe<{ id: string; kind: string }[]>(
     'select id, kind from schema_migrations order by id',
   );
@@ -101,19 +220,17 @@ async function verifyRestore(
     throw new Error('migration_history_mismatch');
   }
 
-  const policies = await target.unsafe<{ count: string }[]>(
-    'select count(*)::text as count from pg_policies ' +
-      'where schemaname = current_schema() and tablename = any($1::text[])',
-    [rlsTables],
-  );
-  if (Number(policies[0]?.count ?? 0) < rlsTables.length)
-    throw new Error('rls_policy_verification_failed');
+  const rlsTables = await verifyRls(target);
+  await verifyPrivileges(target);
+  const isolation = await verifyTenantIsolation(target);
 
   return {
+    isolation,
     migrations: targetMigrations,
-    policies: Number(policies[0]?.count ?? 0),
-    rows: targetCounts,
-    rlsTables: [...rlsTables],
+    rlsTables,
+    rows: Object.fromEntries(
+      Object.entries(targetFingerprints).map(([table, value]) => [table, value.count]),
+    ),
   };
 }
 
@@ -159,11 +276,13 @@ async function main(): Promise<void> {
       prepare: false,
     });
     try {
-      verification = await verifyRestore(source, target);
+      // Replay migrations before comparing: a restore missing a table that a
+      // later migration creates must be visible, not hidden by ordering.
       const migrationResult = await runMigrations(targetConnectionString);
       if (migrationResult.applied.length > 0)
         throw new Error('restored_database_has_pending_migrations');
-      verification = { ...verification, pendingMigrationsAfterReplay: migrationResult.applied };
+      verification = await verifyRestore(source, target);
+      verification = { ...verification, pendingMigrationsAfterReplay: [] };
     } finally {
       await source.end({ timeout: 5 });
       await target.end({ timeout: 5 });
@@ -177,7 +296,10 @@ async function main(): Promise<void> {
       verification,
     };
     await mkdir(dirname(evidencePath), { recursive: true });
-    await writeFile(evidencePath, JSON.stringify(evidence, null, 2) + '\\n', 'utf8');
+    await writeFile(evidencePath, JSON.stringify(evidence, null, 2) + '\n', {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
     console.log(JSON.stringify({ ...evidence, evidencePath }, null, 2));
   } finally {
     if (targetCreated && !keepTarget) {
@@ -196,3 +318,5 @@ async function main(): Promise<void> {
 
 const entryPoint = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : undefined;
 if (entryPoint === import.meta.url) await main();
+
+export { verifyRestore };
