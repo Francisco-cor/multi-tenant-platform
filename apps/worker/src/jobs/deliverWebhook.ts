@@ -5,6 +5,7 @@ import type { DatabaseHandle } from '@platform/db';
 import { metrics } from '@platform/observability';
 import { workerGlobalTransaction, workerTenantTransaction } from '../tenant-db.js';
 import { fetchWebhook, type WebhookFetch } from '../webhook-egress.js';
+import { workerMetrics } from '../worker-metrics.js';
 
 export interface DeliverResult {
   status: 'delivered' | 'retrying' | 'failed' | 'dead_letter' | 'disabled';
@@ -24,15 +25,28 @@ function backoffMs(attempt: number): number {
   return Math.round(capped + (Math.random() * 2 - 1) * jitter);
 }
 
+/** Pre-flight failures that must consume an attempt instead of retrying forever. */
+const PREFLIGHT_FAILURES = new Set([
+  'endpoint_not_found',
+  'webhook_secret_version_unavailable',
+  'webhook_secret_encryption_key_required',
+]);
+
 export interface DeliverWebhookOptions {
   fetchFn?: WebhookFetch | undefined;
   claimToken?: string | undefined;
   leaseDurationMs?: number | undefined;
   leaseRenewalMs?: number | undefined;
+  /** Hard deadline for one delivery attempt (independent of the lease). */
+  deliveryTimeoutMs?: number | undefined;
+  /** Caller cancellation (shutdown / job timeout). */
+  signal?: AbortSignal | undefined;
 }
 
 export const WEBHOOK_LEASE_DURATION_MS = 5 * 60 * 1000;
 export const WEBHOOK_LEASE_RENEWAL_MS = 60 * 1000;
+export const WEBHOOK_DELIVERY_TIMEOUT_MS = 30_000;
+export const WEBHOOK_MAX_ATTEMPTS = 8;
 
 function claimGuard(claimToken: string | undefined) {
   return claimToken ? sql`and claim_token=${claimToken}` : sql``;
@@ -116,6 +130,78 @@ function startLeaseHeartbeat(
   };
 }
 
+/**
+ * Account a failure that happened before the HTTP attempt (missing endpoint,
+ * unavailable secret version). Without this the delivery is retried every
+ * maintenance tick forever and can never dead-letter (P2-1).
+ */
+async function recordPreflightFailure(
+  db: DatabaseHandle,
+  tenantId: string,
+  deliveryId: string,
+  claimToken: string | undefined,
+  message: string,
+): Promise<DeliverResult> {
+  workerMetrics.increment('webhook_preflight_failures_total');
+  const rows = await workerTenantTransaction(db, tenantId, `webhook:${deliveryId}`, (tx) =>
+    tx.execute<{ status: string; attempts: number }>(sql`
+        update webhook_deliveries
+        set attempts = attempts + 1,
+            last_error = ${message.slice(0, 2000)},
+            status = case when attempts + 1 >= ${WEBHOOK_MAX_ATTEMPTS} then 'dead_letter' else 'retrying' end,
+            next_attempt_at = case when attempts + 1 >= ${WEBHOOK_MAX_ATTEMPTS}
+              then now() + interval '1 hour'
+              else now() + (${String(backoffMs(1))}::text || ' ms')::interval end,
+            claim_token = null,
+            claim_until = null,
+            updated_at = now()
+        where id=${deliveryId}::uuid
+          and tenant_id=${tenantId}::uuid
+          and status in ('pending','retrying')
+          ${claimGuard(claimToken)}
+        returning status, attempts
+      `),
+  );
+  const row = rows[0];
+  if (!row) {
+    // A claim mismatch is genuine claim loss: abandon without accounting.
+    if (claimToken) throw new Error('webhook_claim_lost');
+    return { status: 'failed', attempts: 0 };
+  }
+  return {
+    status: row.status === 'dead_letter' ? 'dead_letter' : 'retrying',
+    attempts: Number(row.attempts),
+  };
+}
+
+/**
+ * Claim a delivery for the `webhook.replayed` path so it cannot race the
+ * maintenance batch that is delivering the same row (P3-8).
+ * Returns null when another owner holds an unexpired claim or the row is
+ * already terminal.
+ */
+export async function claimWebhookDelivery(
+  db: DatabaseHandle,
+  deliveryId: string,
+  tenantId: string,
+): Promise<string | null> {
+  const rows = await workerTenantTransaction(db, tenantId, `webhook-claim:${deliveryId}`, (tx) =>
+    tx.execute<{ claim_token: string }>(sql`
+        update webhook_deliveries
+        set claim_token=gen_random_uuid()::text,
+            claim_until=now() + interval '5 minutes',
+            status='retrying',
+            updated_at=now()
+        where id=${deliveryId}::uuid
+          and tenant_id=${tenantId}::uuid
+          and status in ('pending','retrying')
+          and (claim_until is null or claim_until <= now())
+        returning claim_token
+      `),
+  );
+  return rows[0]?.claim_token ?? null;
+}
+
 export async function deliverWebhook(
   db: DatabaseHandle,
   deliveryId: string,
@@ -125,8 +211,8 @@ export async function deliverWebhook(
   const fetchFn = options.fetchFn ?? fetchWebhook;
 
   // Load delivery + endpoint with lock
-  const ctx = await workerTenantTransaction(db, tenantId, `webhook:${deliveryId}`, async (tx) => {
-    const deliveries = await tx.execute<{
+  let ctx: {
+    delivery: {
       id: string;
       tenant_id: string;
       endpoint_id: string;
@@ -137,19 +223,8 @@ export async function deliverWebhook(
       attempts: number;
       claim_token: string | null;
       secret_version: number;
-    }>(sql`
-      select id, tenant_id, endpoint_id, event_id, event_type, payload::text as payload, status, attempts, claim_token, secret_version
-      from webhook_deliveries where id=${deliveryId}::uuid and tenant_id=${tenantId}::uuid for update
-    `);
-    const del = deliveries[0];
-    if (!del) throw new Error('delivery_not_found');
-    if (options.claimToken && del.claim_token !== options.claimToken) {
-      throw new Error('webhook_claim_lost');
-    }
-    if (del.status === 'delivered' || del.status === 'dead_letter' || del.status === 'disabled') {
-      return { delivery: del, endpoint: null, secret: null };
-    }
-    const endpoints = await tx.execute<{
+    };
+    endpoint: {
       id: string;
       url: string;
       secret_ciphertext: string | null;
@@ -158,30 +233,73 @@ export async function deliverWebhook(
       previous_secret_version: number | null;
       previous_secret_expires_at: string | null;
       status: string;
-    }>(sql`
-      select id, url, secret_ciphertext, secret_version, previous_secret_ciphertext,
-             previous_secret_version, previous_secret_expires_at, status
-      from webhook_endpoints where id=${del.endpoint_id}::uuid and tenant_id=${tenantId}::uuid limit 1
-    `);
-    const ep = endpoints[0];
-    if (!ep) throw new Error('endpoint_not_found');
-    const isCurrent = del.secret_version === ep.secret_version;
-    const isPrevious =
-      ep.previous_secret_version === del.secret_version &&
-      ep.previous_secret_expires_at !== null &&
-      new Date(ep.previous_secret_expires_at).getTime() > Date.now();
-    const ciphertext = isCurrent
-      ? ep.secret_ciphertext
-      : isPrevious
-        ? ep.previous_secret_ciphertext
-        : null;
-    if (!ciphertext) throw new Error('webhook_secret_version_unavailable');
-    const key = process.env.WEBHOOK_SECRET_ENCRYPTION_KEY;
-    if (!key) throw new Error('webhook_secret_encryption_key_required');
-    return { delivery: del, endpoint: ep, secret: decryptWebhookSecret(ciphertext, key) };
-  });
+    } | null;
+    secret: string | null;
+    resignCurrent: boolean;
+  };
+  try {
+    ctx = await workerTenantTransaction(db, tenantId, `webhook:${deliveryId}`, async (tx) => {
+      const deliveries = await tx.execute<typeof ctx.delivery>(sql`
+        select id, tenant_id, endpoint_id, event_id, event_type, payload::text as payload, status, attempts, claim_token, secret_version
+        from webhook_deliveries where id=${deliveryId}::uuid and tenant_id=${tenantId}::uuid for update
+      `);
+      const del = deliveries[0];
+      if (!del) throw new Error('delivery_not_found');
+      if (options.claimToken && del.claim_token !== options.claimToken) {
+        throw new Error('webhook_claim_lost');
+      }
+      if (del.status === 'delivered' || del.status === 'dead_letter' || del.status === 'disabled') {
+        return { delivery: del, endpoint: null, secret: null, resignCurrent: false };
+      }
+      const endpoints = await tx.execute<NonNullable<typeof ctx.endpoint>>(sql`
+        select id, url, secret_ciphertext, secret_version, previous_secret_ciphertext,
+               previous_secret_version, previous_secret_expires_at, status
+        from webhook_endpoints where id=${del.endpoint_id}::uuid and tenant_id=${tenantId}::uuid limit 1
+      `);
+      const ep = endpoints[0];
+      if (!ep) throw new Error('endpoint_not_found');
+      const isCurrent = del.secret_version === ep.secret_version;
+      const isPrevious =
+        ep.previous_secret_version === del.secret_version &&
+        ep.previous_secret_expires_at !== null &&
+        new Date(ep.previous_secret_expires_at).getTime() > Date.now();
+      const ciphertext = isCurrent
+        ? ep.secret_ciphertext
+        : isPrevious
+          ? ep.previous_secret_ciphertext
+          : null;
+      const key = process.env.WEBHOOK_SECRET_ENCRYPTION_KEY;
+      if (!key) throw new Error('webhook_secret_encryption_key_required');
+      if (!ciphertext) {
+        // The pinned secret generation is gone (e.g. replayed delivery after two
+        // rotations, S-19). Re-sign with the current secret instead of failing:
+        // receivers verify with the current secret anyway.
+        if (!isCurrent && ep.secret_ciphertext) {
+          return {
+            delivery: del,
+            endpoint: ep,
+            secret: decryptWebhookSecret(ep.secret_ciphertext, key),
+            resignCurrent: true,
+          };
+        }
+        throw new Error('webhook_secret_version_unavailable');
+      }
+      return {
+        delivery: del,
+        endpoint: ep,
+        secret: decryptWebhookSecret(ciphertext, key),
+        resignCurrent: false,
+      };
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (PREFLIGHT_FAILURES.has(message)) {
+      return recordPreflightFailure(db, tenantId, deliveryId, options.claimToken, message);
+    }
+    throw error;
+  }
 
-  if (!ctx.endpoint) {
+  if (!ctx.endpoint || !ctx.secret) {
     return {
       status: ctx.delivery.status as DeliverResult['status'],
       attempts: ctx.delivery.attempts,
@@ -213,7 +331,11 @@ export async function deliverWebhook(
   let responseBody = '';
   let error: string | null = null;
   let isTransient = false;
+  let timedOut = false;
   const abortController = new AbortController();
+  const deadlineMs = options.deliveryTimeoutMs ?? WEBHOOK_DELIVERY_TIMEOUT_MS;
+  const externalAbort = () => abortController.abort();
+  options.signal?.addEventListener('abort', externalAbort, { once: true });
   const lease = startLeaseHeartbeat(
     db,
     tenantId,
@@ -222,6 +344,16 @@ export async function deliverWebhook(
     options,
     abortController,
   );
+  let timer: NodeJS.Timeout | undefined;
+  // Always enforce a delivery deadline, even without a lease (webhook.replayed).
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      abortController.abort();
+      reject(new Error('webhook_timeout'));
+    }, deadlineMs);
+    timer.unref?.();
+  });
 
   try {
     const resp = await Promise.race([
@@ -232,6 +364,7 @@ export async function deliverWebhook(
         signal: abortController.signal,
       }),
       lease.loss,
+      deadline,
     ]);
     responseStatus = resp.status;
     responseBody = await resp.text().catch(() => '');
@@ -239,7 +372,8 @@ export async function deliverWebhook(
       // 2xx -> delivered
       await workerTenantTransaction(db, tenantId, `webhook:${deliveryId}`, async (tx) => {
         await tx.execute(sql`
-          update webhook_deliveries set status='delivered', attempts=attempts+1, delivered_at=now(), last_error=null, claim_token=null, claim_until=null, updated_at=now()
+          update webhook_deliveries set status='delivered', attempts=attempts+1, delivered_at=now(), last_error=null,
+            claim_token=null, claim_until=null, secret_version=${ctx.resignCurrent ? ctx.endpoint!.secret_version : ctx.delivery.secret_version}, updated_at=now()
           where id=${deliveryId}::uuid ${claimGuard(options.claimToken)}
         `);
         await tx.execute(sql`
@@ -253,16 +387,27 @@ export async function deliverWebhook(
       isTransient = true;
       error = `http_${responseStatus}:${responseBody.slice(0, 200)}`;
     } else {
-      // 4xx -> not transient, mark failed (client error) but retry might not help; we treat as failed without retry for 400-404
-      // However spec says retry only transient errors, so 4xx (except 429) -> failed without retry
+      // 4xx -> not transient, mark failed (client error) without retry
       error = `http_${responseStatus}:${responseBody.slice(0, 200)}`;
       isTransient = false;
     }
   } catch (e) {
     if (lease.lost()) throw new Error('webhook_claim_lost');
-    error = e instanceof Error ? e.message : String(e);
-    isTransient = true; // network error is transient
+    const message = e instanceof Error ? e.message : String(e);
+    if (message === 'webhook_response_too_large') {
+      workerMetrics.increment('webhook_response_too_large_total');
+    }
+    if (timedOut || message === 'webhook_timeout' || message === 'webhook_connect_timeout') {
+      workerMetrics.increment('webhook_timeouts_total');
+      error = 'webhook_timeout';
+      isTransient = true;
+    } else {
+      error = message;
+      isTransient = true; // network error is transient
+    }
   } finally {
+    if (timer) clearTimeout(timer);
+    options.signal?.removeEventListener('abort', externalAbort);
     await lease.stop();
   }
 
@@ -270,7 +415,7 @@ export async function deliverWebhook(
 
   // Handle failure
   const attempts = ctx.delivery.attempts + 1;
-  const shouldDeadLetter = attempts >= 8;
+  const shouldDeadLetter = attempts >= WEBHOOK_MAX_ATTEMPTS;
   const shouldRetry = isTransient && !shouldDeadLetter;
 
   await workerTenantTransaction(db, tenantId, `webhook:${deliveryId}`, async (tx) => {
@@ -323,7 +468,7 @@ export async function deliverWebhook(
 
 export async function deliverPendingWebhooks(
   db: DatabaseHandle,
-  options: { batchSize?: number; fetchFn?: WebhookFetch } = {},
+  options: { batchSize?: number; fetchFn?: WebhookFetch; signal?: AbortSignal } = {},
 ): Promise<{ processed: number; delivered: number; failed: number }> {
   const batchSize = options.batchSize ?? 10;
   const rows = await workerGlobalTransaction(
@@ -358,12 +503,29 @@ export async function deliverPendingWebhooks(
   let delivered = 0;
   let failed = 0;
   for (const r of rows) {
-    const res = await deliverWebhook(db, r.id, r.tenant_id, {
-      fetchFn: options.fetchFn,
-      claimToken: r.claim_token,
-    });
-    if (res.status === 'delivered') delivered++;
-    else if (res.status === 'failed' || res.status === 'dead_letter') failed++;
+    try {
+      const res = await deliverWebhook(db, r.id, r.tenant_id, {
+        fetchFn: options.fetchFn,
+        claimToken: r.claim_token,
+        signal: options.signal,
+      });
+      if (res.status === 'delivered') delivered++;
+      else if (res.status === 'failed' || res.status === 'dead_letter') failed++;
+    } catch (error) {
+      // One bad row must not abort the batch or keep the other rows claimed
+      // for five minutes (P2-2).
+      failed++;
+      const message = error instanceof Error ? error.message : String(error);
+      if (message !== 'webhook_claim_lost' && message !== 'delivery_not_found') {
+        await workerGlobalTransaction(db, (tx) =>
+          tx.execute(sql`
+            update webhook_deliveries
+            set claim_token=null, claim_until=null, updated_at=now()
+            where id=${r.id}::uuid and claim_token=${r.claim_token}
+          `),
+        ).catch(() => undefined);
+      }
+    }
   }
   return { processed: rows.length, delivered, failed };
 }

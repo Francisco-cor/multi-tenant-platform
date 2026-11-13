@@ -18,6 +18,16 @@ export type WebhookDnsLookup = (
 
 export type WebhookFetch = (url: string, init?: RequestInit) => Promise<Response>;
 
+export const WEBHOOK_CONNECT_TIMEOUT_MS = 5_000;
+export const WEBHOOK_REQUEST_TIMEOUT_MS = 15_000;
+export const WEBHOOK_MAX_RESPONSE_BYTES = 64 * 1024;
+
+export interface WebhookFetchOptions {
+  connectTimeoutMs?: number;
+  requestTimeoutMs?: number;
+  maxResponseBytes?: number;
+}
+
 const defaultDnsLookup: WebhookDnsLookup = (hostname, options) =>
   dnsLookup(hostname, options).then((records) =>
     records.map((record) => ({ address: record.address, family: record.family as 4 | 6 })),
@@ -85,6 +95,13 @@ function ipv6IsPrivate(address: string): boolean {
   const isLoopback = groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1;
   const isMappedV4 = groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff;
   const mappedV4 = `${(groups[6] ?? 0) >> 8}.${(groups[6] ?? 0) & 255}.${(groups[7] ?? 0) >> 8}.${(groups[7] ?? 0) & 255}`;
+  // NAT64 (64:ff9b::/96 and 64:ff9b:1::/48) embeds an IPv4 address that the
+  // network translates back to; treat it like the embedded address.
+  const isNat64 = groups[0] === 0x64 && groups[1] === 0xff9b;
+  const nat64V4 =
+    isNat64 && groups.slice(2, 6).every((group) => group === 0)
+      ? `${(groups[6] ?? 0) >> 8}.${(groups[6] ?? 0) & 255}.${(groups[7] ?? 0) >> 8}.${(groups[7] ?? 0) & 255}`
+      : null;
   return (
     isUnspecified ||
     isLoopback ||
@@ -92,7 +109,8 @@ function ipv6IsPrivate(address: string): boolean {
     (first & 0xffc0) === 0xfe80 ||
     (first & 0xff00) === 0xff00 ||
     (first === 0x2001 && groups[1] === 0x0db8) ||
-    (isMappedV4 && ipv4IsPrivate(mappedV4))
+    (isMappedV4 && ipv4IsPrivate(mappedV4)) ||
+    (isNat64 && (nat64V4 === null || ipv4IsPrivate(nat64V4)))
   );
 }
 
@@ -120,6 +138,12 @@ export async function resolvePublicWebhookTarget(
   }
 
   const hostname = url.hostname.replace(/^\[|\]$/gu, '');
+  // HTTPS only on the default port: arbitrary ports turn an allowlisted host
+  // into an internal port scanner.
+  if (url.port !== '' && url.port !== '443') {
+    metrics.recordWebhookEgressDenied('invalid_port');
+    throw new Error('webhook_url_invalid');
+  }
   const records = isIP(hostname)
     ? [{ address: hostname, family: isIP(hostname) as 4 | 6 }]
     : await lookup(hostname, { all: true, verbatim: true }).catch(() => {
@@ -144,7 +168,6 @@ export async function resolvePublicWebhookTarget(
     path: `${url.pathname}${url.search}`,
   };
 }
-
 /**
  * Send a webhook to the resolved address while retaining the original host
  * for TLS SNI and virtual hosting. Redirects are deliberately not followed.
@@ -153,6 +176,7 @@ export async function fetchWebhook(
   rawUrl: string,
   init: RequestInit = {},
   lookup: WebhookDnsLookup = defaultDnsLookup,
+  options: WebhookFetchOptions = {},
 ): Promise<Response> {
   const target = await resolvePublicWebhookTarget(rawUrl, lookup);
   const url = new URL(rawUrl);
@@ -160,6 +184,9 @@ export async function fetchWebhook(
   headers.set('host', url.host);
   const body =
     typeof init.body === 'string' ? init.body : init.body ? String(init.body) : undefined;
+  const requestTimeoutMs = options.requestTimeoutMs ?? WEBHOOK_REQUEST_TIMEOUT_MS;
+  const connectTimeoutMs = options.connectTimeoutMs ?? WEBHOOK_CONNECT_TIMEOUT_MS;
+  const maxBytes = options.maxResponseBytes ?? WEBHOOK_MAX_RESPONSE_BYTES;
 
   return new Promise<Response>((resolve, reject) => {
     const request = httpsRequest(
@@ -174,7 +201,20 @@ export async function fetchWebhook(
       },
       (response) => {
         const chunks: Buffer[] = [];
-        response.on('data', (chunk: Buffer) => chunks.push(chunk));
+        let received = 0;
+        response.on('data', (chunk: Buffer) => {
+          received += chunk.length;
+          if (received > maxBytes) {
+            // Bounded memory: stop reading and destroy the socket instead of
+            // buffering an unbounded tenant-controlled body (P1-7).
+            metrics.recordWebhookEgressDenied('response_too_large');
+            response.destroy();
+            request.destroy();
+            reject(new Error('webhook_response_too_large'));
+            return;
+          }
+          chunks.push(chunk);
+        });
         response.on('end', () => {
           resolve(
             new Response(Buffer.concat(chunks), {
@@ -186,7 +226,23 @@ export async function fetchWebhook(
         response.on('error', reject);
       },
     );
-    request.on('error', reject);
+    // Socket-inactivity deadline and an overall cap, independent of the caller.
+    request.setTimeout(requestTimeoutMs, () => {
+      request.destroy(new Error('webhook_timeout'));
+    });
+    const connectTimer = setTimeout(() => {
+      request.destroy(new Error('webhook_connect_timeout'));
+    }, connectTimeoutMs);
+    connectTimer.unref?.();
+    request.on('socket', (socket) => {
+      if (!socket.connecting) clearTimeout(connectTimer);
+      else socket.once('connect', () => clearTimeout(connectTimer));
+    });
+    request.on('close', () => clearTimeout(connectTimer));
+    request.on('error', (error) => {
+      clearTimeout(connectTimer);
+      reject(error);
+    });
     if (body !== undefined) request.write(body);
     request.end();
   });
