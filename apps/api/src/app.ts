@@ -253,7 +253,12 @@ const PaymentWebhookSchema = z
     status: z.enum(['paid', 'failed', 'unknown']),
     providerKey: z.string().min(8).max(128).optional(),
     amountCents: z.number().int().min(1).optional(),
-    currency: z.string().min(3).max(10).optional(),
+    currency: z
+      .string()
+      .min(3)
+      .max(10)
+      .transform((value) => value.toUpperCase())
+      .optional(),
     tenantId: z.string().min(1).max(128).optional(),
   })
   .strict();
@@ -2417,6 +2422,20 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
         });
       } else {
         body = parseOrThrow(PaymentWebhookSchema, request.body);
+      }
+
+      // A state-changing payment event must state how much money moved and in
+      // which currency. Accepting a bare `paid` would let a forged-but-signed
+      // or buggy producer mark an order paid without proving the amount.
+      if (
+        body.status === 'paid' &&
+        (body.amountCents === undefined || body.currency === undefined)
+      ) {
+        throw new RequestProblem(
+          400,
+          'BAD_REQUEST',
+          'amountCents and currency are required for paid payment events',
+        );
       }
 
       // Tenant identity must come from the normalized (signed) body, never

@@ -201,6 +201,7 @@ suite('financial correctness under RLS (orders, webhooks, DLQ, owner race)', () 
       eventId: unknownEvent,
       providerRef: 'prov_missing',
       status: 'paid',
+      currency: 'USD',
       tenantId,
       amountCents: 100000,
     });
@@ -215,6 +216,7 @@ suite('financial correctness under RLS (orders, webhooks, DLQ, owner race)', () 
       eventId: `evt-mismatch-${randomUUID()}`,
       providerRef: 'prov_fin_a',
       status: 'paid',
+      currency: 'USD',
       tenantId,
       amountCents: 1,
     });
@@ -258,6 +260,7 @@ suite('financial correctness under RLS (orders, webhooks, DLQ, owner race)', () 
       eventId: `evt-wrong-${randomUUID()}`,
       providerRef: 'prov_fin_a',
       status: 'paid',
+      currency: 'USD',
       tenantId: randomUUID(),
       amountCents: 100000,
     });
@@ -274,6 +277,7 @@ suite('financial correctness under RLS (orders, webhooks, DLQ, owner race)', () 
       eventId: `evt-late-${randomUUID()}`,
       providerRef: 'prov_fin_late',
       status: 'paid',
+      currency: 'USD',
       tenantId,
       amountCents: 7000,
     });
@@ -396,6 +400,7 @@ suite('financial correctness under RLS (orders, webhooks, DLQ, owner race)', () 
         eventId: `evt-secret-old-${randomUUID()}`,
         providerRef: 'prov_secret_rotate',
         status: 'paid',
+        currency: 'USD',
         tenantId,
         amountCents: 4400,
       },
@@ -409,6 +414,7 @@ suite('financial correctness under RLS (orders, webhooks, DLQ, owner race)', () 
         eventId: `evt-secret-mismatch-${randomUUID()}`,
         providerRef: 'prov_secret_rotate',
         status: 'paid',
+        currency: 'USD',
         tenantId: randomUUID(),
         amountCents: 4400,
       },

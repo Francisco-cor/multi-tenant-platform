@@ -186,6 +186,7 @@ describe('payments saga — tenant isolation, idempotency, webhook targeting', (
       eventId: 'evt_unknown_0001',
       providerRef: 'prov_does_not_exist',
       status: 'paid',
+      currency: 'USD',
       tenantId: 'tenant-acme',
       amountCents: 100000,
     });
@@ -202,6 +203,7 @@ describe('payments saga — tenant isolation, idempotency, webhook targeting', (
       eventId: 'evt_amount_mismatch_01',
       providerRef: 'prov_a_ref',
       status: 'paid',
+      currency: 'USD',
       tenantId: 'tenant-acme',
       amountCents: 1,
     });
@@ -216,6 +218,7 @@ describe('payments saga — tenant isolation, idempotency, webhook targeting', (
       eventId: 'evt_wrong_tenant_01',
       providerRef: 'prov_a_ref',
       status: 'paid',
+      currency: 'USD',
       tenantId: 'tenant-contoso',
       amountCents: 100000,
     });
@@ -256,6 +259,57 @@ describe('payments saga — tenant isolation, idempotency, webhook targeting', (
     await app.close();
   });
 
+  it('rejects a paid webhook without amount or currency', async () => {
+    const paymentStore = new InMemoryPaymentStore();
+    const app = buildApp({ allowDevLogin: true, paymentStore });
+    const cookie = await loginAs(app, 'user-acme-only');
+
+    const order = await createOrder(app, cookie, {
+      amountCents: 3300,
+      idempotencyKey: 'payments-amount-required-1',
+    });
+    expect(order.statusCode).toBe(201);
+    const attempt = order.body.paymentAttempt as { id: string };
+    paymentStore.setAttemptStatus(attempt.id, 'pending', 'prov_no_amount');
+
+    const withoutAmount = await postPaymentWebhook(app, {
+      eventId: 'evt_no_amount_0001',
+      providerRef: 'prov_no_amount',
+      status: 'paid',
+      tenantId: 'tenant-acme',
+      currency: 'USD',
+    });
+    expect(withoutAmount.statusCode).toBe(400);
+    expect(withoutAmount.json().error.message).toMatch(/amountCents and currency/);
+
+    const withoutCurrency = await postPaymentWebhook(app, {
+      eventId: 'evt_no_currency_0001',
+      providerRef: 'prov_no_amount',
+      status: 'paid',
+      tenantId: 'tenant-acme',
+      amountCents: 3300,
+    });
+    expect(withoutCurrency.statusCode).toBe(400);
+
+    const attemptAfter = await paymentStore.getPaymentAttempt(
+      { tenantId: 'tenant-acme' } as never,
+      attempt.id,
+    );
+    expect(attemptAfter?.status).toBe('pending');
+
+    const complete = await postPaymentWebhook(app, {
+      eventId: 'evt_complete_paid_0001',
+      providerRef: 'prov_no_amount',
+      status: 'paid',
+      tenantId: 'tenant-acme',
+      amountCents: 3300,
+      currency: 'usd',
+    });
+    expect(complete.statusCode).toBe(200);
+    expect(complete.json().status).toBe('processed');
+    await app.close();
+  });
+
   it('webhook HMAC invalid ->401 and stale timestamp ->401', async () => {
     const paymentStore = new InMemoryPaymentStore();
     const app = buildApp({ allowDevLogin: true, paymentStore });
@@ -263,6 +317,7 @@ describe('payments saga — tenant isolation, idempotency, webhook targeting', (
       eventId: 'evt_signature_test_1',
       providerRef: 'prov_sig',
       status: 'paid',
+      currency: 'USD',
       tenantId: 'tenant-acme',
     };
     const badSig = await app.inject({
@@ -301,6 +356,7 @@ describe('payments saga — tenant isolation, idempotency, webhook targeting', (
       providerRef: 'prov_created_paid',
       providerKey: created.body.paymentAttempt.providerKey,
       status: 'paid',
+      currency: 'USD',
       tenantId: 'tenant-acme',
       amountCents: 4000,
     });
@@ -321,6 +377,7 @@ describe('payments saga — tenant isolation, idempotency, webhook targeting', (
       eventId: 'evt_failed_paid_001',
       providerRef: 'prov_late_ref',
       status: 'paid',
+      currency: 'USD',
       tenantId: 'tenant-acme',
       amountCents: 7000,
     });
