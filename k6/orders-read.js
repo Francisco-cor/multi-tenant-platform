@@ -1,5 +1,6 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
+import { baseUrl, sessionCookie, tenantHost } from './lib/auth.js';
 
 export const options = {
   stages: [
@@ -8,37 +9,31 @@ export const options = {
     { duration: '30s', target: 10 },
   ],
   thresholds: {
-    http_req_failed: ['rate < 0.01'],
+    http_req_failed: ['rate<0.01'],
     http_req_duration: ['p(95)<300'],
+    'http_req_duration{endpoint:GET /v1/orders}': ['p(95)<300'],
     checks: ['rate>0.99'],
   },
 };
 
-const BASE_URL = __ENV.API_URL || 'http://localhost:4000';
-const TENANT_HOST = __ENV.TENANT_HOST || 'acme.app.localhost';
-const DEV_USER = __ENV.DEV_USER || 'user-acme-only';
+const BASE_URL = baseUrl();
+const TENANT_HOST = tenantHost();
 
-function login() {
-  const res = http.post(`${BASE_URL}/v1/auth/dev-login`, JSON.stringify({ userId: DEV_USER }), {
-    headers: { 'Content-Type': 'application/json' },
-  });
-  if (res.status !== 200) return '';
-  const setCookie = res.headers['Set-Cookie'] || res.headers['set-cookie'] || '';
-  const m = String(setCookie).match(/platform_session=([^;]+)/);
-  return m ? `platform_session=${m[1]}` : '';
+export function setup() {
+  return { cookie: sessionCookie(__ENV.DEV_USER || 'user-acme-only') };
 }
 
-export default function () {
-  const cookie = login();
-  if (!cookie) return;
+export default function (data) {
   const res = http.get(`${BASE_URL}/v1/orders?limit=25`, {
-    headers: { Host: TENANT_HOST, Cookie: cookie },
+    headers: { Host: TENANT_HOST, Cookie: data.cookie },
+    tags: { endpoint: 'GET /v1/orders' },
   });
   check(res, {
     'GET /v1/orders 200': (r) => r.status === 200,
-    'has x-cache or rate headers': (r) =>
-      r.headers['X-Cache'] === 'HIT' || r.headers['X-Cache'] === 'MISS' || r.status === 200,
-    'p95 <300': () => res.timings.duration < 300,
+    'has cache or rate headers': (r) =>
+      r.headers['X-Cache'] === 'HIT' ||
+      r.headers['X-Cache'] === 'MISS' ||
+      Boolean(r.headers['X-RateLimit-Limit'] || r.headers['x-ratelimit-limit']),
   });
   sleep(0.2);
 }

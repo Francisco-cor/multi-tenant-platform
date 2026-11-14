@@ -25,11 +25,15 @@ FROM base AS build
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/apps ./apps
 COPY --from=deps /app/packages ./packages
-COPY pnpm-workspace.yaml package.json pnpm-lock.yaml tsconfig.base.json turbo.json ./
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml tsconfig.base.json turbo.json .npmrc ./
 COPY eslint.config.mjs prettier.config.mjs ./
+COPY scripts/build-runtime.mjs scripts/build-runtime.mjs
 COPY apps/api ./apps/api
 COPY packages ./packages
 RUN pnpm --filter @platform/api build
+# Compile workspace packages to dist, rewrite their exports, then create a
+# production-only deployment (pnpm isolated linker -> self-contained node_modules).
+RUN node scripts/build-runtime.mjs --filter @platform/api --target /out
 
 FROM node:${NODE_VERSION} AS runner
 ARG COMMIT_SHA=unknown
@@ -40,24 +44,19 @@ LABEL org.opencontainers.image.revision=$COMMIT_SHA \
       org.opencontainers.image.source="https://github.com/multi-tenant-platform"
 ENV COMMIT_SHA=$COMMIT_SHA
 ENV BUILD_DATE=$BUILD_DATE
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN apk add --no-cache tini \
+    && addgroup -S appgroup \
+    && adduser -S appuser -G appgroup
 WORKDIR /app
 ENV NODE_ENV=production
 ENV API_HOST=0.0.0.0
 ENV API_PORT=4000
-# Copy built output, workspace packages (src) and prod deps.
-# Note: packages are still TypeScript src; runner uses tsx to bridge.
-# Future phase will compile packages to dist and switch to plain node.
-COPY --from=build /app/apps/api/dist ./apps/api/dist
-COPY --from=build /app/apps/api/package.json ./apps/api/package.json
-COPY --from=build /app/packages ./packages
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/package.json ./package.json
-COPY --from=build /app/pnpm-workspace.yaml ./pnpm-workspace.yaml
-COPY --from=build /app/pnpm-lock.yaml ./pnpm-lock.yaml
+COPY --from=build /out ./
 USER appuser
 EXPOSE 4000
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:4000/health/live').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-# tsx is required because workspace packages export TS src (see packages/*/package.json exports).
-CMD ["node_modules/.bin/tsx", "apps/api/dist/server.js"]
+STOPSIGNAL SIGTERM
+# Readiness (not just liveness): checks DB/Redis dependencies.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:4000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "dist/server.js"]

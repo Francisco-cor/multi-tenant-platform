@@ -1,5 +1,10 @@
 import { z } from 'zod';
-import { ORDER_STATUSES, ORGANIZATION_STATUSES, ROLES } from '@platform/domain';
+import {
+  MEMBERSHIP_STATUSES,
+  ORDER_STATUSES,
+  ORGANIZATION_STATUSES,
+  ROLES,
+} from '@platform/domain';
 
 export const API_VERSION = 'v1' as const;
 
@@ -63,11 +68,26 @@ export const MembershipSchema = z.object({
   userId: z.string().min(1),
   organizationId: z.string().min(1),
   role: z.enum(ROLES),
-  status: z.enum(['invited', 'active', 'suspended', 'removed']),
+  status: z.enum(MEMBERSHIP_STATUSES),
 });
 export type Membership = z.infer<typeof MembershipSchema>;
 
 export const OrderStatusSchema = z.enum(ORDER_STATUSES);
+export type OrderStatus = z.infer<typeof OrderStatusSchema>;
+
+/**
+ * Wire representation of an order. Units are explicit (`amountCents`) and
+ * statuses are the same closed set used by the domain state machine.
+ */
+export const OrderSchema = z.object({
+  id: z.string().min(1),
+  branchId: z.string().min(1),
+  status: OrderStatusSchema,
+  amountCents: z.number().int().nonnegative(),
+  currency: z.string().regex(/^[A-Z]{3}$/u),
+  createdAt: z.number().int().nonnegative(),
+});
+export type Order = z.infer<typeof OrderSchema>;
 
 export const metaResponse = {
   service: 'api',

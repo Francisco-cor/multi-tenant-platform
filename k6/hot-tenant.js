@@ -1,7 +1,9 @@
 import http from 'k6/http';
 import { check } from 'k6';
+import { baseUrl, sessionCookie } from './lib/auth.js';
 
-// Hot tenant isolation: 2 tenants in parallel, acme hot 30 rps, contoso 10 rps should not be affected
+// Hot tenant isolation: 2 tenants in parallel, acme hot 30 rps, contoso 10 rps should not be affected.
+// Auth happens once in setup; per-iteration dev-logins would distort latency and rate limits.
 export const options = {
   scenarios: {
     acme_hot: {
@@ -26,36 +28,42 @@ export const options = {
     },
   },
   thresholds: {
-    'http_req_failed{tenant:acme}': ['rate < 0.05'],
-    'http_req_failed{tenant:contoso}': ['rate < 0.01'],
+    'http_req_failed{tenant:acme}': ['rate<0.05'],
+    'http_req_failed{tenant:contoso}': ['rate<0.01'],
+    'http_req_duration{tenant:acme}': ['p(95)<500'],
+    'http_req_duration{tenant:contoso}': ['p(95)<500'],
+    checks: ['rate>0.99'],
   },
 };
 
-const BASE_URL = __ENV.API_URL || 'http://localhost:4000';
+const BASE_URL = baseUrl();
 
-function login(devUser) {
-  const res = http.post(`${BASE_URL}/v1/auth/dev-login`, JSON.stringify({ userId: devUser }), {
-    headers: { 'Content-Type': 'application/json' },
-  });
-  const setCookie = res.headers['Set-Cookie'] || res.headers['set-cookie'] || '';
-  const m = String(setCookie).match(/platform_session=([^;]+)/);
-  return m ? `platform_session=${m[1]}` : '';
+export function setup() {
+  // Scenario `env` is not visible in setup, so allow explicit per-tenant cookies.
+  const acme = __ENV.ACME_SESSION_COOKIE || sessionCookie(__ENV.ACME_DEV_USER || 'user-acme-only');
+  const contoso =
+    __ENV.CONTOSO_SESSION_COOKIE || sessionCookie(__ENV.CONTOSO_DEV_USER || 'user-contoso-only');
+  return { acme, contoso };
 }
 
-export function acme() {
-  const cookie = login('user-acme-only');
+export function acme(data) {
   const res = http.get(`${BASE_URL}/v1/branches`, {
-    headers: { Host: 'acme.app.localhost', Cookie: cookie },
-    tags: { tenant: 'acme' },
+    headers: { Host: 'acme.app.localhost', Cookie: data.acme },
+    tags: { tenant: 'acme', endpoint: 'GET /v1/branches' },
   });
-  check(res, { 'acme 200 or 429': (r) => r.status === 200 || r.status === 429 });
+  check(res, {
+    'acme 200': (r) => r.status === 200,
+    'acme not rate limited': (r) => r.status !== 429,
+  });
 }
 
-export function contoso() {
-  const cookie = login('user-contoso-only');
+export function contoso(data) {
   const res = http.get(`${BASE_URL}/v1/branches`, {
-    headers: { Host: 'contoso.app.localhost', Cookie: cookie },
-    tags: { tenant: 'contoso' },
+    headers: { Host: 'contoso.app.localhost', Cookie: data.contoso },
+    tags: { tenant: 'contoso', endpoint: 'GET /v1/branches' },
   });
-  check(res, { 'contoso 200': (r) => r.status === 200 });
+  check(res, {
+    'contoso 200': (r) => r.status === 200,
+    'contoso not rate limited': (r) => r.status !== 429,
+  });
 }

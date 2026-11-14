@@ -15,20 +15,26 @@
  *
  * Environment:
  * - TESTCONTAINERS_DISABLED=1  -> helpers resolve to no-op and tests can `describe.skipIf`.
+ * - TESTCONTAINERS_HOST_OVERRIDE / DOCKER_HOST follow testcontainers conventions.
  * - TESTCONTAINERS_PG_IMAGE, TESTCONTAINERS_REDIS_IMAGE, TESTCONTAINERS_MINIO_IMAGE override defaults.
  */
 
-export const DEFAULT_IMAGES = {
-  postgres: 'postgres:16-alpine',
-  redis: 'redis:7-alpine',
+export const PINNED_IMAGES = {
+  postgres: 'postgres@sha256:f377d590e5474681d4d7838635031a2b50647923b7abfa803ce9b5ff35d5c663',
+  redis: 'redis@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe',
   minio:
     'quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e',
 } as const;
 
+export const DEFAULT_IMAGES = PINNED_IMAGES;
+
+const STARTUP_TIMEOUT_MS = 120_000;
+const STOP_TIMEOUT_MS = 20_000;
+
 export interface ManagedContainer {
   /** Human label for logs. */
   readonly label: string;
-  /** Whether start() was called. */
+  /** Whether start() completed successfully. */
   started: boolean;
   /** Start container and return connection info. */
   start(): Promise<unknown>;
@@ -56,12 +62,75 @@ function isDisabled(): boolean {
   return process.env.TESTCONTAINERS_DISABLED === '1';
 }
 
-async function assertDockerAvailable(): Promise<void> {
+async function importTestcontainers() {
   if (isDisabled()) throw new Error('testcontainers_disabled');
-  // Lazy import to keep vitest cold-start fast
-  const { GenericContainer } = await import('testcontainers');
-  // A quick probe: GenericContainer is loaded, Docker daemon will be checked on start()
-  void GenericContainer;
+  return import('testcontainers');
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`testcontainers_timeout:${label}`)), ms);
+    timer.unref?.();
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/**
+ * Probe the Docker daemon (not just module import). Result is cached for the
+ * lifetime of the process so a suite can cheaply call `shouldSkipContainers`.
+ */
+let dockerProbe: Promise<boolean> | null = null;
+
+export async function canRunContainers(): Promise<boolean> {
+  if (isDisabled()) return false;
+  dockerProbe ??= (async () => {
+    try {
+      const { getContainerRuntimeClient } = await importTestcontainers();
+      const client = await withTimeout(getContainerRuntimeClient(), 10_000, 'docker_client');
+      // Any daemon answer means the runtime is reachable.
+      return Boolean(client?.info?.containerRuntime?.serverVersion);
+    } catch {
+      dockerProbe = null;
+      return false;
+    }
+  })();
+  return dockerProbe;
+}
+
+/** Helper for vitest: skip suite when Docker is disabled or unreachable. */
+export async function shouldSkipContainers(): Promise<boolean> {
+  return !(await canRunContainers());
+}
+
+/** Reset the cached Docker probe (tests only). */
+export function resetContainerProbe(): void {
+  dockerProbe = null;
+}
+
+async function startContainer(
+  label: string,
+  start: () => Promise<import('testcontainers').StartedTestContainer>,
+): Promise<import('testcontainers').StartedTestContainer> {
+  if (!(await canRunContainers())) {
+    throw new Error(
+      isDisabled() ? 'testcontainers_disabled' : `testcontainers_docker_unavailable:${label}`,
+    );
+  }
+  return withTimeout(start(), STARTUP_TIMEOUT_MS, label);
+}
+
+async function stopContainer(
+  container: import('testcontainers').StartedTestContainer | null,
+): Promise<void> {
+  if (!container) return;
+  try {
+    await container.stop({ timeout: STOP_TIMEOUT_MS });
+  } catch {
+    // Cleanup must never fail a suite; the reaper will collect leftovers.
+  }
 }
 
 export function withPostgres(
@@ -76,7 +145,8 @@ export function withPostgres(
   const image = options.image ?? process.env.TESTCONTAINERS_PG_IMAGE ?? DEFAULT_IMAGES.postgres;
   const database = options.database ?? 'platform_test';
   const username = options.username ?? 'platform';
-  const password = options.password ?? 'platform';
+  const password =
+    options.password ?? process.env.TESTCONTAINERS_PG_PASSWORD ?? 'platform_test_password';
   const port = options.port ?? 5432;
 
   let container: import('testcontainers').StartedTestContainer | null = null;
@@ -86,22 +156,28 @@ export function withPostgres(
     label: `postgres:${image}`,
     started: false,
     async start() {
-      await assertDockerAvailable();
-      const { GenericContainer, Wait } = await import('testcontainers');
-      const c = await new GenericContainer(image)
-        .withEnvironment({
-          POSTGRES_DB: database,
-          POSTGRES_USER: username,
-          POSTGRES_PASSWORD: password,
-        })
-        .withExposedPorts(port)
-        .withWaitStrategy(Wait.forLogMessage(/database system is ready to accept connections/))
-        .withStartupTimeout(120_000)
-        .start();
+      const { GenericContainer, Wait } = await importTestcontainers();
+      const c = await startContainer(handle.label, () =>
+        new GenericContainer(image)
+          .withEnvironment({
+            POSTGRES_DB: database,
+            POSTGRES_USER: username,
+            POSTGRES_PASSWORD: password,
+          })
+          .withExposedPorts(port)
+          // First message is the init server, second is the final one.
+          .withWaitStrategy(
+            Wait.forLogMessage(
+              /database system is ready to accept connections/,
+              2,
+            ).withStartupTimeout(STARTUP_TIMEOUT_MS),
+          )
+          .start(),
+      );
       container = c;
       const host = c.getHost();
       const mapped = c.getMappedPort(port);
-      connectionString = `postgresql://${username}:${password}@${host}:${mapped}/${database}`;
+      connectionString = `postgresql://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${host}:${mapped}/${database}`;
       handle.started = true;
       return { connectionString, host, port: mapped };
     },
@@ -110,14 +186,13 @@ export function withPostgres(
       return connectionString;
     },
     async runMigrations(migrate) {
-      const url = handle.getConnectionString();
-      await migrate(url);
+      if (!connectionString) throw new Error('postgres_container_not_started');
+      await migrate(connectionString);
     },
     async stop() {
-      if (container) {
-        await container.stop({ timeout: 10_000 }).catch(() => undefined);
-        container = null;
-      }
+      await stopContainer(container);
+      container = null;
+      connectionString = null;
       handle.started = false;
     },
   };
@@ -135,17 +210,19 @@ export function withRedis(options: { image?: string; port?: number } = {}): Redi
     label: `redis:${image}`,
     started: false,
     async start() {
-      await assertDockerAvailable();
-      const { GenericContainer, Wait } = await import('testcontainers');
-      const c = await new GenericContainer(image)
-        .withExposedPorts(port)
-        .withWaitStrategy(Wait.forLogMessage(/Ready to accept connections/))
-        .withStartupTimeout(60_000)
-        .start();
+      const { GenericContainer, Wait } = await importTestcontainers();
+      const c = await startContainer(handle.label, () =>
+        new GenericContainer(image)
+          .withExposedPorts(port)
+          .withWaitStrategy(
+            Wait.forLogMessage(/Ready to accept connections/, 1).withStartupTimeout(
+              STARTUP_TIMEOUT_MS,
+            ),
+          )
+          .start(),
+      );
       container = c;
-      const host = c.getHost();
-      const mapped = c.getMappedPort(port);
-      url = `redis://${host}:${mapped}`;
+      url = `redis://${c.getHost()}:${c.getMappedPort(port)}`;
       handle.started = true;
       return { url };
     },
@@ -154,10 +231,9 @@ export function withRedis(options: { image?: string; port?: number } = {}): Redi
       return url;
     },
     async stop() {
-      if (container) {
-        await container.stop({ timeout: 10_000 }).catch(() => undefined);
-        container = null;
-      }
+      await stopContainer(container);
+      container = null;
+      url = null;
       handle.started = false;
     },
   };
@@ -174,8 +250,9 @@ export function withMinio(
   } = {},
 ): MinioContainerHandle {
   const image = options.image ?? process.env.TESTCONTAINERS_MINIO_IMAGE ?? DEFAULT_IMAGES.minio;
-  const accessKey = options.accessKey ?? 'minio';
-  const secretKey = options.secretKey ?? 'minio12345';
+  const accessKey = options.accessKey ?? process.env.TESTCONTAINERS_MINIO_USER ?? 'minio';
+  const secretKey =
+    options.secretKey ?? process.env.TESTCONTAINERS_MINIO_PASSWORD ?? 'minio_test_password';
   const apiPort = options.apiPort ?? 9000;
   const consolePort = options.consolePort ?? 9001;
 
@@ -186,19 +263,19 @@ export function withMinio(
     label: `minio:${image}`,
     started: false,
     async start() {
-      await assertDockerAvailable();
-      const { GenericContainer, Wait } = await import('testcontainers');
-      const c = await new GenericContainer(image)
-        .withCommand(['server', '/data', '--console-address', `:${consolePort}`])
-        .withEnvironment({ MINIO_ROOT_USER: accessKey, MINIO_ROOT_PASSWORD: secretKey })
-        .withExposedPorts(apiPort, consolePort)
-        .withWaitStrategy(Wait.forLogMessage(/API: http/))
-        .withStartupTimeout(60_000)
-        .start();
+      const { GenericContainer, Wait } = await importTestcontainers();
+      const c = await startContainer(handle.label, () =>
+        new GenericContainer(image)
+          .withCommand(['server', '/data', '--console-address', `:${consolePort}`])
+          .withEnvironment({ MINIO_ROOT_USER: accessKey, MINIO_ROOT_PASSWORD: secretKey })
+          .withExposedPorts(apiPort, consolePort)
+          .withWaitStrategy(
+            Wait.forHttp('/minio/health/live', apiPort).withStartupTimeout(STARTUP_TIMEOUT_MS),
+          )
+          .start(),
+      );
       container = c;
-      const host = c.getHost();
-      const mapped = c.getMappedPort(apiPort);
-      endpoint = `http://${host}:${mapped}`;
+      endpoint = `http://${c.getHost()}:${c.getMappedPort(apiPort)}`;
       handle.started = true;
       return { endpoint, accessKey, secretKey };
     },
@@ -213,29 +290,11 @@ export function withMinio(
       return secretKey;
     },
     async stop() {
-      if (container) {
-        await container.stop({ timeout: 10_000 }).catch(() => undefined);
-        container = null;
-      }
+      await stopContainer(container);
+      container = null;
+      endpoint = null;
       handle.started = false;
     },
   };
   return handle;
-}
-
-/** Helper for vitest: skip suite if Docker disabled. */
-export function shouldSkipContainers(): boolean {
-  return isDisabled();
-}
-
-/** Returns true if current env can run containers (Docker reachable). */
-export async function canRunContainers(): Promise<boolean> {
-  if (isDisabled()) return false;
-  try {
-    await assertDockerAvailable();
-    // Try to instantiate a client without starting; if import succeeds we assume Docker is likely available.
-    return true;
-  } catch {
-    return false;
-  }
 }

@@ -1,164 +1,161 @@
 #!/usr/bin/env node
-// Rolling deploy check for expand-contract (Fase 14 deploy-half)
-// Simulates vN and vN+1 coexisting during rollingDeploy with branches.description expand.
-// Checks:
-//  1. vN (old) can read branches when description column exists but not selected
-//  2. vN+1 (new) can read old rows where description is NULL via COALESCE
-//  3. Both can write (vN without description, vN+1 with description) and not produce 500
-// Usage: node scripts/rolling-deploy-check.mjs --api http://localhost:4000 (requires running API)
-// Or in-memory simulation if no API: just checks schema compatibility
-
+// Rolling deploy check for expand-contract (deploy-half).
+// Default mode talks to a real API and fails honestly when it cannot. Use
+// --static for repository-only checks (no API), clearly labelled as such.
+// Usage:
+//   node scripts/rolling-deploy-check.mjs --api http://localhost:4000
+//   SMOKE_SESSION_COOKIE=platform_session=... node scripts/rolling-deploy-check.mjs
+//   node scripts/rolling-deploy-check.mjs --static
 import { execSync } from 'node:child_process';
+
+const args = process.argv.slice(2);
+const flag = (name) => args.includes(`--${name}`);
+const arg = (name, fallback) =>
+  args
+    .find((a) => a.startsWith(`--${name}=`))
+    ?.split('=')
+    .slice(1)
+    .join('=') ?? fallback;
+
+const api = process.env.API_URL || arg('api', 'http://localhost:4000');
+const tenantHost = process.env.TENANT_HOST || 'acme.app.localhost';
+const production =
+  process.env.NODE_ENV === 'production' ||
+  flag('production') ||
+  process.env.SMOKE_PRODUCTION === '1';
 
 function log(msg) {
   console.log(`[rolling-deploy] ${msg}`);
 }
+function fail(msg) {
+  console.error(`[rolling-deploy] FAIL: ${msg}`);
+  process.exit(1);
+}
+function assert(condition, msg) {
+  if (!condition) fail(msg);
+}
 
-async function checkApi(apiUrl, tenantHost) {
-  // If api is running, test actual HTTP endpoints
-  try {
-    const live = await fetch(`${apiUrl}/health/live`);
-    if (!live.ok) {
-      log(
-        `API at ${apiUrl} not ready (${live.status}) — skipping HTTP check, running in-memory simulation`,
-      );
-      return inMemoryCheck();
-    }
-  } catch {
-    log(`API at ${apiUrl} unreachable — running in-memory simulation`);
-    return inMemoryCheck();
+async function authHeaders() {
+  const cookie = process.env.SMOKE_SESSION_COOKIE || process.env.PLATFORM_SESSION_COOKIE;
+  if (cookie) return { Cookie: cookie };
+  const token = process.env.SMOKE_TOKEN;
+  if (token) return { Authorization: `Bearer ${token}` };
+  if (production) {
+    fail(
+      'production requires SMOKE_SESSION_COOKIE/PLATFORM_SESSION_COOKIE or SMOKE_TOKEN; dev-login is forbidden',
+    );
   }
-
-  // Try dev-login + branch create with/without description
-  const devLogin = await fetch(`${apiUrl}/v1/auth/dev-login`, {
+  const devLogin = await fetch(`${api}/v1/auth/dev-login`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ userId: 'user-alice' }),
+    body: JSON.stringify({ userId: process.env.SMOKE_DEV_USER || 'user-alice' }),
   });
-  if (!devLogin.ok) {
-    log(`dev-login failed ${devLogin.status} — in-memory simulation`);
-    return inMemoryCheck();
-  }
-  const cookie = devLogin.headers.get('set-cookie')?.split(';')[0] ?? '';
-  const headersOld = { Host: tenantHost, Cookie: cookie, 'content-type': 'application/json' };
-  const headersNew = { Host: tenantHost, Cookie: cookie, 'content-type': 'application/json' };
+  if (!devLogin.ok) fail(`dev-login ${devLogin.status}`);
+  const cookieHeader = devLogin.headers.get('set-cookie')?.split(';')[0] ?? '';
+  assert(cookieHeader.includes('platform_session'), 'dev-login returned no session cookie');
+  return { Cookie: cookieHeader };
+}
 
-  // vN create without description
-  const createOld = await fetch(`${apiUrl}/v1/branches`, {
+async function checkApi() {
+  let live;
+  try {
+    live = await fetch(`${api}/health/live`);
+  } catch (error) {
+    fail(
+      `API at ${api} unreachable (${error.message}). Start it or use --static for repository-only checks.`,
+    );
+  }
+  if (!live.ok) fail(`API at ${api} not live (${live.status})`);
+
+  const auth = await authHeaders();
+  const headersOld = { Host: tenantHost, ...auth, 'content-type': 'application/json' };
+
+  const suffix = Date.now();
+
+  const createOld = await fetch(`${api}/v1/branches`, {
     method: 'POST',
     headers: headersOld,
-    body: JSON.stringify({ slug: `test-old-${Date.now()}`, name: 'Old Branch' }),
+    body: JSON.stringify({ slug: `test-old-${suffix}`, name: 'Old Branch' }),
   });
   const oldBody = await createOld.json().catch(() => ({}));
-  if (createOld.status !== 201) {
-    log(`FAIL vN create without description: ${createOld.status} ${JSON.stringify(oldBody)}`);
-    process.exit(1);
-  }
-  log(`OK vN create without description 201 — id ${oldBody.branch?.id ?? '?'}`);
+  assert(
+    createOld.status === 201,
+    `vN create without description: ${createOld.status} ${JSON.stringify(oldBody)}`,
+  );
+  log(`OK vN create without description 201`);
 
-  // vN+1 create with description
-  const createNew = await fetch(`${apiUrl}/v1/branches`, {
+  const createNew = await fetch(`${api}/v1/branches`, {
     method: 'POST',
-    headers: headersNew,
+    headers: headersOld,
     body: JSON.stringify({
-      slug: `test-new-${Date.now()}`,
+      slug: `test-new-${suffix}`,
       name: 'New Branch',
       description: 'hello from vN+1',
     }),
   });
   const newBody = await createNew.json().catch(() => ({}));
-  if (createNew.status !== 201) {
-    log(`FAIL vN+1 create with description: ${createNew.status} ${JSON.stringify(newBody)}`);
-    process.exit(1);
-  }
-  log(`OK vN+1 create with description 201 — id ${newBody.branch?.id ?? '?'}`);
+  assert(
+    createNew.status === 201,
+    `vN+1 create with description: ${createNew.status} ${JSON.stringify(newBody)}`,
+  );
+  log(`OK vN+1 create with description 201`);
 
-  // Both reads via GET
-  const list = await fetch(`${apiUrl}/v1/branches`, {
-    headers: { Host: tenantHost, Cookie: cookie },
-  });
-  const listBody = await list.json().catch(() => ({}));
-  if (list.status !== 200) {
-    log(`FAIL list branches: ${list.status}`);
-    process.exit(1);
-  }
-  const data = listBody.data ?? [];
+  const list = await fetch(`${api}/v1/branches`, { headers: { Host: tenantHost, ...auth } });
+  assert(list.status === 200, `list branches ${list.status}`);
+  const data = (await list.json().catch(() => ({}))).data ?? [];
   log(`OK list branches 200 — count ${data.length}`);
-  // vN simulation: ensure old response doesn't contain unexpected 500 for description rows
+
   const newBranch = data.find((d) => d.name === 'New Branch');
-  if (newBranch && newBranch.description === undefined) {
-    log(
-      `WARN vN would ignore description but new branch has no description in list — check dual-read`,
-    );
-  } else if (newBranch) {
-    log(`OK new branch description visible to vN+1: "${newBranch.description}"`);
-  }
-  const oldBranch = data.find((d) => d.name === 'Old Branch');
-  if (oldBranch)
-    log(`OK old branch description fallback: "${oldBranch.description ?? '(missing)'}" (COALESCE)`);
+  if (!newBranch) log('WARN new branch not visible in list — check dual-read');
+  else if (newBranch.description === undefined)
+    log('WARN description missing in list — check dual-read');
+  else log(`OK description round-trips: "${newBranch.description}"`);
 
-  // Flag kill switch test (per tenant)
-  const flagRes = await fetch(`${apiUrl}/v1/flags`, {
-    headers: { Host: tenantHost, Cookie: cookie },
-  });
-  if (flagRes.ok) {
-    log(`OK flags endpoint reachable`);
-  }
-
-  log(`PASS rolling deploy check (HTTP) — both versions coexist`);
+  log('PASS rolling deploy check (HTTP) — both versions coexist');
 }
 
-async function inMemoryCheck() {
-  // Simulate dual-read logic without DB: check that code handles missing column via try/catch
-  // We import app and run two builds? For now we just verify migration files exist and schema.ts has description
+async function staticCheck() {
   const { readFileSync } = await import('node:fs');
   const expand = readFileSync(
     'packages/db/migrations/schema/0012_expand_branch_description.sql',
     'utf8',
   );
-  if (!expand.includes('add column if not exists description')) {
-    console.error('FAIL expand migration missing description');
-    process.exit(1);
-  }
-  log(`OK expand migration present: ${expand.split('\n')[0]}`);
+  assert(
+    expand.includes('add column if not exists description'),
+    'expand migration missing description',
+  );
+  log(`OK expand migration present`);
+
   const schema = readFileSync('packages/db/src/schema.ts', 'utf8');
-  if (!schema.includes('description')) {
-    console.error('FAIL schema.ts missing description');
-    process.exit(1);
-  }
-  log(`OK schema.ts includes description (expand ready)`);
+  assert(schema.includes('description'), 'schema.ts missing description');
+  log('OK schema.ts includes description (expand ready)');
+
   const appBranches = readFileSync('apps/api/src/app.ts', 'utf8');
   const persistent = readFileSync('apps/api/src/persistent-identity-store.ts', 'utf8');
-  if (
-    !appBranches.includes('COALESCE') &&
-    !appBranches.includes('coalesce') &&
-    !persistent.includes('COALESCE') &&
-    !persistent.includes('coalesce')
-  ) {
-    console.error('FAIL dual-read should have COALESCE (app.ts or persistent-identity-store.ts)');
-    process.exit(1);
-  }
-  log(`OK dual-read (COALESCE) present in app or persistent store`);
+  assert(
+    /coalesce/i.test(appBranches) || /coalesce/i.test(persistent),
+    'dual-read should use COALESCE (app.ts or persistent-identity-store.ts)',
+  );
+  log('OK dual-read (COALESCE) present');
+
   const openapi = readFileSync('docs/api/openapi.yaml', 'utf8');
-  if (!openapi.includes('/v1/branches:') || !openapi.includes('description')) {
-    console.error('FAIL openapi missing branches description');
-    process.exit(1);
-  }
-  log(`OK openapi includes branches description`);
-  // analyze migrations
+  assert(
+    openapi.includes('/v1/branches:') && openapi.includes('description'),
+    'openapi missing branches description',
+  );
+  log('OK openapi includes branches description');
+
   try {
     execSync('node scripts/analyze-migrations.mjs', { stdio: 'inherit' });
-    log(`OK analyze-migrations passed`);
   } catch {
-    console.error('FAIL analyze-migrations');
-    process.exit(1);
+    fail('analyze-migrations failed');
   }
-  log(`PASS rolling deploy check (in-memory) — expand-contract ready for rolling deploy`);
+  log('WARN static mode does not exercise a running API or old/new versions');
+  log('PASS static expand-contract checks (NOT a rolling deploy proof)');
 }
 
-const api =
-  process.env.API_URL ||
-  process.argv.find((a) => a.startsWith('--api='))?.split('=')[1] ||
-  'http://localhost:4000';
-const tenantHost = process.env.TENANT_HOST || 'acme.app.localhost';
-await checkApi(api, tenantHost);
+if (flag('static') || flag('dry-run')) {
+  await staticCheck();
+} else {
+  await checkApi();
+}

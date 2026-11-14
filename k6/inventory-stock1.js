@@ -1,50 +1,28 @@
 import http from 'k6/http';
 import { check, group, sleep } from 'k6';
+import { baseUrl, sessionCookie, tenantHost } from './lib/auth.js';
 
 export const options = {
   vus: 50,
   iterations: 50,
   thresholds: {
-    http_req_failed: ['rate < 0.02'],
+    http_req_failed: ['rate<0.02'],
     http_req_duration: ['p(95)<500'],
     checks: ['rate==1.0'],
   },
 };
 
-// Static test data: assumes InMemory seed or DB seeded with tenant-acme, product-acme-1, branch-acme-main
-// For ephemeral test, you can run with STOCK_PRODUCT_ID and STOCK_BRANCH_ID env.
-const BASE_URL = __ENV.API_URL || 'http://localhost:4000';
-const TENANT_HOST = __ENV.TENANT_HOST || 'acme.app.localhost';
+const BASE_URL = baseUrl();
+const TENANT_HOST = tenantHost();
 const BRANCH_ID = __ENV.BRANCH_ID || 'branch-acme-main';
 const PRODUCT_ID = __ENV.PRODUCT_ID || 'product-acme-1';
-const DEV_USER = __ENV.DEV_USER || 'user-acme-only';
 
-function login() {
-  const res = http.post(`${BASE_URL}/v1/auth/dev-login`, JSON.stringify({ userId: DEV_USER }), {
-    headers: { 'Content-Type': 'application/json' },
-  });
-  check(res, { 'login 200': (r) => r.status === 200 });
-  const cookies = res.cookies[`platform_session`];
-  // Fallback to Set-Cookie header parsing
-  const setCookie = res.headers['Set-Cookie'] || res.headers['set-cookie'];
-  let token = '';
-  if (setCookie) {
-    const m = String(setCookie).match(/platform_session=([^;]+)/);
-    if (m) token = m[1];
-  } else if (cookies && cookies.length) {
-    token = cookies[0].value;
-  }
-  return token ? `platform_session=${token}` : '';
+export function setup() {
+  return { cookie: sessionCookie(__ENV.DEV_USER || 'user-acme-only') };
 }
 
-export default function () {
+export default function (data) {
   group('reserve with stock=1', () => {
-    const cookie = login();
-    if (!cookie) {
-      console.error('login failed, no cookie');
-      return;
-    }
-
     const payload = JSON.stringify({
       branchId: BRANCH_ID,
       productId: PRODUCT_ID,
@@ -55,8 +33,9 @@ export default function () {
       headers: {
         'Content-Type': 'application/json',
         Host: TENANT_HOST,
-        Cookie: cookie,
+        Cookie: data.cookie,
       },
+      tags: { endpoint: 'POST /v1/inventory/reserve' },
     });
 
     const ok = check(res, {
@@ -78,11 +57,9 @@ export function handleSummary(data) {
     stdout: JSON.stringify(
       {
         vus: options.vus,
-        iterations: options.iterations,
-        http_reqs: data.metrics.http_reqs?.values.count,
-        http_req_failed: data.metrics.http_req_failed?.values.rate,
-        http_req_duration_p95: data.metrics.http_req_duration?.values['p(95)'],
-        checks_passed: successes,
+        passed: successes,
+        failed: data.metrics.http_req_failed?.values.rate,
+        p95: data.metrics.http_req_duration?.values['p(95)'],
       },
       null,
       2,

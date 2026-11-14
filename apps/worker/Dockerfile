@@ -8,8 +8,8 @@ WORKDIR /app
 
 FROM base AS deps
 COPY pnpm-workspace.yaml package.json pnpm-lock.yaml .npmrc ./
-COPY apps/worker/package.json apps/worker/package.json
 COPY apps/api/package.json apps/api/package.json
+COPY apps/worker/package.json apps/worker/package.json
 COPY apps/web/package.json apps/web/package.json
 COPY packages/auth/package.json packages/auth/package.json
 COPY packages/config/package.json packages/config/package.json
@@ -25,11 +25,15 @@ FROM base AS build
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=deps /app/apps ./apps
 COPY --from=deps /app/packages ./packages
-COPY pnpm-workspace.yaml package.json pnpm-lock.yaml tsconfig.base.json turbo.json ./
+COPY pnpm-workspace.yaml package.json pnpm-lock.yaml tsconfig.base.json turbo.json .npmrc ./
 COPY eslint.config.mjs prettier.config.mjs ./
+COPY scripts/build-runtime.mjs scripts/build-runtime.mjs
 COPY apps/worker ./apps/worker
 COPY packages ./packages
 RUN pnpm --filter @platform/worker build
+# pnpm deploy --prod resolves the isolated-linker node_modules graph that the
+# old image broke by copying only apps/worker/node_modules.
+RUN node scripts/build-runtime.mjs --filter @platform/worker --target /out
 
 FROM node:${NODE_VERSION} AS runner
 ARG COMMIT_SHA=unknown
@@ -40,23 +44,20 @@ LABEL org.opencontainers.image.revision=$COMMIT_SHA \
       org.opencontainers.image.source="https://github.com/multi-tenant-platform"
 ENV COMMIT_SHA=$COMMIT_SHA
 ENV BUILD_DATE=$BUILD_DATE
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN apk add --no-cache tini \
+    && addgroup -S appgroup \
+    && adduser -S appuser -G appgroup
 WORKDIR /app
 ENV NODE_ENV=production
+ENV WORKER_HEALTH_HOST=0.0.0.0
 ENV WORKER_HEALTH_PORT=4010
-# Copy built output, workspace packages (src) and prod deps.
-# Similar to api, packages are TS src until fully compiled in later phase.
-COPY --from=build /app/apps/worker/dist ./apps/worker/dist
-COPY --from=build /app/apps/worker/package.json ./apps/worker/package.json
-COPY --from=build /app/packages ./packages
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/package.json ./package.json
-COPY --from=build /app/pnpm-workspace.yaml ./pnpm-workspace.yaml
-COPY --from=build /app/pnpm-lock.yaml ./pnpm-lock.yaml
+ENV WORKER_READY_FILE=/tmp/platform-worker-ready
+COPY --from=build /out ./
 USER appuser
 EXPOSE 4010
-# Bootstrap writes a readiness marker for backwards compatibility, while the
-# HTTP endpoint also reports Redis, consumers, relay, scheduler, lag and DLQ.
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+STOPSIGNAL SIGTERM
+# Readiness reports Redis, consumers, relay, scheduler, lag and DLQ.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:4010/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
-CMD ["node_modules/.bin/tsx", "apps/worker/dist/main.js"]
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["node", "dist/main.js"]

@@ -9,9 +9,11 @@ rule_files:
   - /etc/prometheus/alerts.yml
 
 scrape_configs:
+  # API runs on the host (docker compose does not own app containers); the
+  # extra_hosts mapping in docker-compose.yml exposes it as host.docker.internal.
   - job_name: api
     static_configs:
-      - targets: ['api:4000']
+      - targets: ['host.docker.internal:4000']
     metrics_path: /metrics
     scrape_interval: 10s
     scrape_timeout: 5s
@@ -24,16 +26,19 @@ scrape_configs:
 
   - job_name: postgres
     static_configs:
-      - targets: ['postgres:5432']
+      - targets: ['postgres-exporter:9187']
     metrics_path: /metrics
-    scrape_interval: 30s
-    # via postgres_exporter sidecar in prod; stub for local
+    scrape_interval: 15s
 
   - job_name: redis
     static_configs:
-      - targets: ['redis:9121']
-    scrape_interval: 30s
-    # via redis_exporter in prod
+      - targets: ['redis-exporter:9121']
+    scrape_interval: 15s
+
+  - job_name: node
+    static_configs:
+      - targets: ['node-exporter:9100']
+    scrape_interval: 15s
 
   - job_name: prometheus
     static_configs:
