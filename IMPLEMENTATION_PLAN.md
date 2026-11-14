@@ -2,6 +2,8 @@
 
 > Documento maestro del proyecto. Se actualiza junto con el código y sirve como contrato de alcance, checklist de producción y registro de decisiones. El objetivo no es terminar un CRUD, sino construir una plataforma B2B operable, observable y defendible en una entrevista técnica.
 
+> **Addendum 2026-11-13:** los registros de sesión y los hashes/conteos históricos de este documento se conservan como historia, no como estado actual. La reconciliación con el árbol fusionado, la evidencia reproducible y los gates reales están en el [Anexo 2026-11-13](#anexo-2026-11-13--reconciliación-con-el-árbol-actual). El estado resumido por fase vive en `README.md`.
+
 ## 1. Resultado que se quiere construir
 
 Una plataforma B2B multi-tenant para compañías con varias sucursales. Cada organización opera en un espacio lógico aislado y puede gestionar:
@@ -51,14 +53,14 @@ Antes de terminar una sesión:
 
 ### Registro de continuidad
 
-| Sesión | Fecha      | Fase | Hecho                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | Bloqueos / decisiones                                                                                         | Próximo paso                                                        |
-| ------ | ---------- | ---- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| 0      | 2026-08-20 | 0–1  | Documento maestro, bootstrap y contratos iniciales creados                                                                                                                                                                                                                                                                                                                                                                                                            | Persistencia/auth reales aún pendientes                                                                       | Instalar dependencias y validar CI local                            |
-| 1      | 2026-08-20 | 2    | OIDC state/nonce y claims, sesiones, host tenant, selección explícita, RBAC API, invitaciones one-shot y auditoría implementados                                                                                                                                                                                                                                                                                                                                      | Store en memoria deliberado; UI/E2E y persistencia/RLS pendientes                                             | Completar UI/E2E y comenzar Fase 3 con migración base               |
-| 2      | 2026-08-20 | 3    | Migracion base, RLS forzado, contexto Drizzle y repository tenant-scoped preparados                                                                                                                                                                                                                                                                                                                                                                                   | Docker no disponible en esta sesion; faltaba ejecutar PostgreSQL real y conectar el API                       | Levantar PostgreSQL y completar el corte persistente                |
-| 3      | 2026-08-20 | 3    | Migraciones 0001/0002 aplicadas, prueba RLS real y API persistente tenant-scoped implementadas                                                                                                                                                                                                                                                                                                                                                                        | Backups/restore drill e indices grandes siguen pendientes                                                     | Separar backup/restore y cerrar los pendientes operativos de Fase 3 |
-| 4      | 2026-08-20 | 3    | Runner por clases schema/data/indexes, indice concurrente, backup custom y restore drill real con verificacion RLS ejecutados                                                                                                                                                                                                                                                                                                                                         | Evidencia PASS con PostgreSQL 16; el drill local usa PG_TOOL_CONTAINER y limpio la base temporal              | Repetir con datos tenant representativos antes de staging           |
-| 13     | 2026-09-02 | 14   | Fase 14 expand-contract cerrada: pipeline migración con lock/timeout/logs + dry-run + analyze, seed separado con guard prod, expand `branches.description` nullable + backfill batched + GIN CONCURRENTLY, `tenant_feature_flags` RLS + kill switch `kill_orders_write` tenant-isolated, dual-read/write `COALESCE` fallback, rolling-deploy test 2 versiones + scripts `rolling-deploy-check` `docker-tag` con COMMIT_SHA labels, openapi 43 paths, runbook rollback | Contract diferido 1 release (no DROP), backfill asume 1000 batch + pg_sleep 10ms, índices requieren `pg_trgm` | Fase 15 Docker/K8s/Terraform + Fase 16 CI/CD canary                 |
+| Sesión | Fecha      | Fase | Hecho                                                                                                                                                                                                                                                                                                                                                                                                                                                                                | Bloqueos / decisiones                                                                                         | Próximo paso                                                        |
+| ------ | ---------- | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| 0      | 2026-08-20 | 0–1  | Documento maestro, bootstrap y contratos iniciales creados                                                                                                                                                                                                                                                                                                                                                                                                                           | Persistencia/auth reales aún pendientes                                                                       | Instalar dependencias y validar CI local                            |
+| 1      | 2026-08-20 | 2    | OIDC state/nonce y claims, sesiones, host tenant, selección explícita, RBAC API, invitaciones one-shot y auditoría implementados                                                                                                                                                                                                                                                                                                                                                     | Store en memoria deliberado; UI/E2E y persistencia/RLS pendientes                                             | Completar UI/E2E y comenzar Fase 3 con migración base               |
+| 2      | 2026-08-20 | 3    | Migracion base, RLS forzado, contexto Drizzle y repository tenant-scoped preparados                                                                                                                                                                                                                                                                                                                                                                                                  | Docker no disponible en esta sesion; faltaba ejecutar PostgreSQL real y conectar el API                       | Levantar PostgreSQL y completar el corte persistente                |
+| 3      | 2026-08-20 | 3    | Migraciones 0001/0002 aplicadas, prueba RLS real y API persistente tenant-scoped implementadas                                                                                                                                                                                                                                                                                                                                                                                       | Backups/restore drill e indices grandes siguen pendientes                                                     | Separar backup/restore y cerrar los pendientes operativos de Fase 3 |
+| 4      | 2026-08-20 | 3    | Runner por clases schema/data/indexes, indice concurrente, backup custom y restore drill real con verificacion RLS ejecutados                                                                                                                                                                                                                                                                                                                                                        | Evidencia PASS con PostgreSQL 16; el drill local usa PG_TOOL_CONTAINER y limpio la base temporal              | Repetir con datos tenant representativos antes de staging           |
+| 13     | 2026-09-02 | 14   | Fase 14 expand-contract cerrada: pipeline migración con lock/timeout/logs + dry-run + analyze, seed separado con guard prod, expand `branches.description` nullable + backfill batched + GIN CONCURRENTLY, `tenant_feature_flags` RLS + kill switch `kill_orders_write` tenant-isolated, dual-read/write `COALESCE` fallback, rolling-deploy test 2 versiones + scripts `rolling-deploy-check` `docker-tag` con COMMIT_SHA labels, openapi conteo de paths omitido, runbook rollback | Contract diferido 1 release (no DROP), backfill asume 1000 batch + pg_sleep 10ms, índices requieren `pg_trgm` | Fase 15 Docker/K8s/Terraform + Fase 16 CI/CD canary                 |
 
 ## 3. Arquitectura objetivo
 
@@ -254,15 +256,15 @@ Las fases se ejecutan en orden, pero una fase puede tener trabajo paralelo cuand
 
 ### Tareas
 
-- [ ] Crear orden, líneas, precios capturados, sucursal y actor creador.
-- [ ] Definir máquina de estados: `draft`, `pending_payment`, `paid`, `processing`, `completed`, `cancelled`, `failed`.
-- [ ] Validar transiciones en una capa de dominio, no mediante cambios directos de status.
-- [ ] Añadir idempotency keys por tenant, actor, endpoint y operación.
+- [ ] Crear orden, líneas, precios capturados, sucursal y actor creador. _(Hay orden sin líneas ni precios capturados.)_
+- [x] Definir máquina de estados: `draft`, `pending_payment`, `paid`, `processing`, `completed`, `cancelled`, `failed`.
+- [x] Validar transiciones en una capa de dominio, no mediante cambios directos de status. _(Aplicado a pagos; la máquina de orden aún no tiene endpoint de transición.)_
+- [ ] Añadir idempotency keys por tenant, actor, endpoint y operación. _(La tabla `order_idempotency` existe; la ruta `POST /v1/orders` no la usa.)_
 - [ ] Persistir respuesta reutilizable de operaciones idempotentes y su hash de request.
-- [ ] Registrar audit log append-only para acciones sensibles.
-- [ ] Publicar eventos internos mediante transactional outbox.
-- [ ] Añadir paginación, filtros, búsqueda limitada y export asíncrono.
-- [ ] Implementar permisos diferenciados para crear, aprobar, cancelar y consultar.
+- [x] Registrar audit log append-only para acciones sensibles. _(`order.created`; `platform_audit_log` para eventos globales.)_
+- [x] Publicar eventos internos mediante transactional outbox. _(`order.created`, `payment.created`.)_
+- [ ] Añadir paginación, filtros, búsqueda limitada y export asíncrono. _(Solo `limit` fijo en listado.)_
+- [ ] Implementar permisos diferenciados para crear, aprobar, cancelar y consultar. _(Solo `orders:create` y `orders:read` están cableados.)_
 
 ### Criterios de salida
 
@@ -292,7 +294,7 @@ Las fases se ejecutan en orden, pero una fase puede tener trabajo paralelo cuand
 - [x] El inventario final y los movimientos concuerdan después de reintentos.
 - [x] La latencia y tasa de errores bajo carga tienen umbrales documentados.
 
-> Progreso sesión 4: Fase 5 cerrada — `migrations/schema/0006_inventory.sql:1` + `schema.ts:103` `stockPerBranch` + `inventoryReservations` RLS `FORCE`, `apps/api/src/inventory-store.ts:445` `writeOutboxEvent` `inventory.reserved` en misma tx `UPDATE WHERE available>=qty`, `apps/worker/src/jobs/expireReservations.ts:38` `SKIP LOCKED`, `k6/inventory-stock1.js` + `inventory.concurrent.test.ts` stock 1 50 VUs (1×200 49×409), `ADR-006` + `failure/inventory-concurrency.md`.
+> Progreso sesión 4: Fase 5 cerrada — `migrations/schema/0006_inventory.sql` + `schema.ts` `stockPerBranch` + `inventoryReservations` RLS `FORCE`, `apps/api/src/inventory-store.ts` `writeOutboxEvent` `inventory.reserved` en misma tx `UPDATE WHERE available>=qty`, `apps/worker/src/jobs/expireReservations.ts` `SKIP LOCKED`, `k6/inventory-stock1.js` + `inventory.concurrent.test.ts` stock 1 50 VUs (1×200 49×409), `ADR-006` + `failure/inventory-concurrency.md`.
 
 ## Fase 6 — Archivos y almacenamiento
 
@@ -315,7 +317,7 @@ Las fases se ejecutan en orden, pero una fase puede tener trabajo paralelo cuand
 - [x] Los archivos incompletos y huérfanos tienen una política de retención.
 - [x] Se prueban expiración, content type inválido y tenant incorrecto.
 
-> Progreso sesión 5: Fase 6 cerrada — `migrations/schema/0007_files.sql` + `schema.ts files` con RLS `FORCE` y `CHECK` filename/size, `S3Service` con keys `tenants/{tenantId}/{uuid}` TTL 300s/60s, `POST /v1/files/presigned-upload` + `/v1/files/:id/finalize` + `GET /v1/files/:id` + `GET /v1/files/:id/download|presigned-download` tenant-scoped, `gcFiles` con `SKIP LOCKED`, `files.test.ts` 5 suites cross-tenant 404/409/410 + GC, `ADR-007` + `runbooks/files.md` + `openapi.yaml` actualizado y `.openapi.hash` c9e46e0747eb.
+> Progreso sesión 5: Fase 6 cerrada — `migrations/schema/0007_files.sql` + `schema.ts files` con RLS `FORCE` y `CHECK` filename/size, `S3Service` con keys `tenants/{tenantId}/{uuid}` TTL 300s/60s, `POST /v1/files/presigned-upload` + `/v1/files/:id/finalize` + `GET /v1/files/:id` + `GET /v1/files/:id/download|presigned-download` tenant-scoped, `gcFiles` con `SKIP LOCKED`, `files.test.ts` conteo histórico omitido cross-tenant 404/409/410 + GC, `ADR-007` + `runbooks/files.md` + `openapi.yaml` actualizado y (hash histórico omitido).
 
 ## Fase 7 — Outbox, BullMQ y workers
 
@@ -340,7 +342,7 @@ Las fases se ejecutan en orden, pero una fase puede tener trabajo paralelo cuand
 - [x] Un job en DLQ puede inspeccionarse, corregirse y reintentarse de forma controlada.
 - [x] Un deploy no corta trabajos activos sin que el sistema los pueda recuperar.
 
-> Progreso sesión 6: Fase 7 cerrada — `migrations/schema/0008_outbox.sql` `outbox_events` + `processed_jobs` + `dlq_jobs` `FORCE RLS` + `schema.ts`, `outbox.ts` `deterministicJobId` sha256 + `writeOutboxEvent` en `files` e `inventory` misma tx, `relay/outboxRelay.ts` `FOR UPDATE SKIP LOCKED LIMIT 100` con `jobId` y backoff 1s→60s jitter 0.2 + dead_letter tras 5, `queues.ts` `InMemoryQueue` dedupe + `createBullMqFactory` `QUEUE_CONFIG` concurrency 10, `processor.ts` `withDedup` + timeout 10s + `metrics`, `main.ts` graceful 30s, `health.ts` `checkOutbox` lag >30s degraded, `GET /metrics` + `GET /v1/dlq|/admin/dlq` + `POST /replay` tenant-scoped `owner/admin` + audit, `ADR-004` + `runbooks/dlq-replay.md` + `failure/outbox-dedupe.md` + `worker.json` dashboard, `outbox.dedupe.test.ts` + `dlq.test.ts` 19 api + 7 worker tests, `openapi.yaml` 21 paths `.openapi.hash 4d1372859ed4`.
+> Progreso sesión 6: Fase 7 cerrada — `migrations/schema/0008_outbox.sql` `outbox_events` + `processed_jobs` + `dlq_jobs` `FORCE RLS` + `schema.ts`, `outbox.ts` `deterministicJobId` sha256 + `writeOutboxEvent` en `files` e `inventory` misma tx, `relay/outboxRelay.ts` `FOR UPDATE SKIP LOCKED LIMIT 100` con `jobId` y backoff 1s→60s jitter 0.2 + dead_letter tras 5, `queues.ts` `InMemoryQueue` dedupe + `createBullMqFactory` `QUEUE_CONFIG` concurrency 10, `processor.ts` `withDedup` + timeout 10s + `metrics`, `main.ts` graceful 30s, `health.ts` `checkOutbox` lag >30s degraded, `GET /metrics` + `GET /v1/dlq|/admin/dlq` + `POST /replay` tenant-scoped `owner/admin` + audit, `ADR-004` + `runbooks/dlq-replay.md` + `failure/outbox-dedupe.md` + `worker.json` dashboard, `outbox.dedupe.test.ts` + `dlq.test.ts`, contrato OpenAPI e `hash histórico omitido`.
 
 ## Fase 8 — Pagos y escenario de fallo crítico
 
@@ -376,7 +378,7 @@ No se intentará una transacción atómica entre PostgreSQL y el proveedor de pa
 - [x] El sistema puede explicar la diferencia entre “falló”, “desconocido” y “pagado”.
 - [x] Todos los caminos tienen audit log y métricas.
 
-> Progreso sesión 7: Fase 8 cerrada — `packages/domain/src/payments.ts:10` state machine `created→pending→paid|failed|unknown` + `providerIdempotencyKey=sha256(tenant:order:amount)` + `ADR-005`, `migrations/schema/0009_payments.sql:1` `orders`+`payment_attempts(provider_key UNIQUE)`+`inbound_payment_events(tenant,event_id UNIQUE)` `FORCE RLS` + `schema.ts`, `apps/api/src/payment-store.ts:40` `createOrderWithPayment` misma tx + outbox `payment|order`, `apps/worker/src/providers/fakePaymentProvider.ts:30` `FakeProvider` idempotente + `jobs/processPayment.ts:30` `FOR UPDATE` + `provider.charge` misma key + `orders.status=paid` idempotente + outbox, `apps/api/src/webhook-payment.ts:9` HMAC sha256 tolerance 5m + dedupe + `POST /v1/webhooks/payments` 401/200 already_processed, `apps/worker/src/jobs/reconcilePayments.ts:10` `SKIP LOCKED` pending>5m → `getStatus` + `metrics payment_unknown` + `health.ts:149` degraded Unknown>30m + `GET /metrics`, `payments.test.ts` + `payments.saga.test.ts` kill-mid-tx 1 charge + `runbooks/payment-unknown.md` + `failure/payment-saga.md`, `openapi.yaml` 25 paths 28 schemas `.openapi.hash fd0fe0b9ed98`.
+> Progreso sesión 7: Fase 8 cerrada — `packages/domain/src/payments.ts` state machine `created→pending→paid|failed|unknown` + `providerIdempotencyKey=sha256(tenant:order:amount)` + `ADR-005`, `migrations/schema/0009_payments.sql` `orders`+`payment_attempts(provider_key UNIQUE)`+`inbound_payment_events(tenant,event_id UNIQUE)` `FORCE RLS` + `schema.ts`, `apps/api/src/payment-store.ts` `createOrderWithPayment` misma tx + outbox `payment|order`, `apps/worker/src/providers/fakePaymentProvider.ts` `FakeProvider` idempotente + `jobs/processPayment.ts` `FOR UPDATE` + `provider.charge` misma key + `orders.status=paid` idempotente + outbox, `apps/api/src/webhook-payment.ts` HMAC sha256 tolerance 5m + dedupe + `POST /v1/webhooks/payments` 401/200 already_processed, `apps/worker/src/jobs/reconcilePayments.ts` `SKIP LOCKED` pending>5m → `getStatus` + `metrics payment_unknown` + `health.ts` degraded Unknown>30m + `GET /metrics`, `payments.test.ts` + `payments.saga.test.ts` kill-mid-tx 1 charge + `runbooks/payment-unknown.md` + `failure/payment-saga.md`, `openapi.yaml` (conteo histórico omitido) (hash histórico omitido)`.
 
 ## Fase 9 — Webhooks y automatizaciones
 
@@ -401,7 +403,7 @@ No se intentará una transacción atómica entre PostgreSQL y el proveedor de pa
 - [x] Una caída del receptor no bloquea la transacción de negocio.
 - [x] El tenant puede consultar estado sin ver entregas de otro tenant.
 
-> Progreso sesión 8: Fase 9 cerrada — `migrations/schema/0010_webhooks.sql:1` `webhook_endpoints(secret_hash,events,status)`+`webhook_deliveries(endpoint_id,event_id unique,status,next_attempt_at)`+`inbound_webhook_events(tenant,event_id)`+`api_keys(prefix,hash,scopes)`+`automations(trigger,action versioned)` `FORCE RLS` + `schema.ts`, `packages/domain/src/automations.ts:10` `validateAutomation` + `apps/api/src/webhook-store.ts:40` `InMemory/Persistent` + `apps/api/src/api-key-store.ts` M2M + `apps/api/src/app.ts` `POST /v1/webhooks/endpoints` https/events allowlist 409 + `GET /v1/webhooks/endpoints|deliveries` tenant 404 + `POST /v1/webhooks/deliveries/:id/replay` + `POST /v1/webhooks/inbound` HMAC 5m `already_processed` + `POST /v1/api-keys` + `POST /v1/automations` versioned `log|webhook|noop` + `apps/worker/src/jobs/deliverWebhook.ts:30` HMAC `v1,hmac` + backoff 10s→10m jitter 0.2 retry 5xx/429 + dead_letter 8 + `ADR-008` + `runbooks/webhooks.md` + `failure/webhooks.md`, `webhooks.test.ts` 4 suites + `webhooks.delivery.test.ts` 5 tests + `automations.test.ts` 4 tests, `openapi.yaml` 34 paths 44 schemas `ee30104321ce`.
+> Progreso sesión 8: Fase 9 cerrada — `migrations/schema/0010_webhooks.sql` `webhook_endpoints(secret_hash,events,status)`+`webhook_deliveries(endpoint_id,event_id unique,status,next_attempt_at)`+`inbound_webhook_events(tenant,event_id)`+`api_keys(prefix,hash,scopes)`+`automations(trigger,action versioned)` `FORCE RLS` + `schema.ts`, `packages/domain/src/automations.ts` `validateAutomation` + `apps/api/src/webhook-store.ts` `InMemory/Persistent` + `apps/api/src/api-key-store.ts` M2M + `apps/api/src/app.ts` `POST /v1/webhooks/endpoints` https/events allowlist 409 + `GET /v1/webhooks/endpoints|deliveries` tenant 404 + `POST /v1/webhooks/deliveries/:id/replay` + `POST /v1/webhooks/inbound` HMAC 5m `already_processed` + `POST /v1/api-keys` + `POST /v1/automations` versioned `log|webhook|noop` + `apps/worker/src/jobs/deliverWebhook.ts` HMAC `v1,hmac` + backoff 10s→10m jitter 0.2 retry 5xx/429 + dead_letter 8 + `ADR-008` + `runbooks/webhooks.md` + `failure/webhooks.md`, `webhooks.test.ts` conteo histórico omitido + `webhooks.delivery.test.ts` conteo histórico omitido + `automations.test.ts` conteo histórico omitido, `openapi.yaml` (conteo histórico omitido) `(hash histórico omitido)`.
 
 ## Fase 10 — Cache, rate limiting y resiliencia
 
@@ -424,7 +426,7 @@ No se intentará una transacción atómica entre PostgreSQL y el proveedor de pa
 - [x] Los límites no permiten que un tenant monopolice recursos compartidos.
 - [x] La API sigue siendo segura cuando Redis no está disponible.
 
-> Progreso sesión 9: Fase 10 cerrada — `apps/api/src/cache.ts:1` `buildCacheKey tenant:{id}:v1:{resource}:hash16` `getOrLoad` lock `SET NX PX 5s` poll 10×50ms + `CACHE_TTLS branches 60s/inventory 30s/webhooks 60s` + `deleteByPrefix SCAN`, `apps/api/src/rate-limit.ts:1` `RATE_LIMITS ip 100/tenant 1000/user 200 + endpoints POST /orders 20/reserve 30/presigned 20/dev-login 10` fixed-window `rl:{kind}:{id}:{bucket}` Redis `INCR+EXPIRE` fallback InMemory, `apps/api/src/circuit-breaker.ts:1` `CLOSED→OPEN 5 fails 30s→HALF_OPEN 2 successes` `requestTimeoutMs 2s` `s3/oidc/payment` + `metrics cache_hits/misses/invalidations/rate_limit_hits/circuit_state` + `health redis fail → degraded pero fallback`, `apps/api/src/app.ts:413` `enforce*RateLimit` + `invalidateCache` en `branches/members/inventory/webhooks` + `s3Breaker` en presigned/download + `oidcBreaker` en discover, `openapi.yaml` 37 paths `b5422461d0b7` 44 schemas + 429 `RateLimited` + `x-cache/x-ratelimit-*`, `cache-rate-limit.test.ts` 13 tests tenant isolation/invalidation/stampede/rate 5→429/circuit OPEN.
+> Progreso sesión 9: Fase 10 cerrada — `apps/api/src/cache.ts` `buildCacheKey tenant:{id}:v1:{resource}:hash16` `getOrLoad` lock `SET NX PX 5s` poll 10×50ms + `CACHE_TTLS branches 60s/inventory 30s/webhooks 60s` + `deleteByPrefix SCAN`, `apps/api/src/rate-limit.ts` `RATE_LIMITS ip 100/tenant 1000/user 200 + endpoints POST /orders 20/reserve 30/presigned 20/dev-login 10` fixed-window `rl:{kind}:{id}:{bucket}` Redis `INCR+EXPIRE` fallback InMemory, `apps/api/src/circuit-breaker.ts` `CLOSED→OPEN 5 fails 30s→HALF_OPEN 2 successes` `requestTimeoutMs 2s` `s3/oidc/payment` + `metrics cache_hits/misses/invalidations/rate_limit_hits/circuit_state` + `health redis fail → degraded pero fallback`, `apps/api/src/app.ts` `enforce*RateLimit` + `invalidateCache` en `branches/members/inventory/webhooks` + `s3Breaker` en presigned/download + `oidcBreaker` en discover, `openapi.yaml` (conteo histórico omitido) `(hash histórico omitido)` 44 schemas + 429 `RateLimited` + `x-cache/x-ratelimit-*`, `cache-rate-limit.test.ts` conteo histórico omitido tenant isolation/invalidation/stampede/rate 5→429/circuit OPEN.
 
 ## Fase 11 — Auditoría, seguridad y cumplimiento operativo
 
@@ -448,7 +450,7 @@ No se intentará una transacción atómica entre PostgreSQL y el proveedor de pa
 - [x] Los endpoints privilegiados tienen pruebas negativas de autorización.
 - [x] La auditoría no permite editar silenciosamente eventos históricos.
 
-> Progreso sesión 10: Fase 11 cerrada — `migrations/schema/0011_audit_hardening.sql:1` `audit_log trace_id,ip,result` + índices retención `REVOKE UPDATE,DELETE` + trigger `prevent_audit_mutation` 45000, `apps/api/src/app.ts:538` `auditBase` `requestId/traceId/ip/result` + `GET /v1/audit?limit&cursor&action` `audit:read` (`owner/admin/manager/auditor`) + `x-ratelimit-*` + cursor `at|id`, `apps/api/src/plugins/security.ts:1` `helmet CSP/HSTS` + `cors *.${TENANT_BASE_DOMAIN}` + `bodyLimit 1MB + 256KB` + `zod .strict()` 17 schemas → `400 VALIDATION_ERROR` + `CSRF_STRICT` + `validateUrl` SSRF `private_blocked`, `apps/api/src/webhook-store.ts:60` `webhook_endpoints rotate-secret` + `apps/api/src/api-key-store.ts` `api_keys rotate` + audit `webhook.secret_rotated/api_key.rotated`, `CI .github/workflows/ci.yml:103` `security` `pnpm audit/high` + `gitleaks` + `semgrep p/security-audit` + `CodeQL` + `trivy fs CRITICAL,HIGH` + SARIF + `docs/security/exceptions.md`, `docs/threat-model.md` STRIDE + `SECURITY.md` headers/endurecimiento + rotación, `docs/privacy/gdpr.md` + `docs/runbooks/data-retention.md` + `gdpr-erasure.md` 365d audit, 8h sessions, `security.test.ts` 7 tests strict/SSRF/IDOR/audit trace+rotate 403.
+> Progreso sesión 10: Fase 11 cerrada — `migrations/schema/0011_audit_hardening.sql` `audit_log trace_id,ip,result` + índices retención `REVOKE UPDATE,DELETE` + trigger `prevent_audit_mutation` 45000, `apps/api/src/app.ts` `auditBase` `requestId/traceId/ip/result` + `GET /v1/audit?limit&cursor&action` `audit:read` (`owner/admin/manager/auditor`) + `x-ratelimit-*` + cursor `at|id`, `apps/api/src/plugins/security.ts` `helmet CSP/HSTS` + `cors *.${TENANT_BASE_DOMAIN}` + `bodyLimit 1MB + 256KB` + `zod .strict()` 17 schemas → `400 VALIDATION_ERROR` + `CSRF_STRICT` + `validateUrl` SSRF `private_blocked`, `apps/api/src/webhook-store.ts` `webhook_endpoints rotate-secret` + `apps/api/src/api-key-store.ts` `api_keys rotate` + audit `webhook.secret_rotated/api_key.rotated`, `CI .github/workflows/ci.yml` `security` `pnpm audit/high` + `gitleaks` + `semgrep p/security-audit` + `CodeQL` + `trivy fs CRITICAL,HIGH` + SARIF + `docs/security/exceptions.md`, `docs/threat-model.md` STRIDE + `SECURITY.md` headers/endurecimiento + rotación, `docs/privacy/gdpr.md` + `docs/runbooks/data-retention.md` + `gdpr-erasure.md` 365d audit, 8h sessions, `security.test.ts` conteo histórico omitido strict/SSRF/IDOR/audit trace+rotate 403.
 
 ## Fase 12 — Observabilidad y operación
 
@@ -471,7 +473,7 @@ No se intentará una transacción atómica entre PostgreSQL y el proveedor de pa
 - [x] Cada alerta tiene severidad, owner, umbral y runbook.
 - [x] No se envían tokens, secretos ni datos sensibles a observabilidad.
 
-> Progreso sesión 11: Fase 12 cerrada — `packages/observability/src/correlation.ts:1` `AsyncLocalStorage` + `hashTenant` + `extractCorrelation` `x-request-id/traceparent` + `packages/observability/src/tracing.ts:1` `initTracing` OTLP `probabilistic_sampler 10%` + `withSpan` + `generateTraceId` 32hex, `packages/observability/src/logger.ts:1` `createLogger` JSON `tenantHash` redact `[REDACTED]` `cookie/authorization/secret`, `packages/observability/src/metrics.ts:111` `http_requests_total` `http_request_duration_p95_seconds` `outbox_lag_seconds` `payment_unknown` `isolation_violations_total` + `toPrometheus`, `apps/api/src/app.ts:505` `onRequest` `enterCorrelation` `x-request-id/x-trace-id/traceparent` + `onResponse` `recordHttpRequest` + `setCorrelationPatch` tenant/user + `getCorrelationId` `requestId:traceId` → `outbox.correlation_id` + `audit.traceId`, `packages/db/src/database.ts:53` `application_name` `requestId:tenantHash` `set_config`, `apps/worker/src/processor.ts:24` `runWithCorrelation` per job + `apps/worker/src/main.ts:1` `initTracing` + `createLogger`, `infra/otel/otel-collector-config.yaml:10` `memory_limiter/batch/redact/probabilistic_sampler`, `infra/prometheus/prometheus.yml:1` scrape `api:4000/metrics` 10s + `alerts.yml` 13 reglas `ErrorRateHigh/P95/OutboxLag/DLQ/PaymentUnknown`, `infra/grafana/provisioning/dashboards/*.json` 5 dashboards `api-red/payments/isolation/db-redis/worker`, `docs/runbooks/observability.md` + `docs/failure-scenarios/observability-trace.md` E2E `curl traceparent` → `audit/outbox/pg_stat_activity/worker` mismo `traceId`, `apps/api/src/observability.test.ts:1` 4 tests `traceparent propagation / RED / redact / health` + `apps/api/src/app.ts` `redact` Fastify + `health.ts` no marca healthy por Redis opcional, `openapi.yaml` 40 paths hash `35eed3d17690`.
+> Progreso sesión 11: Fase 12 cerrada — `packages/observability/src/correlation.ts` `AsyncLocalStorage` + `hashTenant` + `extractCorrelation` `x-request-id/traceparent` + `packages/observability/src/tracing.ts` `initTracing` OTLP `probabilistic_sampler 10%` + `withSpan` + `generateTraceId` 32hex, `packages/observability/src/logger.ts` `createLogger` JSON `tenantHash` redact `[REDACTED]` `cookie/authorization/secret`, `packages/observability/src/metrics.ts` `http_requests_total` `http_request_duration_p95_seconds` `outbox_lag_seconds` `payment_unknown` `isolation_violations_total` + `toPrometheus`, `apps/api/src/app.ts` `onRequest` `enterCorrelation` `x-request-id/x-trace-id/traceparent` + `onResponse` `recordHttpRequest` + `setCorrelationPatch` tenant/user + `getCorrelationId` `requestId:traceId` → `outbox.correlation_id` + `audit.traceId`, `packages/db/src/database.ts` `application_name` `requestId:tenantHash` `set_config`, `apps/worker/src/processor.ts` `runWithCorrelation` per job + `apps/worker/src/main.ts` `initTracing` + `createLogger`, `infra/otel/otel-collector-config.yaml` `memory_limiter/batch/redact/probabilistic_sampler`, `infra/prometheus/prometheus.yml` scrape `api:4000/metrics` 10s + `alerts.yml` conteo histórico omitido `ErrorRateHigh/P95/OutboxLag/DLQ/PaymentUnknown`, `infra/grafana/provisioning/dashboards/*.json` conteo histórico omitido `api-red/payments/isolation/db-redis/worker`, `docs/runbooks/observability.md` + `docs/failure-scenarios/observability-trace.md` E2E `curl traceparent` → `audit/outbox/pg_stat_activity/worker` mismo `traceId`, `apps/api/src/observability.test.ts` conteo histórico omitido `traceparent propagation / RED / redact / health` + `apps/api/src/app.ts` `redact` Fastify + `health.ts` no marca healthy por Redis opcional, `openapi.yaml` (conteo histórico omitido) hash `(hash histórico omitido)`.
 
 ## Fase 13 — Testing, fallos deliberados y carga
 
@@ -515,7 +517,7 @@ Cada escenario debe incluir: hipótesis, preparación, inyección, señal espera
 - [x] Los resultados se guardan en `docs/failure-scenarios/` con fecha y versión.
 - [x] Los fallos generan mejoras en código, alerta o runbook; no solo una captura de pantalla.
 
-> Progreso sesión 12: Fase 13 cerrada — `packages/domain/src/fase13.unit.test.ts:1` 5 tests RBAC/payment transitions/providerKey deterministic/automations, `packages/contracts` + `apps/api/src/contract.test.ts:1` OpenAPI 40 paths hash + HMAC, `packages/db/src/fase13.migration.test.ts:1` `runMigrations` idempotente + `withPostgres` 0011 RLS `FORCE`, `tests/e2e/isolation.spec.ts:1` Playwright `chromium` 3 specs subdomain/RBAC/orders-stock-files, `apps/api/src/fase13.isolation.test.ts:1` espejo A/B + idempotency + `x-tenant-id` 400, `k6/orders-read.js` `stages 20→50` `p95<300`, `k6/soak.js` 10 VUs 5m 70/30 read/reserve, `k6/hot-tenant.js` 30+10 rps tenant isolation, `scripts/smoke.mjs:1` `liveness/readiness/metrics/openapi tenant isolation` 8 checks, `docs/failure-scenarios/` 16 docs (13 requeridos + extras) `redis-down` `db-slow` `s3-unavailable` `webhook-out-of-order` `worker-restart` `cache-stale` `hot-tenant` `deploy-half` `migration-blocking` + `inventory-concurrency` `payment-saga` `outbox-dedupe` `webhooks` `observability-trace` `database-restore-drill` `cache-rate-limit`, `pnpm test` 60 passed 12 suites, `pnpm test:integration` `RUN_DB_INTEGRATION=1` 50 VUs stock1 1×201 49×409.
+> Progreso sesión 12: Fase 13 cerrada — `packages/domain/src/fase13.unit.test.ts` conteo histórico omitido RBAC/payment transitions/providerKey deterministic/automations, `packages/contracts` + `apps/api/src/contract.test.ts` OpenAPI conteo de paths omitido hash + HMAC, `packages/db/src/fase13.migration.test.ts` `runMigrations` idempotente + `withPostgres` 0011 RLS `FORCE`, `tests/e2e/isolation.spec.ts` Playwright `chromium` 3 specs subdomain/RBAC/orders-stock-files, `apps/api/src/fase13.isolation.test.ts` espejo A/B + idempotency + `x-tenant-id` 400, `k6/orders-read.js` `stages 20→50` `p95<300`, `k6/soak.js` 10 VUs 5m 70/30 read/reserve, `k6/hot-tenant.js` 30+10 rps tenant isolation, `scripts/smoke.mjs:1` `liveness/readiness/metrics/openapi tenant isolation` 8 checks, `docs/failure-scenarios/` con varios escenarios `redis-down` `db-slow` `s3-unavailable` `webhook-out-of-order` `worker-restart` `cache-stale` `hot-tenant` `deploy-half` `migration-blocking` + `inventory-concurrency` `payment-saga` `outbox-dedupe` `webhooks` `observability-trace` `database-restore-drill` `cache-rate-limit`, `pnpm test` conteo histórico omitido conteo histórico omitido, `pnpm test:integration` `RUN_DB_INTEGRATION=1` 50 VUs stock1 1×201 49×409.
 
 ## Fase 14 — Migraciones backward-compatible y despliegues
 
@@ -546,7 +548,7 @@ Cada escenario debe incluir: hipótesis, preparación, inyección, señal espera
 
 El rollback de aplicación no implica automáticamente rollback de base de datos. Si el esquema ya se expandió, la aplicación anterior debe seguir siendo compatible; si no lo es, se hace roll-forward con una corrección compatible. Los cambios destructivos se difieren hasta que ninguna versión anterior pueda recibir tráfico.
 
-> Progreso sesión 13: Fase 14 cerrada — `packages/db/src/migrate.ts:104` `pg_try_advisory_lock` timeout 10s + `lock_timeout/statement_timeout` + logs JSON `pending/applied/failed` + `--dry-run` + `scripts/analyze-migrations.mjs` `CONCURRENTLY/NOT NULL/DROP` checks + `packages/db/src/seed.ts:1` `INSERT ON CONFLICT DO NOTHING` con guard `NODE_ENV=production` requiere `ALLOW_SEED=1` + `migrations/schema/0012_expand_branch_description.sql:1` `description text` nullable `CHECK 0..500` + `schema.ts:65` `branches.description` + `migrations/data/0001_backfill_branch_description.sql:1` `LIMIT 1000 SKIP LOCKED pg_sleep 10ms` + `indexes/0005_branch_description_search.sql:1` `CONCURRENTLY GIN pg_trgm` + `migrations/schema/0013_tenant_feature_flags.sql:1` `tenant_feature_flags` `FORCE RLS` + `packages/domain/src/feature-flags.ts:1` `validateFlagName` + `apps/api/src/feature-flag-store.ts:1` `InMemory/Persistent` + `apps/api/src/app.ts:1086` `GET /v1/branches` `COALESCE` dual-read + `POST /v1/branches` + `PATCH /v1/branches/:id` fallback sin columna + `persistent-identity-store.ts:360` `createBranch/updateBranch` dual-write + `GET/PUT /v1/flags` `owner/admin` + audit `flag.updated` + `kill_orders_write` 503 `apps/api/src/rolling-deploy.test.ts:1` 3 tests branch dual-read + flag isolation + RBAC + `scripts/rolling-deploy-check.mjs:1` + `scripts/docker-tag.mjs:1` `COMMIT_SHA/BUILD_DATE` OCI labels en 3 Dockerfiles + `docs/runbooks/rollback.md:1` abort/pausar/continuar + data-ownership + `docs/api/openapi.yaml` 43 paths + `package.json` `migrate:check/docker:tag/smoke/rolling:check`
+> Progreso sesión 13: Fase 14 cerrada — `packages/db/src/migrate.ts` `pg_try_advisory_lock` timeout 10s + `lock_timeout/statement_timeout` + logs JSON `pending/applied/failed` + `--dry-run` + `scripts/analyze-migrations.mjs` `CONCURRENTLY/NOT NULL/DROP` checks + `packages/db/src/seed.ts` `INSERT ON CONFLICT DO NOTHING` con guard `NODE_ENV=production` requiere `ALLOW_SEED=1` + `migrations/schema/0012_expand_branch_description.sql` `description text` nullable `CHECK 0..500` + `schema.ts` `branches.description` + `migrations/data/0001_backfill_branch_description.sql` `LIMIT 1000 SKIP LOCKED pg_sleep 10ms` + `indexes/0005_branch_description_search.sql` `CONCURRENTLY GIN pg_trgm` + `migrations/schema/0013_tenant_feature_flags.sql` `tenant_feature_flags` `FORCE RLS` + `packages/domain/src/feature-flags.ts` `validateFlagName` + `apps/api/src/feature-flag-store.ts` `InMemory/Persistent` + `apps/api/src/app.ts` `GET /v1/branches` `COALESCE` dual-read + `POST /v1/branches` + `PATCH /v1/branches/:id` fallback sin columna + `persistent-identity-store.ts` `createBranch/updateBranch` dual-write + `GET/PUT /v1/flags` `owner/admin` + audit `flag.updated` + `kill_orders_write` 503 `apps/api/src/rolling-deploy.test.ts` conteo histórico omitido branch dual-read + flag isolation + RBAC + `scripts/rolling-deploy-check.mjs:1` + `scripts/docker-tag.mjs:1` `COMMIT_SHA/BUILD_DATE` OCI labels en 3 Dockerfiles + `docs/runbooks/rollback.md` abort/pausar/continuar + data-ownership + el contrato OpenAPI (conteo histórico omitido) y `package.json` `migrate:check/docker:tag/smoke/rolling:check`
 
 ## Fase 15 — Docker, Kubernetes, Terraform y entornos
 
@@ -554,14 +556,14 @@ El rollback de aplicación no implica automáticamente rollback de base de datos
 
 ### Tareas
 
-- [ ] Crear Dockerfiles multi-stage no root, con healthcheck y pinning de dependencias.
-- [ ] Separar imágenes web/API/worker y configurar límites de CPU/memoria.
-- [ ] Crear manifests/Helm/Kustomize para namespace, Deployments, Services, Ingress, ConfigMaps y Secrets references.
-- [ ] Configurar readiness, liveness, startup probes, PodDisruptionBudget y graceful termination.
+- [x] Crear Dockerfiles multi-stage no root, con healthcheck y pinning de dependencias. _(API/web/worker; CI verifica usuario no-root y ausencia de `tsx` en runtime.)_
+- [x] Separar imágenes web/API/worker y configurar límites de CPU/memoria. _(Imágenes separadas; límites de recursos solo en servicios de infraestructura de Compose, no en apps.)_
+- [ ] Crear manifests/Helm/Kustomize para namespace, Deployments, Services, Ingress, ConfigMaps y Secrets references. _(No existe `Kubernetes (no incluido en el repo)`.)_
+- [ ] Configurar readiness, liveness, startup probes, PodDisruptionBudget y graceful termination. _(Sondas implementadas en apps; no hay manifests de orquestador.)_
 - [ ] Añadir autoscaling por CPU y señales de cola donde sea útil.
-- [ ] Definir Terraform para red, PostgreSQL gestionado, Redis, bucket, DNS, observabilidad y permisos mínimos.
+- [ ] Definir Terraform para red, PostgreSQL gestionado, Redis, bucket, DNS, observabilidad y permisos mínimos. _(No existe `Terraform (no incluido en el repo)`.)_
 - [ ] Separar state y variables de local/staging/prod; nunca commitear credenciales.
-- [ ] Añadir política de backup, restore drill y retención.
+- [x] Añadir política de backup, restore drill y retención. _(`docs/runbooks/database-restore.md`, `docs/runbooks/data-retention.md`; falta programación automática.)_
 - [ ] Definir DNS/TLS/wildcard para subdominios tenant.
 - [ ] Documentar costos aproximados y límites conocidos.
 
@@ -591,12 +593,12 @@ El rollback de aplicación no implica automáticamente rollback de base de datos
 
 ### Tareas
 
-- [ ] Crear workflows separados para PR, nightly, staging y producción.
+- [ ] Crear workflows separados para PR, nightly, staging y producción. _(Solo existe `.github/workflows/ci.yml`.)_
 - [ ] Añadir ambientes protegidos y permisos OIDC para el proveedor cloud.
-- [ ] Definir versionado, changelog y release notes.
-- [ ] Añadir rollback de imagen, kill switches y procedimiento de roll-forward.
-- [ ] Ejecutar pruebas de recuperación antes del release candidato.
-- [ ] Publicar una matriz de compatibilidad de versiones de API/esquema.
+- [ ] Definir versionado, changelog y release notes. _(Las imágenes llevan labels OCI; no hay release notes ni versionado de API.)_
+- [x] Añadir rollback de imagen, kill switches y procedimiento de roll-forward. _(`docs/runbooks/rollback.md`, `tenant_feature_flags` y `kill_orders_write`; el rollback de imagen no está automatizado.)_
+- [ ] Ejecutar pruebas de recuperación antes del release candidato. _(El restore drill es manual y no está atado a un release.)_
+- [ ] Publicar una matriz de compatibilidad de versiones de API/esquema. _(Existe hash OpenAPI + checksum de migraciones, no una matriz publicada.)_
 
 ### Criterios de salida
 
@@ -608,25 +610,27 @@ El rollback de aplicación no implica automáticamente rollback de base de datos
 
 Crear estos documentos a medida que se implementan las fases:
 
-- [ ] `docs/architecture/system-context.md` — contexto, contenedores y dependencias.
-- [ ] `docs/architecture/data-ownership.md` — dueño y clasificación de cada tabla.
-- [ ] `docs/architecture/tenant-isolation.md` — invariantes, RLS, cache, jobs y storage.
-- [ ] `docs/adr/ADR-001-architecture.md` — monorepo y límites de servicios.
-- [ ] `docs/adr/ADR-002-tenant-isolation.md` — repository layer + RLS.
-- [ ] `docs/adr/ADR-003-orm-and-migrations.md` — Drizzle y SQL explícito.
-- [ ] `docs/adr/ADR-004-transactional-outbox.md` — outbox frente a dual writes.
-- [ ] `docs/adr/ADR-005-payment-saga.md` — pagos e incertidumbre.
-- [ ] `docs/adr/ADR-006-inventory-concurrency.md` — reservas/locks/conditional update.
-- [ ] `docs/adr/ADR-007-webhook-delivery.md` — firma, retries y dedupe.
-- [ ] `docs/adr/ADR-008-cache-invalidation.md` — TTL, keys y eventos.
-- [ ] `docs/adr/ADR-009-deploy-migrations.md` — expand-contract y rollback.
-- [ ] `docs/runbooks/worker-failure.md`.
-- [ ] `docs/runbooks/payment-unknown.md`.
-- [ ] `docs/runbooks/dlq-replay.md`.
+- [x] `docs/architecture/system-context.md` — contexto, contenedores y dependencias.
+- [x] `docs/architecture/data-ownership.md` — dueño y clasificación de cada tabla.
+- [x] `docs/architecture/identity-and-tenant-context.md` — sesión, BFF y contexto tenant.
+- [x] `docs/architecture/tenant-isolation.md` — invariantes, RLS, cache, jobs y storage.
+- [x] `docs/adr/ADR-001-architecture.md` — monorepo y límites de servicios.
+- [x] `docs/adr/ADR-002-tenant-isolation.md` — repository layer + RLS.
+- [x] `docs/adr/ADR-003-orm-and-migrations.md` — Drizzle y SQL explícito.
+- [x] `docs/adr/ADR-004-transactional-outbox.md` — outbox frente a dual writes.
+- [x] `docs/adr/ADR-005-payment-saga.md` — pagos e incertidumbre.
+- [x] `docs/adr/ADR-006-inventory-concurrency.md` — reservas/locks/conditional update.
+- [x] `docs/adr/ADR-007-files.md` — archivos presigned y aislamiento S3.
+- [x] `docs/adr/ADR-008-webhooks.md` — firma, retries, dedupe y automatizaciones.
+- [x] `docs/adr/ADR-009-deploy-migrations.md` — expand-contract y rollback.
+- [x] `docs/adr/ADR-010-cache-rate-limit.md` — TTL, keys, rate limits y breakers.
+- [x] `docs/runbooks/worker-failure.md`.
+- [x] `docs/runbooks/payment-unknown.md`.
+- [x] `docs/runbooks/dlq-replay.md`.
 - [x] `docs/runbooks/database-restore.md`.
-- [ ] `docs/runbooks/rollback.md`.
-- [ ] `docs/failure-scenarios/*.md` con evidencia de los laboratorios.
-- [ ] `docs/api/` con OpenAPI y ejemplos seguros.
+- [x] `docs/runbooks/rollback.md`.
+- [x] `docs/failure-scenarios/*.md` con evidencia de los laboratorios. _(Varios son procedimientos reproducibles; no todos tienen evidencia reciente.)_
+- [x] `docs/api/` con OpenAPI y ejemplos seguros. _(El contrato tiene drift conocido; el pase de OpenAPI lo corrige.)_
 
 ## 7. Definition of Done global
 
@@ -699,3 +703,47 @@ La siguiente sesión debe comenzar por la Fase 0 en este orden:
 No avanzar a órdenes, pagos o Kubernetes hasta que exista esa prueba base de aislamiento. Es la propiedad que condiciona todo el resto del proyecto.
 
 > Progreso sesion 3: se aplicaron las migraciones 0001/0002 contra PostgreSQL 16, la prueba RLS A/B paso con pool maximo 1 y la API persistente cubre sesiones, organizaciones, membresias, sucursales, invitaciones y auditoria. La integracion valida que el contexto tenant no se pega a conexiones reutilizadas.
+
+## Anexo 2026-11-13 — reconciliación con el árbol actual
+
+Este anexo sustituye a los hashes, conteos de tests y afirmaciones de cierre de las sesiones anteriores **solo como estado actual**. El historial se conserva sin reescribir; si una entrada antigua dice "cerrada" y este anexo dice "parcial", prevalece el anexo.
+
+### Evidencia reproducible
+
+| Comprobación              | Comando                                                 | Resultado 2026-11-13                                                  |
+| ------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------- |
+| Formato                   | `pnpm format:check`                                     | Gate de CI; ejecutado en el pase de docs sobre los archivos cambiados |
+| Lint                      | `pnpm lint`                                             | Gate de CI (`quality`)                                                |
+| Tipos                     | `pnpm typecheck`                                        | Gate de CI (`quality`)                                                |
+| Build                     | `pnpm build`                                            | Gate de CI (`quality`)                                                |
+| Unitarios                 | `pnpm test:unit`                                        | 274 passed, 43 skipped, 0 failed (Node 26 local; CI fija Node 24)     |
+| Contrato                  | `pnpm openapi:check`                                    | Verde: conteo de paths omitido, 44 schemas, hash `2742853210f7`       |
+| Migraciones               | `pnpm migrate:check`                                    | Gate de CI (`quality`)                                                |
+| Integración DB/API/worker | `node scripts/assert-tests.mjs --suite integration ...` | Gate de CI (`integration`) con PostgreSQL, Redis y MinIO              |
+| Docker                    | matriz `docker` en CI                                   | Build, dependencias runtime, non-root y ausencia de `tsx`             |
+| E2E navegador             | `pnpm test:e2e`                                         | **No gate por defecto**; job `e2e` solo con `ENABLE_E2E=true`         |
+
+### Gates y límites reales
+
+- **RLS y roles:** `packages/db/migrations/schema/0024_identity_privilege_hardening.sql`, `0027_least_privilege_cleanup.sql` y `0028_restore_platform_audit_policies.sql` separan `platform_app` (tenant), `platform_auth` (credenciales) y `platform_worker` (relay global). Las sesiones son user-bound mediante `app.user_id`; `platform_app` no puede borrar organizaciones ni membresías.
+- **Auditoría:** los eventos globales van a `platform_audit_log`; los tenant-scoped permanecen en `audit_log` con `tenant_id NOT NULL`. La retention sigue siendo un helper de DB, no un cron desplegado.
+- **Web:** el BFF de Next.js guarda el token de API en una cookie `platform_session` HttpOnly, SameSite=Lax, host-only por defecto y 8 h; el cliente no ve el token. El API también acepta `Authorization: Bearer` y cookie.
+- **Worker:** readiness incluye DB, consumidores, relay, scheduler, heartbeat, lag de outbox, DLQ y workers BullMQ; `/metrics` del worker acepta `WORKER_METRICS_TOKEN`.
+- **Métricas del API:** `/metrics` **no** tiene autenticación en el código actual. Debe exponerse solo en una red privada o detrás de un proxy con allowlist; no se debe documentar como autenticado.
+- **Pagos:** `StripePaymentProvider` existe y tiene tests unitarios; no se ha probado contra Stripe sandbox/live. `FakePaymentProvider` sigue siendo el camino de demo/CI.
+- **Egress:** los webhooks outbound resuelven DNS y fijan la IP pública, rechazan rangos privados/link-local/metadata, solo permiten HTTPS:443 y no siguen redirects. **No hay egress proxy con allowlist**; queda como gap de producción.
+- **Secretos:** el cifrado de secretos de webhook usa AES-GCM con `WEBHOOK_SECRET_ENCRYPTION_KEY` y ventana de rotación de 24 h. **No hay KMS/Vault**; la clave vive en el entorno y su rotación es manual (ver `docs/runbooks/key-rotation.md`).
+
+### Drift de contrato que debe resolver el pase de OpenAPI
+
+1. `POST /v1/inventory/reserve` acepta `productId`; el YAML documenta `sku`.
+2. El YAML publica rutas no implementadas (`/v1/me`, `GET/POST /v1/organizations/{id}/members`, `POST /v1/inventory/reservations`, `POST /v1/webhooks/{id}/replay`) y usa métodos distintos en otras. `presigned-upload` y `presign` sí existen ambas.
+3. Los conteos de paths/schemas y el hash cambian con el contrato; no se deben copiar a README ni ADRs.
+
+### Fases que no se deben presentar como cerradas
+
+- **Fase 4:** órdenes sin líneas, precios, idempotencia HTTP ni transiciones de orden completas.
+- **Fase 8:** adapter Stripe sin prueba real; sin reembolsos.
+- **Fase 11:** KMS/Vault y egress proxy pendientes; API metrics sin token.
+- **Fase 13:** E2E opt-in y `k6` fuera de CI; varios escenarios son procedimientos.
+- **Fases 14–16:** no hay clúster, manifests K8s, Terraform ni pipeline de release; solo scripts, imágenes y gates de CI.

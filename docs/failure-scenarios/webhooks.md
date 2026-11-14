@@ -1,12 +1,12 @@
 # Failure scenario — Webhooks y automatizaciones (Fase 9)
 
 - **Fecha:** 2026-09-01
-- **Fase:** 9 (PLAN_ELEVACION.md:329, IMPLEMENTATION_PLAN.md:378)
+- **Fase:** 9
 - **Hipótesis:** reenviar el mismo `eventId` 3 veces, entrega con firma tampered, o caída del receptor no debe duplicar efectos, filtrar datos entre tenants, ni bloquear transacción de negocio. `retry` solo para errores transitorios, `dead_letter` tras 8, `replay` auditado restaura `pending` sin perder trazabilidad. Automatizaciones solo comandos versionados.
 
 ## Preparación
 
-- **Modelo:** `migrations/schema/0010_webhooks.sql:1` `webhook_endpoints(tenant_id,url unique, secret_hash, events, status)` + `webhook_deliveries(endpoint_id,event_id unique, status, attempts, next_attempt_at)` + `inbound_webhook_events(tenant_id,event_id unique)` + `api_keys(prefix unique, hash, scopes)` + `automations(trigger, action versioned)` `FORCE RLS`.
+- **Modelo:** `packages/db/migrations/schema/0010_webhooks.sql:1` `webhook_endpoints(tenant_id,url unique, secret_hash, events, status)` + `webhook_deliveries(endpoint_id,event_id unique, status, attempts, next_attempt_at)` + `inbound_webhook_events(tenant_id,event_id unique)` + `api_keys(prefix unique, hash, scopes)` + `automations(trigger, action versioned)` `FORCE RLS`.
 - **Dominio:** `packages/domain/src/automations.ts:10` `validateAutomation` rechaza `invalid.trigger` y `eval`.
 - **API:** `apps/api/src/webhook-store.ts:1` `InMemoryWebhookStore`/`PersistentWebhookStore` con `FOR UPDATE SKIP LOCKED`, `apps/api/src/api-key-store.ts:1` `InMemoryApiKeyStore`, `apps/api/src/app.ts` `POST /v1/webhooks/endpoints` (https allowlist, events allowlist, 409 duplicate), `GET /v1/webhooks/endpoints|deliveries` tenant-scoped 404, `POST /v1/webhooks/deliveries/:id/replay` (`webhooks:replay`), `POST /v1/webhooks/inbound` HMAC 5m dedupe, `POST /v1/api-keys`, `POST /v1/automations` versioned.
 - **Worker:** `apps/worker/src/jobs/deliverWebhook.ts:1` `computeSignature(secret,timestamp,payload)` `HMAC sha256`, `backoff 10s→10m jitter 0.2`, `isTransient` solo `5xx|429|network`, `dead_letter` tras 8, `endpoint failure_count>=5 → dead_letter`.
@@ -103,7 +103,7 @@ for i in 1 2 3; do curl -X POST /v1/webhooks/inbound -H "x-webhook-timestamp:$TS
 ✓ automations versioned commands > defaults to version 1 when not provided 1ms
 ```
 
-`pnpm --filter @platform/api test src/webhooks.test.ts` → 4 passed, `pnpm --filter @platform/worker test src/webhooks.delivery.test.ts` →5 passed, `pnpm --filter @platform/domain test src/automations.test.ts` →4 passed. `pnpm lint/typecheck/build` verde, `pnpm openapi:check` 34 paths 44 schemas `ee30104321ce`.
+`pnpm --filter @platform/api test src/webhooks.test.ts` → 4 passed, `pnpm --filter @platform/worker test src/webhooks.delivery.test.ts` →5 passed, `pnpm --filter @platform/domain test src/automations.test.ts` →4 passed. `pnpm lint/typecheck/build` verde y `pnpm openapi:check` verde; el conteo/hash no se cita porque cambia con el contrato.
 
 ## Aprendizaje
 

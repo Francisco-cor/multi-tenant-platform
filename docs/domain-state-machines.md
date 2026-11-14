@@ -34,6 +34,8 @@ processing -> failed
 
 Las transiciones se validan en dominio y generan auditoría/evento. El proveedor de pagos puede confirmar de forma asíncrona; `pending_payment` no se interpreta como `failed` solo por un timeout.
 
+Estado de implementación (2026-11-13): la máquina de pagos (`created→pending→paid|failed|unknown`) está implementada y probada. La máquina de orden tiene los estados y la creación/pago, pero **no** hay endpoints para `approve`, `cancel`, `complete` ni una tabla de líneas/precios; el diagrama de orden es el objetivo de diseño, no una API completa.
+
 ## Reserva de inventario
 
 ```text

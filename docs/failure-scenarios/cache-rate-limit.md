@@ -35,7 +35,7 @@ buildCacheKey('tenant-contoso','inventory',{same params}) = tenant:tenant-contos
 ### B. Invalidación
 
 ```
-POST /v1/inventory/reserve (quantity 1) → await invalidateCache(tenant,'inventory') → GET /v1/inventory?branch=b1 → MISS con available--.
+POST /v1/inventory/reserve (quantity 1) → await invalidateCache(tenant,'inventory') → GET /v1/inventory?branchId=b1 → MISS con available--.
 ```
 
 ### C. Stampede
@@ -136,5 +136,5 @@ x-cache: MISS (invalidada)
 
 ## Estado
 
-- Fase 10 cerrada: `cache.ts` + `rate-limit.ts` + `circuit-breaker.ts` con `FORCE` tenant keys, invalidación 30s, degrade seguro, `k6` pendiente con `RATE_LIMIT_ENABLED=0` para p95 puro.
+- Implementado: `cache.ts` + `rate-limit.ts` + `circuit-breaker.ts` con keys tenant-scoped, invalidación por TTL, degradación segura. La evidencia es unitaria/InMemory; el `k6` con `RATE_LIMIT_ENABLED=0` para p95 puro sigue pendiente y no se ejecuta en CI.
 - Siguiente: instrumentar OTEL en `cache.getOrLoad` spans y añadir `cache` dashboard Grafana `worker.json`.

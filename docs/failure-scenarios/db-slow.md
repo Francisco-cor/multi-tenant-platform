@@ -6,7 +6,7 @@
 
 ## Preparación
 
-- DB `platform_app` con `statement_timeout='5s'` `idle_in_transaction_session_timeout='5s'` (`migrations/schema/0005_db_hardening.sql`).
+- DB `platform_app` con `statement_timeout='5s'` `idle_in_transaction_session_timeout='5s'` (`packages/db/migrations/schema/0005_db_hardening.sql`).
 - API `apps/api/src/health.ts:20` `withTimeout 2000ms` para `checkDatabase`, `s3Breaker`/`oidcBreaker`/`paymentBreaker` `requestTimeoutMs 2000` `failureThreshold 5` `timeoutMs 30000` (`circuit-breaker.ts:1`).
 - Métricas: `circuit_state{breaker="s3"} 0 CLOSED 1 HALF 2 OPEN`, `circuit_opens_total`, `http_request_duration_p95_seconds`, `pg_stat_activity`.
 - Habilitar latencia artificial: añadir `pg_sleep` en un middleware de test o via `toxiproxy`/`pumba` en Docker. Para este experimento usamos un proxy `toxiproxy` con `latency` 1500ms downstream a postgres:5432, o un `UPDATE pg_settings` temporal.

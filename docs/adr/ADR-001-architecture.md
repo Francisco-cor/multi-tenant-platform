@@ -1,6 +1,6 @@
 # ADR-001: Monorepo con fronteras de aplicación explícitas
 
-- Estado: aceptado para fases 0–6
+- Estado: aceptado; vigente para el monorepo actual (verificado 2026-11-13)
 - Fecha: 2026-08-20
 
 ## Contexto

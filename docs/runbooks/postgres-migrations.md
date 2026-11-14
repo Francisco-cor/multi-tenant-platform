@@ -1,4 +1,7 @@
-# Runbook — PostgreSQL migrations
+# Runbook — migraciones PostgreSQL
+
+- Owner: `platform-db`
+- Última revisión: 2026-11-13
 
 ## Local
 
@@ -8,13 +11,13 @@
 4. Ejecutar aislamiento real: `RUN_DB_INTEGRATION=1 pnpm --filter @platform/db test:integration`
 5. Ejecutar el corte API/RLS: `RUN_DB_INTEGRATION=1 pnpm --filter @platform/api test:integration`.
 
-La integracion usa el usuario local `platform` solo para preparar/limpiar datos y hace `SET LOCAL ROLE platform_app` durante la operacion tenant-scoped. La migracion crea `platform_app` como `NOLOGIN` y le concede solo DML sobre las tablas base.
+La integración usa el usuario local `platform` solo para preparar/limpiar datos y hace `SET LOCAL ROLE platform_app` durante la operación tenant-scoped. Las migraciones crean `platform_app`, `platform_auth` y `platform_worker` como roles `NOLOGIN`; la API usa `platform_app` para negocio y `platform_auth` para credenciales. El worker usa `platform_worker` solo para el relay global.
 
 ## Produccion
 
 - El proceso de migracion debe usar un lock/advisory lock y una identidad con permisos de DDL.
 - La API debe conectarse mediante un login gestionado que pueda asumir `platform_app`, pero no debe ser superusuario ni propietario efectivo de las tablas.
-- `DATABASE_ROLE` debe apuntar al rol sin privilegios de bypass RLS.
+- `DATABASE_ROLE` debe apuntar a `platform_app`; `platform_auth` se usa en el camino de credenciales. Ninguno debe tener `SUPERUSER` ni `BYPASSRLS`.
 - El cambio de esquema se registra en `schema_migrations`; no se ejecutan seeds destructivos desde el runner.
 - Los cambios incompatibles siguen expand-contract: agregar y backfillear primero, cambiar lectores/escritores despues y eliminar columnas solo cuando ninguna version anterior las use.
 
@@ -32,7 +35,7 @@ El runner y los tests eliminan el query parameter `schema` si aparece en DATABAS
 
 Los archivos que ya existian como `0001_identity_and_rls.sql` y
 `0002_persistent_identity.sql` se reconocen como aliases historicos despues
-de moverse a `migrations/schema/`. No se editan una vez aplicados.
+de moverse a `packages/db/migrations/schema/`. No se editan una vez aplicados.
 
 ## Backups y restore
 

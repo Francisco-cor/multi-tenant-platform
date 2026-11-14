@@ -1,12 +1,12 @@
 # Failure scenario — Inventory hot-tenant (stock=1, 50 concurrent)
 
 - **Fecha:** 2026-09-01
-- **Fase:** 5 (PLAN_ELEVACION.md:288)
+- **Fase:** 5
 - **Hipótesis:** con `stock=1` y 50 requests concurrentes al mismo `(tenant, branch, product)`, exactamente 1 reserva debe tener éxito (`201`), las otras 49 deben recibir `409 OUT_OF_STOCK`, y el `available` final debe ser `0`. No debe haber sobreventa ni stock negativo, y el log de movimientos debe sumar `-1`.
 
 ## Preparación
 
-- Datos: `products` (`SKU-ACME-1`), `stock_per_branch` (`available=1` para `tenant-acme / branch-acme-main / product-acme-1`). Semilla en `InMemoryInventoryStore` (`apps/api/src/inventory-store.ts:92`) y en provisión real vía `migrations/schema/0006_inventory.sql:19`.
+- Datos: `products` (`SKU-ACME-1`), `stock_per_branch` (`available=1` para `tenant-acme / branch-acme-main / product-acme-1`). Semilla en `InMemoryInventoryStore` (`apps/api/src/inventory-store.ts:92`) y en provisión real vía `packages/db/migrations/schema/0006_inventory.sql:19`.
 - Tablas: `stock_per_branch` con `CHECK (available >=0)` y `PRIMARY KEY (tenant_id, branch_id, product_id)`, `inventory_reservations` con `status='active'` y `expires_at`, `inventory_movements` append-only.
 - Índices: `stock_per_branch_product_idx`, `inventory_reservations_tenant_expires_idx` (`WHERE status='active'`), `products_tenant_sku_trgm_idx` GIN para búsqueda (no usado en este escenario pero garantiza que el hot path no es hot-spot global).
 - Operación: `UPDATE stock_per_branch SET available = available - $qty WHERE tenant_id=$1 AND branch_id=$2 AND product_id=$3 AND available >= $qty RETURNING available` (`inventory-store.ts:306`). Si 0 filas → `409`.

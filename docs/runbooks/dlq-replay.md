@@ -1,5 +1,8 @@
 # Runbook — DLQ y replay (Fase 7)
 
+- Owner: `platform-worker`
+- Última revisión: 2026-11-13
+
 ## Objetivo
 
 Inspeccionar y reintentar jobs muertos sin duplicar efectos ni perder trazabilidad, y sin exponer datos de otro tenant.
@@ -7,7 +10,7 @@ Inspeccionar y reintentar jobs muertos sin duplicar efectos ni perder trazabilid
 ## Contratos
 
 - `GET /v1/dlq?limit=25` y `GET /v1/admin/dlq?limit=25` → listas tenant-scoped `dlq_jobs` (`id, jobId, queue, cause, attempts, status pending|replayed|discarded`). Requiere `audit:read` + `owner` o `admin` (403 para `operator`/`auditor`).
-- `POST /v1/dlq/:id/replay` y `POST /v1/admin/dlq/:id/replay` → marca `dlq status='replayed'`, borra `processed_jobs` para ese `jobId` (permite re-ejecución), y re-encola un nuevo `outbox_events` con mismo `payload`. Audit: `membership.role_changed` con `dlqReplay=jobId`.
+- `POST /v1/dlq/:id/replay` y `POST /v1/admin/dlq/:id/replay` → marca `dlq status='replayed'`, borra `processed_jobs` para ese `jobId` (permite re-ejecución), y re-encola un nuevo `outbox_events` con mismo `payload`. Audit: `dlq.replayed` con `metadata.dlqReplay=jobId`.
 - `POST /v1/dlq/:id/discard` → `status='discarded'` (no reintento).
 
 ## Verificación rápida

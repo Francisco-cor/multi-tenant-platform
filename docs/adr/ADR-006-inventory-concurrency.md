@@ -2,7 +2,8 @@
 
 - Estado: aceptado
 - Fecha: 2026-09-01
-- Relacionado: Fase 5 (PLAN_ELEVACION.md), `packages/domain/src/index.ts:101`, `INVENTORY_RESERVATION_STATUSES`
+- Relacionado: Fase 5, `packages/domain/src/index.ts`, `INVENTORY_RESERVATION_STATUSES`
+- Última verificación: 2026-11-13
 
 ## Contexto
 
@@ -41,13 +42,13 @@ Deadlocks: solo una fila de `stock_per_branch` se toca por reserva, por lo que d
 
 ## Validación
 
-- `k6/inventory-stock1.js` 50 VUs stock 1 → 1×200 + 49×409, `inventory.concurrent.test.ts` con `withTenantTransaction` + `UPDATE ... RETURNING`.
+- `k6/inventory-stock1.js` 50 VUs stock 1 → 1×201 + 49×409, `inventory.concurrent.test.ts` con `withTenantTransaction` + `UPDATE ... RETURNING`.
 - `docs/failure-scenarios/inventory-concurrency.md` con evidencia P95 y tasa de errores.
 - Índices: `stock_per_branch(tenant_id, branch_id, product_id) UNIQUE`, `inventory_reservations(tenant_id, expires_at) WHERE status='active'`, `inventory_movements(tenant_id, product_id, created_at)` para auditoría.
 
 ## Referencias
 
-- `packages/domain/src/index.ts:101` `INVENTORY_RESERVATION_STATUSES`,
-- `migrations/schema/0010_inventory.sql` (pendiente Fase 5.2),
-- `apps/api/src/routes/inventory.ts` (reserve),
+- `packages/domain/src/index.ts` `INVENTORY_RESERVATION_STATUSES`,
+- `packages/db/migrations/schema/0006_inventory.sql`,
+- `apps/api/src/app.ts` (`POST /v1/inventory/reserve`, `GET /v1/inventory`),
 - `apps/worker/src/jobs/expireReservations.ts`.

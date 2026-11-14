@@ -2,7 +2,8 @@
 
 - Estado: aceptado
 - Fecha: 2026-09-01
-- Relacionado: Fase 10 (IMPLEMENTATION_PLAN.md:405, PLAN_ELEVACION.md:350), `apps/api/src/cache.ts`, `apps/api/src/rate-limit.ts`, `apps/api/src/circuit-breaker.ts`, `packages/observability/src/metrics.ts`
+- Relacionado: Fase 10, `apps/api/src/cache.ts`, `apps/api/src/rate-limit.ts`, `apps/api/src/circuit-breaker.ts`, `packages/observability/src/metrics.ts`
+- Última verificación: 2026-11-13
 
 ## Contexto
 
@@ -12,7 +13,7 @@ Añadir rendimiento sin convertir Redis en segunda fuente de verdad. Riesgos:
 2. **Sin rate limit por tenant**: hot tenant monopoliza DB, pool y workers; otros tenants sufren latencia 5xx.
 3. **Sin fail-open**: Redis caído marca API `degraded` pero debería seguir sirviendo con DB (fuente de verdad).
 4. **Sin circuit breaker**: proveedor externo (S3, OIDC) lento hace cascada; cada request espera 30s y satura event loop.
-5. **Stampede**: expiración simultánea de key popular (p.ej. `GET /v1/inventory?branch=main`) genera cientos de queries idénticas.
+5. **Stampede**: expiración simultánea de key popular (p.ej. `GET /v1/inventory?branchId=main`) genera cientos de queries idénticas.
 
 Opciones:
 
@@ -26,13 +27,13 @@ Elegir (2). Redis sigue siendo reconstruible; DB permanece autoridad.
 
 ### 1. Lecturas cacheables y TTL
 
-| Recurso            | Endpoint                                      | TTL | Justificación                                                                                                    |
-| ------------------ | --------------------------------------------- | --- | ---------------------------------------------------------------------------------------------------------------- |
-| branches           | `GET /v1/branches`                            | 60s | lista corta, cambia selten (create org/branch)                                                                   |
-| members            | `GET /v1/members`                             | 30s | RBAC sensible pero reconstruible; invalidación inmediata en `invitation/patch/delete`                            |
-| inventory          | `GET /v1/inventory?branch=&q=&limit=&cursor=` | 30s | catálogo por sucursal, lectura costosa (`JOIN products` + `ILIKE`), invalidación en `POST /v1/inventory/reserve` |
-| webhooks endpoints | `GET /v1/webhooks/endpoints`                  | 60s | config estable, invalidación en `POST/PATCH/DELETE`                                                              |
-| No cache           | `GET /v1/orders*`, `GET /v1/files*`, `POST *` | —   | estado transaccional o ya con validación de stock/pago; no se cachea                                             |
+| Recurso            | Endpoint                                        | TTL | Justificación                                                                                                    |
+| ------------------ | ----------------------------------------------- | --- | ---------------------------------------------------------------------------------------------------------------- |
+| branches           | `GET /v1/branches`                              | 60s | lista corta, cambia selten (create org/branch)                                                                   |
+| members            | `GET /v1/members`                               | 30s | RBAC sensible pero reconstruible; invalidación inmediata en `invitation/patch/delete`                            |
+| inventory          | `GET /v1/inventory?branchId=&q=&limit=&cursor=` | 30s | catálogo por sucursal, lectura costosa (`JOIN products` + `ILIKE`), invalidación en `POST /v1/inventory/reserve` |
+| webhooks endpoints | `GET /v1/webhooks/endpoints`                    | 60s | config estable, invalidación en `POST/PATCH/DELETE`                                                              |
+| No cache           | `GET /v1/orders*`, `GET /v1/files*`, `POST *`   | —   | estado transaccional o ya con validación de stock/pago; no se cachea                                             |
 
 TTL máximo 60s por recurso. Toda cache es `private` (`cache-control: private, max-age=...`) + `x-cache: HIT|MISS`.
 Nunca cachear permisos crudos sin tenant.
@@ -43,7 +44,7 @@ Nunca cachear permisos crudos sin tenant.
 cacheKey = `tenant:{tenantId}:{VERSION}:{resource}:{hash16}`
 VERSION = v1 (permite invalidar global al subir versión)
 hash16 = sha256(JSON.stringify(sorted(params))).slice(0,16)
-Ej: tenant:tenant-acme:v1:inventory:branch=main:hash=a3f9c1e2...
+Ej: tenant:tenant-acme:v1:inventory:branchId=main:hash=a3f9c1e2...
 ```
 
 - `tenantId` **obligatorio**; ningún key global. Test: `cacheKeyFor acme != contoso` aunque mismos params.
@@ -116,11 +117,11 @@ RATE_LIMITS = {
 
 ## Validación
 
-- `apps/api/src/cache-rate-limit.test.ts:1` 8 tests: key tenant isolation + params hash normalization, cache hit→miss tenant A≠B, invalidation solo tenant, stampede 10 concurrent → 1 loader, rate limit 5→429 con headers, tenant isolation `acme` limit not affect `contoso`, Redis degraded fail-open (mock `get` throw → loader), circuit OPEN after 5 fails → `CIRCUIT_OPEN`.
-- `apps/api/src/app.test.ts` + `inventory.test.ts` siguen 26 PASS con headers `x-cache`/`x-ratelimit-*` opcionales.
+- `apps/api/src/cache-rate-limit.test.ts`: key tenant isolation + normalización de params, cache hit/miss A≠B, invalidación solo del tenant, stampede concurrente, rate limit con headers, aislamiento `acme`/`contoso`, Redis degradado fail-open y circuit OPEN.
+- `apps/api/src/app.test.ts` y `apps/api/src/inventory.concurrent.test.ts` cubren headers `x-cache`/`x-ratelimit-*` opcionales y concurrencia.
 - `worker` no cambia; `health.ts` `checkRedis` sigue `degraded` si Redis fail pero API sigue 200 en reads via fallback.
-- `openapi.yaml` 37 paths 47 schemas `hash ee...` actualizado (`429` + `x-ratelimit` headers documentados).
-- Métricas `cache_hits_total`, `rate_limit_hits_total`, `circuit_state` visibles en `GET /metrics` y dashboard `infra/grafana/worker.json`.
+- `docs/api/openapi.yaml` documenta `429` y headers `x-ratelimit-*`; el conteo/hash no se cita porque cambia con el contrato.
+- Métricas `cache_hits_total`, `rate_limit_hits_total`, `circuit_state` visibles en `GET /metrics` y dashboard `infra/grafana/provisioning/dashboards/worker.json`.
 
 ## Referencias
 

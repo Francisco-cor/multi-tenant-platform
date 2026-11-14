@@ -73,7 +73,7 @@ curl -s http://localhost:4000/v1/branches -H 'host: acme.app.localhost' -H "cook
 - Redis es **cache reconstruible**, nunca fuente de verdad. `createInMemoryCache` y `createInMemoryRateLimiter` son fallbacks válidos, no `throw`.
 - `health` separa `liveness` (proceso vivo) de `readiness` (deps). Redis es opcional → `degraded` no `fail`, evita que orchestrator mate pods sanos.
 - `CIRCUIT_BREAKER` para `s3/oidc/payment` evita cascada si Redis down afecta también `BullMQ`; `withTimeout 2s` + `503` es seguro.
-- Próximo: añadir `redis` `replica` + `sentinel` en prod `infra/terraform`, y `alert` `RedisDown` con `severity critical` si `up==0` >2m.
+- Próximo: añadir `redis` `replica` + `sentinel` en prod `Terraform (no incluido en el repo)` (pendiente; no existe), y `alert` `RedisDown` con `severity critical` si `up==0` >2m.
 
 ## Checklist
 

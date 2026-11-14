@@ -26,17 +26,18 @@ metadata and belongs in the run evidence system.
 
 ## Evidence
 
-Date: 2026-08-20
+Date: 2026-08-20 (historical)
 
-Commit: ff3f15d
+Commit: omitido a propósito; el artefacto original no se versiona.
 
-Archive size: 25,605 bytes, custom format
+Archive size: no se conserva en Git.
 
-Target database: platform_restore_20260820T204119_a1abe3210e
+Target database: temporal, eliminada al terminar.
 
-RTO: approximately 2.04 seconds from dump start to verification
+RTO: no reutilizar como métrica actual.
 
-Result: PASS — row counts and migration history matched; 5 RLS policies
-were verified; zero pending migrations remained; temporary database removed.
+Result: PASS histórico con filas mínimas; no demuestra el estado del árbol actual.
 
-Follow-up: repeat with representative non-empty tenant data before staging.
+Follow-up: repetir con datos representativos y registrar fecha, commit, checksum,
+conteos y RTO en `docs/runbooks/backup-verification.md`. No citar esta evidencia
+como actual hasta que se repita.

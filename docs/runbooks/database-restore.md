@@ -1,5 +1,9 @@
 # Runbook — database backup and restore drill
 
+- Owner: `platform-db`
+- Última revisión: 2026-11-13
+- Cadencia y evidencia: ver `backup-verification.md`
+
 ## Preconditions
 
 - Docker Compose PostgreSQL is healthy.

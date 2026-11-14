@@ -1,5 +1,8 @@
 # Runbook — Cache, rate limiting y resiliencia (Fase 10)
 
+- Owner: `platform-cache`
+- Última revisión: 2026-11-13
+
 ## Objetivo
 
 Operar lecturas cacheables con TTL acotado, límites hot-tenant y degradación segura si Redis o S3 fallan, sin filtrar datos entre tenants.
@@ -8,7 +11,7 @@ Operar lecturas cacheables con TTL acotado, límites hot-tenant y degradación s
 
 ### Cache
 
-- **Recursos cacheables** (TTL): `branches` 60s, `members` 30s, `inventory?branch=&q=&limit=&cursor=` 30s, `webhooks:endpoints` 60s. Usa `GET /v1/...` con `x-cache: HIT|MISS` + `cache-control: private, max-age=30`.
+- **Recursos cacheables** (TTL): `branches` 60s, `members` 30s, `inventory?branchId=&q=&limit=&cursor=` 30s, `webhooks:endpoints` 60s. Usa `GET /v1/...` con `x-cache: HIT|MISS` + `cache-control: private, max-age=30`.
 - **Keys**: `tenant:{tenantId}:v1:{resource}:{hash16}` donde `hash16=sha256(sorted(params)).slice(0,16)`. `tenantId` obligatorio. `v1` permite bump global.
 - **Invalidación**: escritura confirmada → `DELETE prefix tenant:{id}:v1:{resource}:*`. TTL asegura no stale >60s si se pierde evento. Nunca cachear `orders/payments` transaccionales.
 - **Stampede**: `SET NX PX 5s` lock por key, poll 10×50ms. Métrica `cache_stampede_fallback_total` sube si muchos loaders concurrentes (>50 VUs hot key).
@@ -109,6 +112,6 @@ docker compose start minio
 ## Estado actual (2026-09-01)
 
 - InMemory per-instance: full coverage sin Docker. Redis: `SCAN` + `SET NX PX` con fallback. `cache.ts` + `rate-limit.ts` + `circuit-breaker.ts` con metrics.
-- Tests `cache-rate-limit.test.ts` 8 PASS: key isolation, stampede 10 concurrent →1 loader, rate 5→429, tenant isolation, Redis degraded fail-open, circuit 5→OPEN.
+- Tests `cache-rate-limit.test.ts`: key isolation, stampede concurrente, rate limit, tenant isolation, Redis degradado fail-open y circuit OPEN.
 - Evidencia `k6/inventory-stock1.js` stock 1 sigue 1×200 bajo rate limit tenant>30/min (ajustar `k6 --vus 10` si se limita).
 - Pendiente: `testcontainers` Redis+MinIO efímero para `withRedis()` helper, y `k6` con `RATE_LIMIT_ENABLED=0` para benchmark puro cache p95.

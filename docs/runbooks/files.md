@@ -1,5 +1,8 @@
 # Runbook — Archivos S3 (Fase 6)
 
+- Owner: `platform-api`
+- Última revisión: 2026-11-13
+
 ## Objetivo
 
 Subir/descargar sin proxar bytes, sin cruzar tenants y con retención de huérfanos.
@@ -61,7 +64,8 @@ Cross-tenant debe dar 404 aunque se conozca uuid.
 - No loguear `upload.url`/`download.url` completas. Solo `file.id`, `tenant_id`, `size`, `status`. `packages/observability` redacta `*.secret`.
 - Dash `Grafana > Files` con `file_pending_age`, `file_expired_total`.
 
-## Estado actual (2026-09-01)
+## Estado actual (2026-11-13)
 
-- InMemory: full coverage. Persistent: RLS validado, pero test de integración MinIO real pendiente de `RUN_DB_INTEGRATION=1` con `withMinio()` + `withPostgres()` y `aws-sdk` opcional.
-- Evidencia: `apps/api/src/files.test.ts` 5 tests (cross-tenant 404, TTL 300/60, 409 pending, 410 expired, GC).
+- InMemory: cobertura unitaria. Persistent: RLS validado; el job `integration` de CI levanta MinIO y ejecuta la suite S3 con `RUN_S3_INTEGRATION=1`.
+- Evidencia: `apps/api/src/files.test.ts` (cross-tenant 404, TTL 300/60, 409 pending, 410 expired, GC) y `apps/api/src/s3.integration.test.ts` (SigV4/MinIO).
+- Límite: no hay antivirus ni CDN; `S3_PROVIDER=fake` es solo local/test.

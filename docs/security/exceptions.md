@@ -1,28 +1,28 @@
-# Excepciones de seguridad — lista explícita (CI)
+# Excepciones de seguridad — lista explícita
 
-- Fecha: 2026-09-01
-- Revisión: cada PR que toque `tenant/auth/storage/webhooks` debe actualizar esta lista o corregir el finding.
+- Última revisión: 2026-11-13
+- Owner: `platform-security`
+- Regla: cada PR que toque `tenant/auth/storage/webhooks` actualiza esta lista o corrige el finding
 
 ## Cómo usar
 
-CI jobs `security` en `.github/workflows/ci.yml` corren `pnpm audit`, `gitleaks`, `semgrep`, `CodeQL`, `trivy`. Si un finding es **falso positivo** o **riesgo aceptado**, documentarlo aquí con `ID`, `herramienta`, `severidad`, `justificación` y `fecha de revisión`. No silenciar sin registrar.
+El job `security` de `.github/workflows/ci.yml` ejecuta `pnpm audit`, gitleaks, Semgrep y Trivy; CodeQL es condicional. Si un finding es falso positivo o riesgo aceptado, se documenta aquí con `ID`, herramienta, severidad, ruta, justificación y fecha de revisión. No se silencia sin registrar.
+
+No hay archivos `.gitleaks.toml`, `.semgrepignore` ni `trivy.yaml` versionados actualmente; si se añaden allowlists, deben ser mínimas y referenciar el `EX-*`.
 
 ## Excepciones actuales
 
-| ID     | Herramienta  | Severidad | Paquete / ruta                                                      | Justificación                                                                                                                                                      | Revisión                                                                                 |
-| ------ | ------------ | --------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
-| EX-001 | `pnpm audit` | medium    | `minimatch@9` devDep                                                | Solo en `k6` bundle, no en runtime prod (`platform_app` no usa `minimatch`). Actualizar en próximo `pnpm up`.                                                      | 2026-09-15                                                                               |
-| EX-002 | `semgrep`    | low       | `apps/api/src/identity-store.ts:332` `getMembership` overload `any` | Overload tipado intencional para compat `string                                                                                                                    | StoreTenantContext`; no es `any`inseguro. Falso positivo`javascript.lang.security.audit` | 2026-09-15 |
-| EX-003 | `gitleaks`   | low       | `docs/api/openapi.yaml` `example: USD`                              | No es secreto; pattern `GENERIC_API_KEY` sobre `apiVersion: v1`. Allowlist `gitleaks.toml` `allowlist: openapi.yaml`.                                              | 2026-09-01                                                                               |
-| EX-004 | `trivy fs`   | medium    | `docker-compose.yml:22 redis:7-alpine` `CVE-2023-...`               | Solo en dev `docker-compose`, no en imágenes prod `node:24-alpine` multi-stage non-root. Seguimiento vía `apps/api/Dockerfile` digest `node:24-alpine@sha256:...`. | 2026-09-15                                                                               |
-| EX-005 | `CodeQL`     | info      | `apps/api/src/webhook-store.ts:60 validateUrl` `url.startsWith`     | CodeQL sugiere `SSRF` si solo `startsWith https`; mitigado con `private_blocked` + `username` block + timeout. Falso positivo tras hardening Fase 11.              | 2026-09-01                                                                               |
+| ID     | Herramienta  | Severidad | Ruta / paquete                                               | Justificación                                                                                                                                        | Revisión   |
+| ------ | ------------ | --------- | ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| EX-001 | `pnpm audit` | medium    | `minimatch@9` (dev)                                          | Solo en tooling de `k6`/dev; no se carga en runtime de API/worker. Actualizar en el próximo `pnpm up`.                                               | 2026-12-13 |
+| EX-002 | `semgrep`    | low       | `apps/api/src/identity-store.ts` overload de `getMembership` | Overload tipado intencional para compatibilidad `string \| StoreTenantContext`; no es un `any` inseguro. Falso positivo.                             | 2026-12-13 |
+| EX-003 | `gitleaks`   | low       | `docs/api/openapi.yaml` ejemplos `USD`/`v1`                  | No son secretos; el escaneo puede marcarlos como patrones genéricos. No se ha añadido allowlist versionada.                                          | 2026-12-13 |
+| EX-004 | `trivy fs`   | medium    | Dependencias de desarrollo e imágenes de Compose             | Solo afecta a dev/test; las imágenes de runtime usan Node 24 multi-stage no-root. Revisar digest al actualizar.                                      | 2026-12-13 |
+| EX-005 | `CodeQL`     | info      | `apps/api/src/webhook-store.ts` `validateUrl`                | CodeQL sugiere SSRF por `startsWith('https')`; hay bloqueo de rangos privados, DNS pinning en el worker y timeout. Falso positivo tras el hardening. | 2026-12-13 |
 
-## Procedimiento para nueva excepción
+## Procedimiento para una nueva excepción
 
-1. Reproducir local: `pnpm audit --prod`, `gitleaks detect --source .`, `semgrep --config p/security-audit`, `trivy fs --severity HIGH,CRITICAL .`
-2. Evaluar: ¿afecta `platform_app` (`apps/api` `FE` prod) o solo dev/test? ¿hay fix `pnpm up` inmediato? Si no, registrar aquí con `Próxima revisión ≤30d`.
-3. Añadir `allowlist` mínimo: `.gitleaks.toml`, `.semgrepignore`, `trivy.yaml` con `ignore: CVE-...` + comentario `EX-00X`.
-
-## Sin excepciones críticas
-
-No hay excepciones `CRITICAL` o `HIGH` que afecten aislamiento tenant, audit, webhooks o pagos. Cualquier `CRITICAL` debe bloquear merge.
+1. Reproducir local: `pnpm audit --prod`, `gitleaks detect --source .`, `semgrep scan --config p/security-audit`, `trivy fs --severity HIGH,CRITICAL .`.
+2. Evaluar si afecta a runtime (`apps/api`, `apps/worker`, `apps/web`) o solo a dev/test; si hay fix, aplicarlo antes de aceptar.
+3. Registrar aquí con revisión ≤30 días y, si se añade allowlist, mantenerla mínima y comentada con el `EX-*`.
+4. No aceptar excepciones `CRITICAL` o `HIGH` que afecten aislamiento tenant, auditoría, webhooks o pagos.

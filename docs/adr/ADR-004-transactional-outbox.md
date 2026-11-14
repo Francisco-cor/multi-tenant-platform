@@ -2,7 +2,8 @@
 
 - Estado: aceptado
 - Fecha: 2026-09-01
-- Relacionado: Fase 7 (PLAN_ELEVACION.md:286, IMPLEMENTATION_PLAN.md:317), `packages/db/migrations/schema/0008_outbox.sql`, `packages/db/src/outbox.ts`, `apps/worker/src/relay/outboxRelay.ts`
+- Relacionado: Fase 7, `packages/db/migrations/schema/0008_outbox.sql`, `packages/db/src/outbox.ts`, `apps/worker/src/relay/outboxRelay.ts`
+- Última verificación: 2026-11-13
 
 ## Contexto
 
@@ -25,12 +26,12 @@ Elegir **(2) transactional outbox** con:
 
 ### Flujo
 
-1. **Write**: negocio + `INSERT outbox_events` en `withTenantTransaction` (`file-store.ts:273` `writeOutboxEvent(tx, {tenantId, aggregateType:'file', aggregateId:id, eventType:'file.created'})`, `inventory-store.ts:445` `inventory.reserved`). Sin `await publish` en la tx. El `correlation_id = request.id` viaja en payload.
-2. **Relay**: `apps/worker/src/relay/outboxRelay.ts:24` `runOutboxRelayOnce` con `SELECT ... FOR UPDATE SKIP LOCKED WHERE status='pending' AND next_attempt_at <= now() LIMIT 100` → `UPDATE status='claimed'` → por cada fila `queue.add(payload, {jobId=sha256(tenantId:aggregateId:eventType)})` → en éxito `status='done'`, en fallo `attempts++` + `nextAttemptAt = now() + backoff(attempts)` (exp 1s→60s jitter 0.2 via `nextAttemptDelayMs`), tras 5 intentos `status='dead_letter'` + `INSERT dlq_jobs`.
-3. **Queues**: `apps/worker/src/queues.ts:32` `deterministicJobId` + `InMemoryQueue` (test) / `createBullMqFactory` (prod) con `QUEUES = files,inventory,orders,webhooks,emails,generic`, `getQueueForAggregate` mapea `file→files`, `order→orders`. BullMQ con `attempts 5`, `backoff exponential 1s`, `removeOnComplete 1h`.
-4. **WorkerProcessor**: `apps/worker/src/processor.ts:1` `processJob` con `withDedup` (`dedup.ts:1` check `processed_jobs` → hit → skip effect, miss → run handler → `markProcessed`) + `timeout 10s` + `metrics.recordJobDuration`. `QUEUE_CONFIG` con `concurrency 10` por cola.
-5. **Graceful shutdown**: `apps/worker/src/main.ts:10` `shutdown` con `await relay.stop()` + `await queueFactory.closeAll()` + `SIGTERM 30s deadline`, `relay.stop` espera `running` flag con 5s grace.
-6. **Métricas/Health**: `packages/observability/src/metrics.ts:1` `outbox_lag_seconds`, `outbox_pending`, `job_duration p95`, `dlq_size`, `job_retries` → `GET /metrics` (`app.ts:420`); `apps/api/src/health.ts:92` `checkOutbox` calcula `lag = now()-min(created_at) WHERE status='pending'`, degraded si `lag>30s`.
+1. **Write**: negocio + `INSERT outbox_events` en `withTenantTransaction` (`apps/api/src/file-store.ts` `writeOutboxEvent(tx, {tenantId, aggregateType:'file', aggregateId:id, eventType:'file.created'})`, `apps/api/src/inventory-store.ts` `inventory.reserved`). Sin `await publish` en la tx. El `correlation_id = request.id` viaja en payload.
+2. **Relay**: `apps/worker/src/relay/outboxRelay.ts` `runOutboxRelayOnce` con `SELECT ... FOR UPDATE SKIP LOCKED WHERE status='pending' AND next_attempt_at <= now() LIMIT 100` → `UPDATE status='claimed'` → por cada fila `queue.add(payload, {jobId=sha256(tenantId:aggregateId:eventType)})` → en éxito `status='done'`, en fallo `attempts++` + `nextAttemptAt = now() + backoff(attempts)` (exp 1s→60s jitter 0.2 via `nextAttemptDelayMs`), tras 5 intentos `status='dead_letter'` + `INSERT dlq_jobs`.
+3. **Queues**: `apps/worker/src/queues.ts` `deterministicJobId` + `InMemoryQueue` (test) / `createBullMqFactory` (prod) con `QUEUES = files,inventory,orders,webhooks,emails,generic`, `getQueueForAggregate` mapea `file→files`, `order→orders`. BullMQ con `attempts 5`, `backoff exponential 1s`, `removeOnComplete 1h`.
+4. **WorkerProcessor**: `apps/worker/src/processor.ts` `processJob` con `withDedup` (`dedup.ts` check `processed_jobs` → hit → skip effect, miss → run handler → `markProcessed`) + `timeout 10s` + `metrics.recordJobDuration`. `QUEUE_CONFIG` con `concurrency 10` por cola. `0016_processed_job_leases.sql` añade leases para que un worker muerto no bloquee el dedupe.
+5. **Graceful shutdown**: `apps/worker/src/main.ts` `shutdown` con `await relay.stop()` + `await queueFactory.closeAll()` + `SIGTERM 30s deadline`, `relay.stop` espera `running` flag con 5s grace.
+6. **Métricas/Health**: `packages/observability/src/metrics.ts` `outbox_lag_seconds`, `outbox_pending`, `job_duration p95`, `dlq_size`, `job_retries` → `GET /metrics`; `apps/api/src/health.ts` `checkOutbox` calcula `lag = now()-min(created_at) WHERE status='pending'`, degraded si `lag>30s`.
 
 ### Consecuencias
 
@@ -40,17 +41,17 @@ Elegir **(2) transactional outbox** con:
 
 ## Validación
 
-- `apps/worker/src/outbox.dedupe.test.ts:1` `deterministicJobId` estable y tenant-scoped, `InMemoryQueue` dedupe `same jobId → 1 job`, `processed_jobs` simulado `1 efecto` con 2 publishes.
-- `apps/worker/src/relay/outboxRelay.test.ts:1` routing `file→files` y backoff `1000→2000→32000→60000` cap.
-- `apps/api/src/file-store.ts:273` y `inventory-store.ts:445` pruebas que `outbox` se escribe en misma tx (fila visible solo tras commit, una fila por negocio).
+- `apps/worker/src/outbox.dedupe.test.ts` `deterministicJobId` estable y tenant-scoped, `InMemoryQueue` dedupe `same jobId → 1 job`, `processed_jobs` simulado `1 efecto` con 2 publishes.
+- `apps/worker/src/relay/outboxRelay.test.ts` routing `file→files` y backoff `1000→2000→32000→60000` cap.
+- `apps/api/src/file-store.ts` y `inventory-store.ts` pruebas que `outbox` se escribe en misma tx (fila visible solo tras commit, una fila por negocio).
 - `docs/failure-scenarios/outbox-dedupe.md` con muerte del worker entre `publish` y `processed_jobs` → retry sin duplicar.
 
 ## Referencias
 
-- `packages/db/migrations/schema/0008_outbox.sql:1`,
-- `packages/db/src/outbox.ts:1` (`deterministicJobId`, `writeOutboxEvent`, `nextAttemptDelayMs`),
-- `apps/worker/src/relay/outboxRelay.ts:1`,
-- `apps/worker/src/queues.ts:1` (`InMemoryQueueFactory`, `createBullMqFactory`),
-- `apps/worker/src/processor.ts:1` (`QUEUE_CONFIG`, `processJob`),
-- `apps/api/src/health.ts:92` (`checkOutbox`),
-- `packages/observability/src/metrics.ts:1`.
+- `packages/db/migrations/schema/0008_outbox.sql`,
+- `packages/db/src/outbox.ts` (`deterministicJobId`, `writeOutboxEvent`, `nextAttemptDelayMs`),
+- `apps/worker/src/relay/outboxRelay.ts`,
+- `apps/worker/src/queues.ts` (`InMemoryQueueFactory`, `createBullMqFactory`),
+- `apps/worker/src/processor.ts` (`QUEUE_CONFIG`, `processJob`),
+- `apps/api/src/health.ts` (`checkOutbox`),
+- `packages/observability/src/metrics.ts`.
