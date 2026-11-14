@@ -8,7 +8,6 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const roots = ['README.md', 'SECURITY.md', 'CONTRIBUTING.md', 'IMPLEMENTATION_PLAN.md', 'docs'];
 const skipSchemes = /^(?:[a-z][a-z0-9+.-]*:|#|\/\/)/iu;
-const pathPrefix = /^(?:docs|apps|packages|scripts|infra|k6|tests|\.github)\//u;
 const pathLike =
   /^(?:docs|apps|packages|scripts|infra|k6|tests|\.github)\/[A-Za-z0-9._@/{}*<>|+-]+$/u;
 
