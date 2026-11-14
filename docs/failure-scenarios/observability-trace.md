@@ -9,7 +9,7 @@
 ```bash
 pnpm install --ignore-scripts
 cp .env.example .env  # LOG_LEVEL=info, OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318/v1/traces (opcional)
-docker compose up -d postgres redis minio otel-collector prometheus grafana
+docker compose up -d postgres redis s3 otel-collector prometheus grafana
 pnpm dev  # api:4000 worker
 curl -s -X POST http://localhost:4000/v1/auth/dev-login -H 'content-type: application/json' -d '{"userId":"user-alice"}' -c /tmp/c
 COOKIE=$(grep platform_session /tmp/c | awk '{print $7}')

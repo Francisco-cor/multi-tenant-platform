@@ -14,7 +14,7 @@ Estado verificado el **2026-11-13** sobre `main` fusionado. Una fase solo se mar
 | 3 PostgreSQL, migraciones y RLS    | Completa | Completa | Completa | Migraciones 0001–0030, roles `platform_app`/`platform_auth`, RLS `FORCE`; integración en CI         | RLS depende de un login gestionado que asuma el rol sin `BYPASSRLS`                                                                              |
 | 4 Órdenes                          | Parcial  | Parcial  | Parcial  | `orders`, creación/listado/consulta y saga de pago; `Idempotency-Key` cableada                      | Sin líneas de orden, precios capturados ni export                                                                                                |
 | 5 Inventario concurrente           | Completa | Completa | Completa | Reserva 15 min, `UPDATE ... WHERE available >= qty`, expiración `SKIP LOCKED`, test stock 1         | Los escenarios `k6` no se ejecutan en CI                                                                                                         |
-| 6 Archivos S3                      | Completa | Completa | Completa | Presign → finalize → download, RLS, GC; integración MinIO en CI                                     | `presigned-upload` y el alias `presign` existen; no hay CDN ni antivirus                                                                         |
+| 6 Archivos S3                      | Completa | Completa | Completa | Presign → finalize → download, RLS, GC; integración S3 (S3Mock) en CI                               | `presigned-upload` y el alias `presign` existen; no hay CDN ni antivirus                                                                         |
 | 7 Outbox, BullMQ y workers         | Completa | Completa | Completa | Outbox transaccional, relay `SKIP LOCKED`, dedupe, leases, DLQ, readiness de worker                 | Retención existe como helper de DB; no hay scheduler de retención cableado                                                                       |
 | 8 Pagos                            | Parcial  | Parcial  | Completa | `FakePaymentProvider`, saga, webhook HMAC y reconciler; `StripePaymentProvider` con tests unitarios | Stripe no está probado contra la API real ni en sandbox; no hay reembolsos                                                                       |
 | 9 Webhooks y automatizaciones      | Completa | Parcial  | Completa | Endpoints, deliveries, replay, inbound dedupe, automatizaciones versionadas, egress con DNS pinning | Sin receptor real en CI ni prueba de entrega contra internet                                                                                     |
@@ -38,7 +38,7 @@ pnpm openapi:check
 pnpm migrate:check
 ```
 
-La integración real de PostgreSQL/Redis/MinIO vive en `.github/workflows/ci.yml` (`integration`) y requiere servicios. No se debe afirmar que E2E o Fase 13 están cerrados: el job `e2e` solo corre con `vars.ENABLE_E2E=true`.
+La integración real de PostgreSQL/Redis/S3 vive en `.github/workflows/ci.yml` (`integration`) y requiere servicios. No se debe afirmar que E2E o Fase 13 están cerrados: el job `e2e` solo corre con `vars.ENABLE_E2E=true`.
 
 El detalle de la auditoría, las correcciones y los gaps que siguen abiertos está en [`docs/audit/2026-11-13-hardening.md`](docs/audit/2026-11-13-hardening.md).
 
@@ -57,13 +57,12 @@ docker compose up -d
 pnpm dev
 ```
 
-En PowerShell, usa `Copy-Item .env.example .env`. Las dependencias locales quedan disponibles en:
+En PowerShell, usa `Copy-Item .env.example .env`. El servicio local `s3` usa S3Mock (compatible con la API S3) porque las imágenes públicas de MinIO ya exigen autenticación de registro; producción debe apuntar a S3/MinIO real. Las dependencias locales quedan disponibles en:
 
 - Web: <http://localhost:3000> (tenant de ejemplo: `acme.app.localhost:3000`)
 - API: <http://localhost:4000>
 - API liveness: <http://localhost:4000/health/live>
 - Worker health: <http://localhost:4010/health/ready>
-- MinIO console: <http://localhost:9001>
 - Grafana: <http://localhost:3001>
 - Prometheus: <http://localhost:9090>
 

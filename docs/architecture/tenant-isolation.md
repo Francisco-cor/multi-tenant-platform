@@ -52,6 +52,6 @@ Evidencia:
 - `packages/db/src/isolation.concurrent.test.ts`: pool concurrente sin contexto pegado.
 - `packages/db/src/fase13.migration.test.ts`: migraciones idempotentes y RLS `FORCE`.
 - `apps/api/src/fase13.isolation.test.ts`: aislamiento API A/B.
-- CI `integration` ejecuta DB, worker y API contra PostgreSQL/Redis/MinIO reales.
+- CI `integration` ejecuta DB, worker y API contra PostgreSQL/Redis/S3 reales.
 
 No se debe citar `InMemoryIdentityStore` como evidencia de aislamiento de producción. Es un adaptador de tests unitarios.

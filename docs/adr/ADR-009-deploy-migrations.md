@@ -65,7 +65,7 @@ Si un futuro feature olvida el filtro, RLS aún oculta el otro tenant; los tests
 
 ### 6. CI
 
-El job `integration` de `.github/workflows/ci.yml` levanta PostgreSQL/Redis/MinIO con imágenes pinneadas, ejecuta `pnpm --filter @platform/db migrate` dos veces (la segunda debe ser no-op por checksum) y corre las suites de DB con `RUN_DB_INTEGRATION=1`. El job `quality` ejecuta además `pnpm migrate:check` (análisis estático de migraciones). No hay un job separado llamado `migrate-check`.
+El job `integration` de `.github/workflows/ci.yml` levanta PostgreSQL/Redis/S3 con imágenes pinneadas, ejecuta `pnpm --filter @platform/db migrate` dos veces (la segunda debe ser no-op por checksum) y corre las suites de DB con `RUN_DB_INTEGRATION=1`. El job `quality` ejecuta además `pnpm migrate:check` (análisis estático de migraciones). No hay un job separado llamado `migrate-check`.
 
 ## Consecuencias
 

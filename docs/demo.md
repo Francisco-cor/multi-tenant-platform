@@ -9,7 +9,7 @@
 ```bash
 pnpm install --ignore-scripts
 cp .env.example .env
-docker compose up -d postgres redis minio
+docker compose up -d postgres redis s3
 pnpm --filter @platform/db migrate
 pnpm --filter @platform/db seed   # solo en base vacía; idempotente
 pnpm dev
@@ -22,7 +22,7 @@ curl -fsS http://localhost:4000/health/live
 curl -fsS http://localhost:4000/health/ready | jq '.status'
 ```
 
-Esperado: `live` responde `200`; `ready` responde `ok` con PostgreSQL/Redis/MinIO disponibles. Si el worker no está listo, `worker/health/ready` puede estar `degraded` y es una señal válida, no un fallo de demo.
+Esperado: `live` responde `200`; `ready` responde `ok` con PostgreSQL/Redis/S3 disponibles. Si el worker no está listo, `worker/health/ready` puede estar `degraded` y es una señal válida, no un fallo de demo.
 
 ## 2. Estado honesto (1 min)
 

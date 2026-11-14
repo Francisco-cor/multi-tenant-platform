@@ -83,25 +83,25 @@ curl -s http://localhost:4000/metrics | grep cache_misses_total # sigue contando
 docker compose start redis
 
 # 5. S3 circuit breaker
-# Forzar 5 fallos rápidos (si MinIO down)
-docker compose stop minio
+# Forzar 5 fallos rápidos (si S3/S3Mock down)
+docker compose stop s3
 for i in {1..6}; do curl -s -X POST http://localhost:4000/v1/files/presigned-upload -H 'host: acme.app.localhost' -H "cookie: platform_session=$COOKIE" -H 'content-type: application/json' -d '{"filename":"a.txt","contentType":"text/plain","size":100}' -w "%{http_code} "; done; echo
 # -> primeros 5 → 500 o 503, 6º → 503 CIRCUIT_OPEN con circuit_state=2
 curl -s http://localhost:4000/metrics | grep circuit_state
-docker compose start minio
+docker compose start s3
 # esperar 30s para HALF_OPEN → CLOSED tras 2 éxitos
 ```
 
 ## Fallos y recuperación
 
-| Señal                                 | Causa                                                        | Recuperación                                                                                                                                                                            |
-| ------------------------------------- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `x-cache: MISS` siempre               | Redis down / keys no hit                                     | Ver `docker compose logs redis`, `GET /metrics` `cache_misses_total` sube, `cache_hits 0`. API sigue 200 vía DB (p95 sube). Reiniciar `redis` no pierde datos.                          |
-| `429 RATE_LIMITED` burst legítimo     | Cliente excede 100/min IP o 1000/min tenant                  | Respetar `retry-after`, usar backoff jitter. Si tenant legítimo necesita más, subir `RATE_LIMITS.tenant.max` y redeploy.                                                                |
-| `hot tenant` monopoliza               | Un tenant 1000/min bloquea pero otros 200 OK                 | Alert `rate_limit_hits_total{key="rl:tenant:acme"}` >100/min → escalar worker `HPA` o `RATE_LIMITS.tenant` por tenant flag futuro.                                                      |
-| `circuit_state=2` (OPEN)              | S3/OIDC 5 fallos 2s timeout                                  | `docker compose logs minio`, `curl minio:9000/minio/health/live`. Breaker pasa a `HALF_OPEN` tras 30s; si `GET /metrics` `circuit_rejects_total` sigue subiendo, revisar secret/access. |
-| `cache_stampede_fallback_total` spike | Muchas VUs same hot key expirado (p.ej. k6 50 VUs inventory) | Aumentar TTL `inventory 30s → 60s` o `lockTtl 5s → 10s`, o precargar cache en worker relay. No es error, indica contención.                                                             |
-| `x-cache: HIT` stale 30s              | Invalidación perdida (Redis down durante write)              | TTL acota a 30s; si crítico, `curl -X POST /invalidate?` futuro o bump `CACHE_VERSION v1→v2` y redeploy. Permisos nunca stale >30s.                                                     |
+| Señal                                 | Causa                                                        | Recuperación                                                                                                                                                                   |
+| ------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `x-cache: MISS` siempre               | Redis down / keys no hit                                     | Ver `docker compose logs redis`, `GET /metrics` `cache_misses_total` sube, `cache_hits 0`. API sigue 200 vía DB (p95 sube). Reiniciar `redis` no pierde datos.                 |
+| `429 RATE_LIMITED` burst legítimo     | Cliente excede 100/min IP o 1000/min tenant                  | Respetar `retry-after`, usar backoff jitter. Si tenant legítimo necesita más, subir `RATE_LIMITS.tenant.max` y redeploy.                                                       |
+| `hot tenant` monopoliza               | Un tenant 1000/min bloquea pero otros 200 OK                 | Alert `rate_limit_hits_total{key="rl:tenant:acme"}` >100/min → escalar worker `HPA` o `RATE_LIMITS.tenant` por tenant flag futuro.                                             |
+| `circuit_state=2` (OPEN)              | S3/OIDC 5 fallos 2s timeout                                  | `docker compose logs s3`, `curl http://127.0.0.1:9000/`. Breaker pasa a `HALF_OPEN` tras 30s; si `GET /metrics` `circuit_rejects_total` sigue subiendo, revisar secret/access. |
+| `cache_stampede_fallback_total` spike | Muchas VUs same hot key expirado (p.ej. k6 50 VUs inventory) | Aumentar TTL `inventory 30s → 60s` o `lockTtl 5s → 10s`, o precargar cache en worker relay. No es error, indica contención.                                                    |
+| `x-cache: HIT` stale 30s              | Invalidación perdida (Redis down durante write)              | TTL acota a 30s; si crítico, `curl -X POST /invalidate?` futuro o bump `CACHE_VERSION v1→v2` y redeploy. Permisos nunca stale >30s.                                            |
 
 ## Observabilidad
 
@@ -114,4 +114,4 @@ docker compose start minio
 - InMemory per-instance: full coverage sin Docker. Redis: `SCAN` + `SET NX PX` con fallback. `cache.ts` + `rate-limit.ts` + `circuit-breaker.ts` con metrics.
 - Tests `cache-rate-limit.test.ts`: key isolation, stampede concurrente, rate limit, tenant isolation, Redis degradado fail-open y circuit OPEN.
 - Evidencia `k6/inventory-stock1.js` stock 1 sigue 1×200 bajo rate limit tenant>30/min (ajustar `k6 --vus 10` si se limita).
-- Pendiente: `testcontainers` Redis+MinIO efímero para `withRedis()` helper, y `k6` con `RATE_LIMIT_ENABLED=0` para benchmark puro cache p95.
+- Pendiente: `testcontainers` Redis+S3Mock efímero para `withRedis()` helper, y `k6` con `RATE_LIMIT_ENABLED=0` para benchmark puro cache p95.

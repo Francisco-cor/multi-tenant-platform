@@ -61,4 +61,4 @@ Cross-tenant: `user-acme` no ve DLQ de `contoso` aunque adivine `id` (404). `ope
 
 - InMemory: full coverage sin Docker. Persistent: `outbox_events`, `processed_jobs`, `dlq_jobs` con `FORCE RLS`, outbox escrito en `files` e `inventory` transaccionalmente, relay con `SKIP LOCKED`, dedupe con `processed_jobs`, DLQ replay auditado.
 - Evidencia: `apps/worker/src/outbox.dedupe.test.ts` 4 tests + `relay/outboxRelay.test.ts` 3 tests, `GET /metrics` y `checkOutbox` en health.
-- Pendiente: integración real con `testcontainers` Postgres+Redis (MINIO ya existe) y `k6` para outbox lag bajo carga; dashboard Grafana `worker.json` con `outbox_lag` y `dlq_size`.
+- Pendiente: integración real con `testcontainers` Postgres+Redis (S3Mock ya existe) y `k6` para outbox lag bajo carga; dashboard Grafana `worker.json` con `outbox_lag` y `dlq_size`.

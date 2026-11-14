@@ -20,7 +20,7 @@
 pnpm install --ignore-scripts
 # stores: InMemoryCache, InMemoryRateLimiter, CircuitBreaker(s3)
 # No necesita postgres/redis reales para este lab; se usa InMemory* para determinismo.
-# Para degradación real: docker compose up -d postgres redis minio
+# Para degradación real: docker compose up -d postgres redis s3
 ```
 
 ## Inyección y señal esperada

@@ -3,7 +3,7 @@
 - Alcance: API, worker, web, paquetes, migraciones/RLS, CI, Docker, infraestructura local, documentación y contrato OpenAPI.
 - Punto de partida: `e28bf97`.
 - Resultado: 71 commits, 311 archivos modificados, +29 927 / −5 391 líneas.
-- Método: sondeo paralelo por área, reproducción de fallos, corrección con pruebas y verificación contra PostgreSQL, Redis, MinIO y navegador reales cuando el entorno lo permitió.
+- Método: sondeo paralelo por área, reproducción de fallos, corrección con pruebas y verificación contra PostgreSQL, Redis, S3 y navegador reales cuando el entorno lo permitió.
 
 ## Resultado ejecutivo
 
@@ -72,7 +72,7 @@ El proyecto pasó de “scaffold avanzado con controles parciales” a una base 
 
 - Acciones fijadas por SHA, permisos mínimos, Semgrep vigente, CodeQL seguro en forks/privados, Trivy, gitleaks y audit bloqueantes.
 - `assert-tests` falla si no se ejecuta ninguna prueba o todas se omiten; cobertura con umbrales.
-- Job de integración con PostgreSQL/Redis/MinIO, job E2E con Chromium y artefactos, matriz Docker con smoke de dependencias.
+- Job de integración con PostgreSQL/Redis/S3, job E2E con Chromium y artefactos, matriz Docker con smoke de dependencias.
 - OpenAPI: 65 operaciones comparadas contra la tabla real de Fastify, security schemes correctos, `Idempotency-Key`, envelopes y 202/401/403/409.
 - Dependencias: Next 15.5.29, Drizzle 0.45.4, Zod 4.6.7 y overrides de `fast-uri`, `postcss`, `sharp`; audit limpio.
 - Docker Compose con imágenes fijadas por digest, puertos en loopback, secretos obligatorios, límites y healthchecks.
@@ -134,7 +134,7 @@ Para integración real:
 
 ```bash
 cp .env.example .env
-docker compose up -d postgres redis minio
+docker compose up -d postgres redis s3
 pnpm --filter @platform/db migrate
 RUN_DB_INTEGRATION=1 RUN_API_INTEGRATION=1 RUN_WORKER_INTEGRATION=1 \
   DATABASE_URL=postgresql://platform:platform@127.0.0.1:5432/platform \

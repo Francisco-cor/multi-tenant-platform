@@ -57,7 +57,7 @@ Persistente: `UPDATE users SET email='anonymized-'||substr(md5(id::text),1,8)||'
 
 ## 5. Transferencias y subprocesadores
 
-- Infra: `postgres:16`, `redis:7`, `minio` local; prod `managed postgres`, `redis`, `S3` en `eu` región (supuesto). `OIDC` externo (`dex` local, `Auth0` prod) con `clientSecret` rotación dual.
+- Infra: `postgres:16`, `redis:7`, `S3Mock` local; prod `managed postgres`, `redis`, `S3` en `eu` región (supuesto). `OIDC` externo (`dex` local, `Auth0` prod) con `clientSecret` rotación dual.
 - `webhooks` outbound: datos se envían solo a `url https://` validada + `HMAC` + `secret_hash`; no se envía PII más allá de `orderId, amount` minimizado.
 - `OTel/Prometheus/Grafana`: logs estructurados con `tenant redacted/hashed`, nunca `email/token/secret`.
 

@@ -2,11 +2,11 @@
 
 - Fecha: 2026-09-02
 - Fase: 6 (archivos) + 13
-- Hipótesis: con `MinIO/S3` caído o denegando `upload/download`, la API debe mantener `files` metadata consistente (pending/ready) sin perder filas, y responder `503 DEPENDENCY_UNAVAILABLE` vía `circuit_breaker` sin 500. `gcFiles` no debe borrar `pending` que no se pudo verificar.
+- Hipótesis: con `S3/S3Mock` caído o denegando `upload/download`, la API debe mantener `files` metadata consistente (pending/ready) sin perder filas, y responder `503 DEPENDENCY_UNAVAILABLE` vía `circuit_breaker` sin 500. `gcFiles` no debe borrar `pending` que no se pudo verificar.
 
 ## Preparación
 
-- S3 `minio/minio:latest` (`docker-compose.yml:33`), bucket `platform`, `FakeS3Service` / `S3Service` (`apps/api/src/s3.ts:1`) con `generateUploadUrl` TTL 300s, `generateDownloadUrl` 60s, `headObject`.
+- S3 `adobe/s3mock` (`docker-compose.yml`), bucket `platform`, `FakeS3Service` / `S3Service` (`apps/api/src/s3.ts:1`) con `generateUploadUrl` TTL 300s, `generateDownloadUrl` 60s, `headObject`.
 - `files` tabla `tenants/{tenantId}/{uuid}` `FORCE RLS` (`packages/db/migrations/schema/0007_files.sql`), `status pending→ready→expired`.
 - `s3Breaker` `failureThreshold 5 timeout 30s requestTimeout 2s` (`app.ts:440`).
 - `circuit_state{breaker="s3"}` `GET /metrics`.
@@ -14,8 +14,8 @@
 ## Inyección
 
 ```bash
-docker compose stop minio
-# o: docker compose kill minio
+docker compose stop s3
+# o: docker compose kill s3
 # o: iptables -A INPUT -p tcp --dport 9000 -j DROP (en prod S3 egress)
 
 # 1. Crear pending con S3 down: el presigned falla por circuit
@@ -48,7 +48,7 @@ curl -s http://localhost:4000/health/ready | jq
 # -> degraded? No, S3 no es dependencia de readiness (solo postgres/redis/outbox), así liveness ok, readiness ok (S3 opcional)
 
 # 5. Recuperación
-docker compose start minio
+docker compose start s3
 sleep 5
 curl -s -X POST http://localhost:4000/v1/files/presigned-upload -H 'host: acme.app.localhost' -H "cookie: $COOKIE" -d '{"filename":"b.jpg","contentType":"image/jpeg","size":100}' | jq .file.id
 # -> 201 con upload.url (circuit HALF_OPEN → CLOSED tras 2 éxitos)
@@ -63,7 +63,7 @@ curl -s -X POST http://localhost:4000/v1/files/presigned-upload -H 'host: acme.a
 
 ## Recuperación
 
-- `docker start minio` → `s3Breaker` `HALF_OPEN` tras 30s, 2 `generateUploadUrl` éxitos → `CLOSED`.
+- `docker start s3` → `s3Breaker` `HALF_OPEN` tras 30s, 2 `generateUploadUrl` éxitos → `CLOSED`.
 - `pending` files creados durante down pueden finalizarse luego: `POST /finalize` con `sizeActual` verifica `HEAD` ahora ok y pasa a `ready`.
 - Si se decide compensar: un `pending` creado pero `presign` falló podría quedar huérfano; `gcFiles` lo limpiará a `expired` tras 24h + `DELETE` S3 (si no existe, no error). No afecta `ready` files.
 

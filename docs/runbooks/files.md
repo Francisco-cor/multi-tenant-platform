@@ -27,7 +27,7 @@ curl -i http://localhost:4000/v1/auth/dev-login -H 'content-type: application/js
 curl -s http://localhost:4000/v1/files/presigned-upload -H 'host: acme.app.localhost' -H 'content-type: application/json' -b /tmp/cookie_acme \
   -d '{"filename":"demo.pdf","contentType":"application/pdf","size":1024}' | jq
 
-# PUT real (con MinIO up)
+# PUT real (con S3Mock up)
 UPLOAD_URL=$(curl -s ... | jq -r .upload.url)
 curl -i -X PUT "$UPLOAD_URL" -H 'content-type: application/pdf' --data-binary @demo.pdf
 
@@ -49,7 +49,7 @@ Cross-tenant debe dar 404 aunque se conozca uuid.
 | `404` al leer/finalize de B con cookie A | RLS + repo tenant-scoped (esperado)                | No revelar existencia                                           |
 | `409 FILE_NOT_READY` en download         | No se hizo finalize                                | Hacer finalize primero                                          |
 | `410 GONE`                               | `expires_at <= now()` (24h) o presign 5min vencido | Pedir nuevo presign                                             |
-| `S3 indisponible` (head falla)           | MinIO caído                                        | finalize sigue tenant-scoped (skip HEAD), GC reintentará delete |
+| `S3 indisponible` (head falla)           | S3Mock caído                                       | finalize sigue tenant-scoped (skip HEAD), GC reintentará delete |
 
 ## GC huérfanos
 
@@ -66,6 +66,6 @@ Cross-tenant debe dar 404 aunque se conozca uuid.
 
 ## Estado actual (2026-11-13)
 
-- InMemory: cobertura unitaria. Persistent: RLS validado; el job `integration` de CI levanta MinIO y ejecuta la suite S3 con `RUN_S3_INTEGRATION=1`.
-- Evidencia: `apps/api/src/files.test.ts` (cross-tenant 404, TTL 300/60, 409 pending, 410 expired, GC) y `apps/api/src/s3.integration.test.ts` (SigV4/MinIO).
+- InMemory: cobertura unitaria. Persistent: RLS validado; el job `integration` de CI levanta S3Mock y ejecuta la suite S3 con `RUN_S3_INTEGRATION=1`.
+- Evidencia: `apps/api/src/files.test.ts` (cross-tenant 404, TTL 300/60, 409 pending, 410 expired, GC) y `apps/api/src/s3.integration.test.ts` (SigV4/S3Mock).
 - Límite: no hay antivirus ni CDN; `S3_PROVIDER=fake` es solo local/test.
