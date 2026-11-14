@@ -140,3 +140,49 @@ groups:
         annotations:
           summary: 'Circuit breaker OPEN'
           description: 'Check s3/oidc/payment breaker: 5 fails 30s, requestTimeout 2s, fallback 503.'
+
+      - alert: NodeDown
+        expr: up{job="node"} == 0
+        for: 5m
+        labels:
+          severity: warning
+          owner: platform-infra
+        annotations:
+          summary: 'node-exporter down'
+          description: 'Disk and host metrics are unavailable; check the node-exporter container.'
+
+  - name: security
+    interval: 30s
+    rules:
+      - alert: TenantIsolationViolation
+        expr: increase(isolation_violations_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          owner: platform-security
+          runbook: docs/runbooks/security.md#isolation
+        annotations:
+          summary: 'Tenant isolation violation detected'
+          description: 'isolation_violations_total increased. Treat as a security incident: capture requestId/traceId, block the actor, audit cross-tenant reads.'
+
+      - alert: MetricsScrapeDenied
+        expr: increase(metrics_scrape_denied_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          owner: platform-security
+          runbook: docs/runbooks/security.md#metrics
+        annotations:
+          summary: 'Metrics endpoint rejected a scrape'
+          description: 'metrics_scrape_denied_total > 0 means a caller without scrape credentials tried to read /metrics. Check proxy/network policy and rotate tokens.'
+
+      - alert: WebhookEgressDenied
+        expr: increase(webhook_egress_denials_total[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          owner: platform-security
+          runbook: docs/runbooks/security.md#webhook-egress
+        annotations:
+          summary: 'Webhook egress denied by policy'
+          description: 'A webhook target was blocked (SSRF/private range/DNS). Inspect the denied host and the endpoint owner.'

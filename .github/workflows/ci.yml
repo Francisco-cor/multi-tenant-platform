@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -12,23 +13,27 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  NODE_VERSION: '24'
+  PNPM_VERSION: '11.18.0'
+
 jobs:
   quality:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
-          version: 11
+          version: ${{ env.PNPM_VERSION }}
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
 
       - name: Install dependencies
@@ -46,8 +51,8 @@ jobs:
       - name: Build artifacts
         run: pnpm build
 
-      - name: Unit tests
-        run: pnpm test
+      - name: Script self-tests
+        run: pnpm test:scripts
 
       - name: OpenAPI drift
         run: pnpm openapi:check
@@ -55,12 +60,39 @@ jobs:
       - name: Migration safety checks
         run: pnpm migrate:check
 
-  migrate-check:
+      - name: Compose config (required secrets, pinned images, 127.0.0.1 binds)
+        run: docker compose --env-file .env.example config --quiet
+
+  unit:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Unit tests + coverage (fail on zero executed/passed/all-skipped)
+        run: pnpm test:coverage
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres@sha256:f377d590e5474681d4d7838635031a2b50647923b7abfa803ce9b5ff35d5c663
         env:
           POSTGRES_DB: platform
           POSTGRES_USER: platform
@@ -73,7 +105,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       redis:
-        image: redis:7-alpine
+        image: redis@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
         ports:
           - 6379:6379
         options: >-
@@ -95,17 +127,17 @@ jobs:
           --health-retries 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
-          version: 11
+          version: ${{ env.PNPM_VERSION }}
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
 
       - name: Install dependencies
@@ -121,28 +153,24 @@ jobs:
         env:
           DATABASE_URL: postgresql://platform:platform@localhost:5432/platform
 
-      - name: Isolation integration (RLS + pool 50)
-        run: pnpm --filter @platform/db test:integration
+      - name: DB integration (RLS + pool 50)
+        run: node scripts/assert-tests.mjs --suite integration --filter @platform/db --label db
         env:
           DATABASE_URL: postgresql://platform:platform@localhost:5432/platform
           RUN_DB_INTEGRATION: '1'
 
       - name: Worker integration (Redis, BullMQ and worker RLS)
-        run: pnpm --filter @platform/worker test:integration
+        run: node scripts/assert-tests.mjs --suite integration --filter @platform/worker --label worker
         env:
           DATABASE_URL: postgresql://platform:platform@localhost:5432/platform
           REDIS_URL: redis://localhost:6379
           RUN_WORKER_INTEGRATION: '1'
 
-      - name: API key integration (persistent PostgreSQL/RLS lifecycle)
-        run: pnpm --filter @platform/api test:integration
+      - name: API integration (key lifecycle + MinIO SigV4)
+        run: node scripts/assert-tests.mjs --suite integration --filter @platform/api --label api
         env:
           DATABASE_URL: postgresql://platform:platform@localhost:5432/platform
           RUN_API_INTEGRATION: '1'
-
-      - name: MinIO integration (SigV4 upload, HEAD, GET and DELETE)
-        run: pnpm --filter @platform/api test:integration
-        env:
           RUN_S3_INTEGRATION: '1'
           S3_ENDPOINT: http://localhost:9000
           S3_BUCKET: platform-local
@@ -152,25 +180,22 @@ jobs:
 
   security:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      security-events: write
+    timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
         with:
-          version: 11
+          version: ${{ env.PNPM_VERSION }}
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
+          node-version: ${{ env.NODE_VERSION }}
           cache: pnpm
 
       - name: Install dependencies
@@ -180,39 +205,187 @@ jobs:
         run: pnpm audit --prod --audit-level=high
 
       - name: Secret scanning (gitleaks)
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: SAST (Semgrep)
-        uses: semgrep/semgrep-action@v1
-        with:
-          config: >-
-            p/security-audit
-            p/secrets
-            p/owasp-top-ten
+      - name: SAST (Semgrep CLI, replaces archived semgrep-action)
+        run: |
+          python -m pip install --disable-pip-version-check semgrep==1.99.0
+          semgrep scan --error --config p/security-audit --config p/secrets --config p/owasp-top-ten
 
-      - name: SAST (CodeQL)
-        uses: github/codeql-action/init@v3
+      - name: Image/filesystem scan (Trivy, pinned digest)
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo \
+            aquasec/trivy@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb \
+            fs --scanners vuln,secret --severity CRITICAL,HIGH --ignore-unfixed \
+            --exit-code 1 --skip-dirs node_modules --skip-dirs .git .
+
+  codeql:
+    # Code scanning needs GHAS on private repos, and forks cannot receive
+    # security-events:write. Run only when the repo can actually upload.
+    if: >-
+      ${{ (github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.event.repository.visibility == 'public' || vars.ENABLE_CODEQL == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@9418214df1f2c4b8128c770156c409013b07d6b9 # v3
         with:
           languages: javascript-typescript
 
       - name: Autobuild CodeQL
-        uses: github/codeql-action/autobuild@v3
+        uses: github/codeql-action/autobuild@9418214df1f2c4b8128c770156c409013b07d6b9 # v3
 
       - name: Analyze CodeQL
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@9418214df1f2c4b8128c770156c409013b07d6b9 # v3
 
-      - name: Image scan (Trivy filesystem)
-        uses: aquasecurity/trivy-action@0.24.0
-        with:
-          scan-type: 'fs'
-          severity: 'CRITICAL,HIGH'
-          ignore-unfixed: true
-          format: 'sarif'
-          output: 'trivy-fs.sarif'
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [api, web, worker]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Upload Trivy SARIF
-        uses: github/codeql-action/upload-sarif@v3
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      # apps/web/Dockerfile copies apps/web/public, which is not tracked yet.
+      # The web owner must commit that directory (or drop the COPY); this keeps
+      # the matrix honest without editing apps/web from the platform branch.
+      - name: Ensure Next public directory exists (web)
+        if: matrix.service == 'web'
+        run: mkdir -p apps/web/public
+
+      - name: Build ${{ matrix.service }} image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
-          sarif_file: 'trivy-fs.sarif'
+          context: .
+          file: apps/${{ matrix.service }}/Dockerfile
+          load: true
+          tags: platform-${{ matrix.service }}:ci
+          build-args: |
+            COMMIT_SHA=${{ github.sha }}
+            BUILD_DATE=${{ github.run_id }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      - name: Runtime dependency smoke (api/worker)
+        if: matrix.service != 'web'
+        run: |
+          if [ "${{ matrix.service }}" = "api" ]; then
+            modules="fastify @platform/contracts @platform/observability @platform/db @platform/config"
+          else
+            modules="bullmq ioredis @platform/contracts @platform/observability @platform/db @platform/config"
+          fi
+          docker run --rm --entrypoint node platform-${{ matrix.service }}:ci \
+            -e "Promise.all('$modules'.split(' ').map((m) => import(m))).then(() => console.log('dependencies resolve')).catch((e) => { console.error(e); process.exit(1); })"
+
+      - name: Non-root runtime (api/worker)
+        if: matrix.service != 'web'
+        run: |
+          uid=$(docker run --rm --entrypoint id platform-${{ matrix.service }}:ci -u)
+          echo "uid=$uid"
+          test "$uid" != "0"
+
+      - name: No tsx in production image (api/worker)
+        if: matrix.service != 'web'
+        run: |
+          ! docker run --rm --entrypoint sh platform-${{ matrix.service }}:ci \
+            -c 'test -e node_modules/.bin/tsx'
+
+  e2e:
+    # Real E2E is opt-in (vars.ENABLE_E2E=true) because it starts the full API.
+    if: ${{ vars.ENABLE_E2E == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres@sha256:f377d590e5474681d4d7838635031a2b50647923b7abfa803ce9b5ff35d5c663
+        env:
+          POSTGRES_DB: platform
+          POSTGRES_USER: platform
+          POSTGRES_PASSWORD: platform
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U platform -d platform"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Install Playwright browser
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Migrate + seed
+        run: |
+          pnpm --filter @platform/db migrate
+          pnpm --filter @platform/db seed
+        env:
+          DATABASE_URL: postgresql://platform:platform@localhost:5432/platform
+
+      - name: Start API
+        run: |
+          nohup pnpm --filter @platform/api dev > /tmp/api.log 2>&1 &
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:4000/health/live >/dev/null; then exit 0; fi
+            echo "waiting for API ($attempt/60)"
+            sleep 2
+          done
+          cat /tmp/api.log
+          exit 1
+        env:
+          DATABASE_URL: postgresql://platform:platform@localhost:5432/platform
+          REDIS_URL: redis://localhost:6379
+          TENANT_BASE_DOMAIN: app.localhost
+          S3_PROVIDER: fake
+          ALLOW_DEV_LOGIN: '1'
+          CSRF_STRICT: '0'
+
+      - name: Run root E2E suite
+        run: pnpm test:e2e
+        env:
+          API_URL: http://127.0.0.1:4000
+          TENANT_BASE_DOMAIN: app.localhost
