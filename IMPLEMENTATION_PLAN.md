@@ -2,6 +2,8 @@
 
 > Documento maestro del proyecto. Se actualiza junto con el código y sirve como contrato de alcance, checklist de producción y registro de decisiones. El objetivo no es terminar un CRUD, sino construir una plataforma B2B operable, observable y defendible en una entrevista técnica.
 
+> **Addendum 2026-11-13:** los registros de sesión y los hashes/conteos históricos de este documento se conservan como historia, no como estado actual. La reconciliación con el árbol fusionado, la evidencia reproducible y los gates reales están en el [Anexo 2026-11-13](#anexo-2026-11-13--reconciliación-con-el-árbol-actual). El estado resumido por fase vive en `README.md`.
+
 ## 1. Resultado que se quiere construir
 
 Una plataforma B2B multi-tenant para compañías con varias sucursales. Cada organización opera en un espacio lógico aislado y puede gestionar:
@@ -254,15 +256,15 @@ Las fases se ejecutan en orden, pero una fase puede tener trabajo paralelo cuand
 
 ### Tareas
 
-- [ ] Crear orden, líneas, precios capturados, sucursal y actor creador.
-- [ ] Definir máquina de estados: `draft`, `pending_payment`, `paid`, `processing`, `completed`, `cancelled`, `failed`.
-- [ ] Validar transiciones en una capa de dominio, no mediante cambios directos de status.
-- [ ] Añadir idempotency keys por tenant, actor, endpoint y operación.
+- [ ] Crear orden, líneas, precios capturados, sucursal y actor creador. _(Hay orden sin líneas ni precios capturados.)_
+- [x] Definir máquina de estados: `draft`, `pending_payment`, `paid`, `processing`, `completed`, `cancelled`, `failed`.
+- [x] Validar transiciones en una capa de dominio, no mediante cambios directos de status. _(Aplicado a pagos; la máquina de orden aún no tiene endpoint de transición.)_
+- [ ] Añadir idempotency keys por tenant, actor, endpoint y operación. _(La tabla `order_idempotency` existe; la ruta `POST /v1/orders` no la usa.)_
 - [ ] Persistir respuesta reutilizable de operaciones idempotentes y su hash de request.
-- [ ] Registrar audit log append-only para acciones sensibles.
-- [ ] Publicar eventos internos mediante transactional outbox.
-- [ ] Añadir paginación, filtros, búsqueda limitada y export asíncrono.
-- [ ] Implementar permisos diferenciados para crear, aprobar, cancelar y consultar.
+- [x] Registrar audit log append-only para acciones sensibles. _(`order.created`; `platform_audit_log` para eventos globales.)_
+- [x] Publicar eventos internos mediante transactional outbox. _(`order.created`, `payment.created`.)_
+- [ ] Añadir paginación, filtros, búsqueda limitada y export asíncrono. _(Solo `limit` fijo en listado.)_
+- [ ] Implementar permisos diferenciados para crear, aprobar, cancelar y consultar. _(Solo `orders:create` y `orders:read` están cableados.)_
 
 ### Criterios de salida
 
@@ -554,14 +556,14 @@ El rollback de aplicación no implica automáticamente rollback de base de datos
 
 ### Tareas
 
-- [ ] Crear Dockerfiles multi-stage no root, con healthcheck y pinning de dependencias.
-- [ ] Separar imágenes web/API/worker y configurar límites de CPU/memoria.
-- [ ] Crear manifests/Helm/Kustomize para namespace, Deployments, Services, Ingress, ConfigMaps y Secrets references.
-- [ ] Configurar readiness, liveness, startup probes, PodDisruptionBudget y graceful termination.
+- [x] Crear Dockerfiles multi-stage no root, con healthcheck y pinning de dependencias. _(API/web/worker; CI verifica usuario no-root y ausencia de `tsx` en runtime.)_
+- [x] Separar imágenes web/API/worker y configurar límites de CPU/memoria. _(Imágenes separadas; límites de recursos solo en servicios de infraestructura de Compose, no en apps.)_
+- [ ] Crear manifests/Helm/Kustomize para namespace, Deployments, Services, Ingress, ConfigMaps y Secrets references. _(No existe `infra/k8s`.)_
+- [ ] Configurar readiness, liveness, startup probes, PodDisruptionBudget y graceful termination. _(Sondas implementadas en apps; no hay manifests de orquestador.)_
 - [ ] Añadir autoscaling por CPU y señales de cola donde sea útil.
-- [ ] Definir Terraform para red, PostgreSQL gestionado, Redis, bucket, DNS, observabilidad y permisos mínimos.
+- [ ] Definir Terraform para red, PostgreSQL gestionado, Redis, bucket, DNS, observabilidad y permisos mínimos. _(No existe `infra/terraform`.)_
 - [ ] Separar state y variables de local/staging/prod; nunca commitear credenciales.
-- [ ] Añadir política de backup, restore drill y retención.
+- [x] Añadir política de backup, restore drill y retención. _(`docs/runbooks/database-restore.md`, `docs/runbooks/data-retention.md`; falta programación automática.)_
 - [ ] Definir DNS/TLS/wildcard para subdominios tenant.
 - [ ] Documentar costos aproximados y límites conocidos.
 
@@ -591,12 +593,12 @@ El rollback de aplicación no implica automáticamente rollback de base de datos
 
 ### Tareas
 
-- [ ] Crear workflows separados para PR, nightly, staging y producción.
+- [ ] Crear workflows separados para PR, nightly, staging y producción. _(Solo existe `.github/workflows/ci.yml`.)_
 - [ ] Añadir ambientes protegidos y permisos OIDC para el proveedor cloud.
-- [ ] Definir versionado, changelog y release notes.
-- [ ] Añadir rollback de imagen, kill switches y procedimiento de roll-forward.
-- [ ] Ejecutar pruebas de recuperación antes del release candidato.
-- [ ] Publicar una matriz de compatibilidad de versiones de API/esquema.
+- [ ] Definir versionado, changelog y release notes. _(Las imágenes llevan labels OCI; no hay release notes ni versionado de API.)_
+- [x] Añadir rollback de imagen, kill switches y procedimiento de roll-forward. _(`docs/runbooks/rollback.md`, `tenant_feature_flags` y `kill_orders_write`; el rollback de imagen no está automatizado.)_
+- [ ] Ejecutar pruebas de recuperación antes del release candidato. _(El restore drill es manual y no está atado a un release.)_
+- [ ] Publicar una matriz de compatibilidad de versiones de API/esquema. _(Existe hash OpenAPI + checksum de migraciones, no una matriz publicada.)_
 
 ### Criterios de salida
 
@@ -608,25 +610,27 @@ El rollback de aplicación no implica automáticamente rollback de base de datos
 
 Crear estos documentos a medida que se implementan las fases:
 
-- [ ] `docs/architecture/system-context.md` — contexto, contenedores y dependencias.
-- [ ] `docs/architecture/data-ownership.md` — dueño y clasificación de cada tabla.
-- [ ] `docs/architecture/tenant-isolation.md` — invariantes, RLS, cache, jobs y storage.
-- [ ] `docs/adr/ADR-001-architecture.md` — monorepo y límites de servicios.
-- [ ] `docs/adr/ADR-002-tenant-isolation.md` — repository layer + RLS.
-- [ ] `docs/adr/ADR-003-orm-and-migrations.md` — Drizzle y SQL explícito.
-- [ ] `docs/adr/ADR-004-transactional-outbox.md` — outbox frente a dual writes.
-- [ ] `docs/adr/ADR-005-payment-saga.md` — pagos e incertidumbre.
-- [ ] `docs/adr/ADR-006-inventory-concurrency.md` — reservas/locks/conditional update.
-- [ ] `docs/adr/ADR-007-webhook-delivery.md` — firma, retries y dedupe.
-- [ ] `docs/adr/ADR-008-cache-invalidation.md` — TTL, keys y eventos.
-- [ ] `docs/adr/ADR-009-deploy-migrations.md` — expand-contract y rollback.
-- [ ] `docs/runbooks/worker-failure.md`.
-- [ ] `docs/runbooks/payment-unknown.md`.
-- [ ] `docs/runbooks/dlq-replay.md`.
+- [x] `docs/architecture/system-context.md` — contexto, contenedores y dependencias.
+- [x] `docs/architecture/data-ownership.md` — dueño y clasificación de cada tabla.
+- [x] `docs/architecture/identity-and-tenant-context.md` — sesión, BFF y contexto tenant.
+- [x] `docs/architecture/tenant-isolation.md` — invariantes, RLS, cache, jobs y storage.
+- [x] `docs/adr/ADR-001-architecture.md` — monorepo y límites de servicios.
+- [x] `docs/adr/ADR-002-tenant-isolation.md` — repository layer + RLS.
+- [x] `docs/adr/ADR-003-orm-and-migrations.md` — Drizzle y SQL explícito.
+- [x] `docs/adr/ADR-004-transactional-outbox.md` — outbox frente a dual writes.
+- [x] `docs/adr/ADR-005-payment-saga.md` — pagos e incertidumbre.
+- [x] `docs/adr/ADR-006-inventory-concurrency.md` — reservas/locks/conditional update.
+- [x] `docs/adr/ADR-007-files.md` — archivos presigned y aislamiento S3.
+- [x] `docs/adr/ADR-008-webhooks.md` — firma, retries, dedupe y automatizaciones.
+- [x] `docs/adr/ADR-009-deploy-migrations.md` — expand-contract y rollback.
+- [x] `docs/adr/ADR-010-cache-rate-limit.md` — TTL, keys, rate limits y breakers.
+- [x] `docs/runbooks/worker-failure.md`.
+- [x] `docs/runbooks/payment-unknown.md`.
+- [x] `docs/runbooks/dlq-replay.md`.
 - [x] `docs/runbooks/database-restore.md`.
-- [ ] `docs/runbooks/rollback.md`.
-- [ ] `docs/failure-scenarios/*.md` con evidencia de los laboratorios.
-- [ ] `docs/api/` con OpenAPI y ejemplos seguros.
+- [x] `docs/runbooks/rollback.md`.
+- [x] `docs/failure-scenarios/*.md` con evidencia de los laboratorios. _(Varios son procedimientos reproducibles; no todos tienen evidencia reciente.)_
+- [x] `docs/api/` con OpenAPI y ejemplos seguros. _(El contrato tiene drift conocido; el pase de OpenAPI lo corrige.)_
 
 ## 7. Definition of Done global
 
@@ -699,3 +703,48 @@ La siguiente sesión debe comenzar por la Fase 0 en este orden:
 No avanzar a órdenes, pagos o Kubernetes hasta que exista esa prueba base de aislamiento. Es la propiedad que condiciona todo el resto del proyecto.
 
 > Progreso sesion 3: se aplicaron las migraciones 0001/0002 contra PostgreSQL 16, la prueba RLS A/B paso con pool maximo 1 y la API persistente cubre sesiones, organizaciones, membresias, sucursales, invitaciones y auditoria. La integracion valida que el contexto tenant no se pega a conexiones reutilizadas.
+
+## Anexo 2026-11-13 — reconciliación con el árbol actual
+
+Este anexo sustituye a los hashes, conteos de tests y afirmaciones de cierre de las sesiones anteriores **solo como estado actual**. El historial se conserva sin reescribir; si una entrada antigua dice "cerrada" y este anexo dice "parcial", prevalece el anexo.
+
+### Evidencia reproducible
+
+| Comprobación              | Comando                                                 | Resultado 2026-11-13                                                  |
+| ------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------- |
+| Formato                   | `pnpm format:check`                                     | Gate de CI; ejecutado en el pase de docs sobre los archivos cambiados |
+| Lint                      | `pnpm lint`                                             | Gate de CI (`quality`)                                                |
+| Tipos                     | `pnpm typecheck`                                        | Gate de CI (`quality`)                                                |
+| Build                     | `pnpm build`                                            | Gate de CI (`quality`)                                                |
+| Unitarios                 | `pnpm test:unit`                                        | 274 passed, 43 skipped, 0 failed (Node 26 local; CI fija Node 24)     |
+| Contrato                  | `pnpm openapi:check`                                    | Verde: 43 paths, 44 schemas, hash `2742853210f7`                      |
+| Migraciones               | `pnpm migrate:check`                                    | Gate de CI (`quality`)                                                |
+| Integración DB/API/worker | `node scripts/assert-tests.mjs --suite integration ...` | Gate de CI (`integration`) con PostgreSQL, Redis y MinIO              |
+| Docker                    | matriz `docker` en CI                                   | Build, dependencias runtime, non-root y ausencia de `tsx`             |
+| E2E navegador             | `pnpm test:e2e`                                         | **No gate por defecto**; job `e2e` solo con `ENABLE_E2E=true`         |
+
+### Gates y límites reales
+
+- **RLS y roles:** `packages/db/migrations/schema/0024_identity_privilege_hardening.sql`, `0027_least_privilege_cleanup.sql` y `0028_restore_platform_audit_policies.sql` separan `platform_app` (tenant), `platform_auth` (credenciales) y `platform_worker` (relay global). Las sesiones son user-bound mediante `app.user_id`; `platform_app` no puede borrar organizaciones ni membresías.
+- **Auditoría:** los eventos globales van a `platform_audit_log`; los tenant-scoped permanecen en `audit_log` con `tenant_id NOT NULL`. La retention sigue siendo un helper de DB, no un cron desplegado.
+- **Web:** el BFF de Next.js guarda el token de API en una cookie `platform_session` HttpOnly, SameSite=Lax, host-only por defecto y 8 h; el cliente no ve el token. El API también acepta `Authorization: Bearer` y cookie.
+- **Worker:** readiness incluye DB, consumidores, relay, scheduler, heartbeat, lag de outbox, DLQ y workers BullMQ; `/metrics` del worker acepta `WORKER_METRICS_TOKEN`.
+- **Métricas del API:** `/metrics` **no** tiene autenticación en el código actual. Debe exponerse solo en una red privada o detrás de un proxy con allowlist; no se debe documentar como autenticado.
+- **Pagos:** `StripePaymentProvider` existe y tiene tests unitarios; no se ha probado contra Stripe sandbox/live. `FakePaymentProvider` sigue siendo el camino de demo/CI.
+- **Egress:** los webhooks outbound resuelven DNS y fijan la IP pública, rechazan rangos privados/link-local/metadata, solo permiten HTTPS:443 y no siguen redirects. **No hay egress proxy con allowlist**; queda como gap de producción.
+- **Secretos:** el cifrado de secretos de webhook usa AES-GCM con `WEBHOOK_SECRET_ENCRYPTION_KEY` y ventana de rotación de 24 h. **No hay KMS/Vault**; la clave vive en el entorno y su rotación es manual (ver `docs/runbooks/key-rotation.md`).
+
+### Drift de contrato que debe resolver el pase de OpenAPI
+
+1. `POST /v1/inventory/reserve` acepta `productId`; el YAML documenta `sku`.
+2. El runtime expone `POST /v1/files/presign`; el YAML publica `presigned-upload`.
+3. El YAML publica rutas no implementadas (`/v1/me`, `GET/POST /v1/organizations/{id}/members`, `POST /v1/inventory/reservations`, `POST /v1/webhooks/{id}/replay`) y usa métodos distintos en otras.
+4. Los conteos de paths/schemas y el hash cambian con el contrato; no se deben copiar a README ni ADRs.
+
+### Fases que no se deben presentar como cerradas
+
+- **Fase 4:** órdenes sin líneas, precios, idempotencia HTTP ni transiciones de orden completas.
+- **Fase 8:** adapter Stripe sin prueba real; sin reembolsos.
+- **Fase 11:** KMS/Vault y egress proxy pendientes; API metrics sin token.
+- **Fase 13:** E2E opt-in y `k6` fuera de CI; varios escenarios son procedimientos.
+- **Fases 14–16:** no hay clúster, manifests K8s, Terraform ni pipeline de release; solo scripts, imágenes y gates de CI.
