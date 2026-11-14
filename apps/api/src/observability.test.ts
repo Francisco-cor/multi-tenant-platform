@@ -42,6 +42,7 @@ describe('Fase 12 — Observabilidad: correlation, RED, logs redact, metrics', (
         cookie,
         'x-request-id': reqId,
         traceparent,
+        'idempotency-key': 'observability-order-0001',
       },
       payload: { branchId: 'branch-acme-main', amountCents: 1111 },
     });

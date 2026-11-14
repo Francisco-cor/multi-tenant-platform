@@ -25,7 +25,11 @@ describe('Fase 13 — aislamiento espejo A/B + idempotencia', () => {
     const acmeOrder = await app.inject({
       method: 'POST',
       url: '/v1/orders',
-      headers: { host: 'acme.app.localhost', cookie: acmeCookie },
+      headers: {
+        host: 'acme.app.localhost',
+        cookie: acmeCookie,
+        'idempotency-key': 'fase13-iso-order-0001',
+      },
       payload: { branchId: 'branch-acme-main', amountCents: 1000 },
     });
     expect(acmeOrder.statusCode).toBe(201);
@@ -83,40 +87,44 @@ describe('Fase 13 — aislamiento espejo A/B + idempotencia', () => {
     await app.close();
   });
 
-  it('idempotency: repetir POST /v1/orders sin Idempotency-Key header crea 2 ordenes distintas, pero store idempotente via providerKey', async () => {
+  it('idempotency: same key returns one order/attempt/provider key; changed body is 409; missing key is 400', async () => {
     const app = buildApp({ allowDevLogin: true });
     await app.ready();
     const cookie = await login(app, 'user-acme-only');
-    // Dos orders con mismo amount pero diferentes orderId deben tener providerKeys diferentes
+    const key = 'fase13-idempotency-key-0001';
     const r1 = await app.inject({
       method: 'POST',
       url: '/v1/orders',
-      headers: { host: 'acme.app.localhost', cookie },
+      headers: { host: 'acme.app.localhost', cookie, 'idempotency-key': key },
       payload: { branchId: 'branch-acme-main', amountCents: 2000 },
     });
     const r2 = await app.inject({
       method: 'POST',
       url: '/v1/orders',
-      headers: { host: 'acme.app.localhost', cookie },
+      headers: { host: 'acme.app.localhost', cookie, 'idempotency-key': key },
       payload: { branchId: 'branch-acme-main', amountCents: 2000 },
     });
     expect(r1.statusCode).toBe(201);
     expect(r2.statusCode).toBe(201);
-    expect(r1.json().order.id).not.toBe(r2.json().order.id);
-    expect(r1.json().paymentAttempt.providerKey).not.toBe(r2.json().paymentAttempt.providerKey);
-    // Mas la misma orderId con mismo tenant/amount debe dar mismo providerKey (determinista)
-    const { paymentProviderKey } = await import('@platform/domain');
-    const keyA = paymentProviderKey({
-      tenantId: 'tenant-acme',
-      orderId: 'order-same',
-      amount: 100,
+    expect(r1.json().order.id).toBe(r2.json().order.id);
+    expect(r1.json().paymentAttempt.id).toBe(r2.json().paymentAttempt.id);
+    expect(r1.json().paymentAttempt.providerKey).toBe(r2.json().paymentAttempt.providerKey);
+
+    const changed = await app.inject({
+      method: 'POST',
+      url: '/v1/orders',
+      headers: { host: 'acme.app.localhost', cookie, 'idempotency-key': key },
+      payload: { branchId: 'branch-acme-main', amountCents: 2001 },
     });
-    const keyB = paymentProviderKey({
-      tenantId: 'tenant-acme',
-      orderId: 'order-same',
-      amount: 100,
+    expect(changed.statusCode).toBe(409);
+
+    const missing = await app.inject({
+      method: 'POST',
+      url: '/v1/orders',
+      headers: { host: 'acme.app.localhost', cookie },
+      payload: { branchId: 'branch-acme-main', amountCents: 2000 },
     });
-    expect(keyA).toBe(keyB);
+    expect(missing.statusCode).toBe(400);
     await app.close();
   });
 

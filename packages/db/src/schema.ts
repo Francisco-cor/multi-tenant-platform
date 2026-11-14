@@ -393,6 +393,37 @@ export const orderIdempotency = pgTable(
   ],
 );
 
+export const providerInboundSecrets = pgTable(
+  'provider_inbound_secrets',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    provider: text('provider').notNull(),
+    version: integer('version').notNull(),
+    secretCiphertext: text('secret_ciphertext').notNull(),
+    status: text('status').notNull().default('active'),
+    expiresAt: timestamp('expires_at', { withTimezone: true }),
+    createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('provider_inbound_secret_version_unique').on(
+      table.tenantId,
+      table.provider,
+      table.version,
+    ),
+    index('provider_inbound_secrets_tenant_provider_idx').on(
+      table.tenantId,
+      table.provider,
+      table.status,
+      table.version,
+    ),
+  ],
+);
+
 export const inboundPaymentEvents = pgTable(
   'inbound_payment_events',
   {

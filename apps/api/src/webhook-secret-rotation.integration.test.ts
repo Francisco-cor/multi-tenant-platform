@@ -84,5 +84,35 @@ suite('versioned webhook secret rotation', () => {
     expect(deliveryVersions).toHaveLength(2);
     expect(deliveryVersions.map((row) => row.secret_version)).toEqual([1, 1]);
     expect(replay.eventId).toBe(original[0]!.eventId);
+
+    // New deliveries (fan-out) sign with the current version, never the old.
+    const newEventId = await withTenantTransaction(database, context, (tx) =>
+      writeOutboxEvent(tx, {
+        tenantId,
+        aggregateType: 'order',
+        aggregateId,
+        eventType: 'order.paid',
+        payload: { orderId: aggregateId, status: 'paid', sequence: 2 },
+      }),
+    );
+    const newDelivery = await admin<{ secret_version: number }[]>`
+      select secret_version from webhook_deliveries
+      where endpoint_id=${created.endpoint.id} and event_id=${newEventId}
+    `;
+    expect(newDelivery[0]?.secret_version).toBe(2);
+
+    // Once the overlap window closes, replay must fall forward to the
+    // current version instead of pinning the retired one.
+    await admin`
+      update webhook_endpoints set previous_secret_expires_at = now() - interval '1 hour'
+      where id=${created.endpoint.id}
+    `;
+    await store.replayDelivery(context, original[0]!.id);
+    const versionsAfterWindow = await admin<{ secret_version: number }[]>`
+      select secret_version from webhook_deliveries
+      where endpoint_id=${created.endpoint.id} and event_id=${eventId}
+      order by created_at
+    `;
+    expect(versionsAfterWindow.map((row) => row.secret_version)).toEqual([1, 1, 2]);
   });
 });
