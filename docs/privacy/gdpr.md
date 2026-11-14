@@ -15,19 +15,19 @@
 
 ## 2. Derechos del interesado
 
-| Derecho                        | Endpoint / proceso                                                                                 | SLA       | Evidencia                                                                                                          |
-| ------------------------------ | -------------------------------------------------------------------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------ |
-| **Art. 15 Acceso**             | `GET /v1/audit?limit=&cursor=&action=` + `GET /v1/members` + `GET /v1/organization` (`audit:read`) | 30d       | Export `audit` pagination `cursor` + `metadata`; no expone `token_hash`, `secret_hash`.                            |
-| **Art. 16 Rectificación**      | `PATCH /v1/members/:membershipId` `role`; el perfil se sincroniza desde el IdP (`upsertOidcUser`)  | inmediato | Audit `membership.role_changed` con `traceId/ip`.                                                                  |
-| **Art. 17 Supresión (olvido)** | Procedimiento manual (ver `runbooks/gdpr-erasure.md`); no hay endpoint ni worker `anonymize_user`  | 30d       | `users.email` anonimizado, `memberships active=false`, `files owner_id=null`; `audit_log` intacto por append-only. |
-| **Art. 18 Limitación**         | Suspensión de membresía/usuario por operador; no hay endpoint de estado de organización            | inmediato | `user.status suspended → 403` en `requireSession`; suspensión de tenant es manual.                                 |
-| **Art. 20 Portabilidad**       | `GET /v1/audit` paginado + metadata de archivos; export formal pendiente                           | 30d       | Export tenant-scoped con cursor; no hay endpoint `/v1/audit/export`.                                               |
-| **Oposición**                  | `DELETE /v1/members/:membershipId` (salir org); baja de tenant manual                              | inmediato | Soft-delete/archivo 30d luego borrado administrativo; no hay `DELETE /v1/organizations/:id`.                       |
+| Derecho                        | Endpoint / proceso                                                                                                 | SLA       | Evidencia                                                                                                          |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------ | --------- | ------------------------------------------------------------------------------------------------------------------ |
+| **Art. 15 Acceso**             | `GET /v1/audit` (`audit:read`) + `GET /v1/members` (`members:read`) + `GET /v1/organization` (`organization:read`) | 30d       | Export `audit` pagination `cursor` + `metadata`; no expone `token_hash`, `secret_hash`.                            |
+| **Art. 16 Rectificación**      | `PATCH /v1/members/:membershipId` `role`; el perfil se sincroniza desde el IdP (`upsertOidcUser`)                  | inmediato | Audit `membership.role_changed` con `traceId/ip`.                                                                  |
+| **Art. 17 Supresión (olvido)** | Procedimiento manual (ver `runbooks/gdpr-erasure.md`); no hay endpoint ni worker `anonymize_user`                  | 30d       | `users.email` anonimizado, `memberships active=false`, `files owner_id=null`; `audit_log` intacto por append-only. |
+| **Art. 18 Limitación**         | Suspensión de membresía/usuario por operador; no hay endpoint de estado de organización                            | inmediato | `user.status suspended → 403` en `requireSession`; suspensión de tenant es manual.                                 |
+| **Art. 20 Portabilidad**       | `GET /v1/audit` paginado + metadata de archivos; export formal pendiente                                           | 30d       | Export tenant-scoped con cursor; no hay endpoint `/v1/audit/export`.                                               |
+| **Oposición**                  | `DELETE /v1/members/:membershipId` (salir org); baja de tenant manual                                              | inmediato | Soft-delete/archivo 30d luego borrado administrativo; no hay `DELETE /v1/organizations/:id`.                       |
 
 ## 3. Flujo de erasure (art. 17)
 
 ```
-Solicitud (carta / ticket) → verificación identidad (email + OIDC subject) + verifica membership en tenant → owner aprueba → crea `audit_log` {action: gdpr.erasure.requested} → worker `anonymize_user` → verifica `users.email` anonimizado + `memberships` removed + `files owner_id null` → audit {action: gdpr.erasure.completed} → notifica interesado → archiva ticket 3 años
+Solicitud (carta / ticket) → verificación de identidad (email + OIDC subject) y membership del tenant → owner aprueba → operador de plataforma anonimiza `users` y desactiva memberships/files con conexión administrativa → verifica `users.email` anonimizado + `memberships` inactivas + `files.owner_id` nulo → registra evidencia en el ticket y, si existe un servicio de auditoría, crea el evento correspondiente → notifica al interesado → archiva el ticket 3 años. No hay worker `anonymize_user` ni endpoint formal en el código actual.
 ```
 
 - **No se borra**: `audit_log` (conserva trazabilidad legal 365d), `orders/payment_attempts` si obligación fiscal 7 años (anonimiza `created_by` a `deleted_user_hash` pero mantiene `amount`).
@@ -39,7 +39,7 @@ Solicitud (carta / ticket) → verificación identidad (email + OIDC subject) + 
 COOKIE_OWNER=$(curl -s -c - http://localhost:4000/v1/auth/dev-login -d '{"userId":"user-alice"}' | grep platform_session | awk '{print $7}')
 # Owner crea erasure para user-acme-only (operator) que abandona acme
 curl -s -X POST http://localhost:4000/v1/auth/dev-login -H 'content-type: application/json' -d '{"userId":"user-alice"}' -b "platform_session=$COOKIE_OWNER" | jq
-# Simula worker anonymize_user (InMemory):
+# Simula la anonimización en el store InMemory:
 #  - InMemoryIdentityStore.users.set('user-acme-only', {email:'anonymized-abc@example.invalid', displayName:'Deleted User', active:false})
 ```
 
