@@ -1059,8 +1059,9 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   const auditFailureReason = (error: unknown): string => {
     if (error instanceof RequestProblem) return error.code.toLowerCase();
     if (error instanceof Error) {
-      const mapped = mapDomainError(error.message);
-      if (mapped) return error.message;
+      // Domain/store errors are lowercase snake_case tokens. Free-form
+      // messages (which may contain SQL, hosts or credentials) are not.
+      if (/^[a-z][a-z0-9_]{2,63}$/u.test(error.message)) return error.message;
       const dbCode = (error as { code?: unknown }).code;
       if (typeof dbCode === 'string' && dbCode.length <= 8) return `db_${dbCode}`;
     }

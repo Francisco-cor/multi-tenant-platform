@@ -3,6 +3,39 @@ import { buildApp } from './app.js';
 import { InMemoryIdentityStore, type AuditRecord } from './identity-store.js';
 import { InMemoryInventoryStore } from './inventory-store.js';
 import { InMemoryApiKeyStore } from './api-key-store.js';
+import { InMemoryFileStore } from './file-store.js';
+import { FakeS3Service, getDefaultS3Service } from './s3.js';
+
+function putUploadedObject(uploadUrl: string, size: number, contentType: string): void {
+  const s3 = getDefaultS3Service();
+  if (!(s3 instanceof FakeS3Service)) throw new Error('fake_s3_required');
+  const parsed = new URL(uploadUrl);
+  const key = decodeURIComponent(parsed.pathname.split('/').slice(2).join('/'));
+  s3.putFakeObject(key, size, contentType);
+}
+
+async function uploadAndFinalize(
+  app: ReturnType<typeof buildApp>,
+  cookie: string,
+): Promise<{ fileId: string }> {
+  const upload = await app.inject({
+    method: 'POST',
+    url: '/v1/files/presigned-upload',
+    headers: { host: 'acme.app.localhost', cookie },
+    payload: { filename: 'audit.pdf', contentType: 'application/pdf', size: 512 },
+  });
+  expect(upload.statusCode).toBe(201);
+  const fileId = upload.json().file.id as string;
+  putUploadedObject(upload.json().upload.url as string, 512, 'application/pdf');
+  const finalized = await app.inject({
+    method: 'POST',
+    url: `/v1/files/${fileId}/finalize`,
+    headers: { host: 'acme.app.localhost', cookie },
+    payload: {},
+  });
+  expect(finalized.statusCode).toBe(200);
+  return { fileId };
+}
 
 function sessionCookie(response: { headers: Record<string, unknown> }): string {
   const value = response.headers['set-cookie'];
@@ -157,6 +190,74 @@ describe('audit coverage and failure rows', () => {
       'api_key.revoked:failure',
     ]);
     expect(rows[2]?.metadata?.reason).toBe('api_key_not_found');
+    await app.close();
+  });
+
+  it('audits file finalize success and failure rows', async () => {
+    const store = new InMemoryIdentityStore(true);
+    const fileStore = new InMemoryFileStore();
+    const app = buildApp({ allowDevLogin: true, store, fileStore });
+    const cookie = await loginAs(app, 'user-acme-only');
+
+    const { fileId } = await uploadAndFinalize(app, cookie);
+    const successRows = store.auditLog.filter((row) => row.action === 'file.finalized');
+    expect(successRows).toHaveLength(1);
+    expect(successRows[0]).toMatchObject({
+      result: 'success',
+      resourceId: fileId,
+      tenantId: 'tenant-acme',
+    });
+
+    // Simulate losing the race after the route read the pending row.
+    fileStore.finalize = async () => {
+      throw new Error('file_not_pending');
+    };
+    const upload = await app.inject({
+      method: 'POST',
+      url: '/v1/files/presigned-upload',
+      headers: { host: 'acme.app.localhost', cookie },
+      payload: { filename: 'race.pdf', contentType: 'application/pdf', size: 128 },
+    });
+    const raceId = upload.json().file.id as string;
+    putUploadedObject(upload.json().upload.url as string, 128, 'application/pdf');
+    const failed = await app.inject({
+      method: 'POST',
+      url: `/v1/files/${raceId}/finalize`,
+      headers: { host: 'acme.app.localhost', cookie },
+      payload: {},
+    });
+    expect(failed.statusCode).toBe(409);
+
+    const rows = store.auditLog.filter((row) => row.action === 'file.finalized');
+    expect(actions(rows)).toEqual(['file.finalized:success', 'file.finalized:failure']);
+    expect(rows[1]?.metadata?.reason).toBe('file_not_pending');
+    await app.close();
+  });
+
+  it('audits pending upload expiry after the object is deleted', async () => {
+    const store = new InMemoryIdentityStore(true);
+    const fileStore = new InMemoryFileStore();
+    const app = buildApp({ allowDevLogin: true, store, fileStore });
+    const cookie = await loginAs(app, 'user-acme-only');
+
+    const upload = await app.inject({
+      method: 'POST',
+      url: '/v1/files/presigned-upload',
+      headers: { host: 'acme.app.localhost', cookie },
+      payload: { filename: 'stale.pdf', contentType: 'application/pdf', size: 64 },
+    });
+    const fileId = upload.json().file.id as string;
+    await fileStore.setStatus(fileId, 'pending', Date.now() - 1_000);
+    const read = await app.inject({
+      method: 'GET',
+      url: `/v1/files/${fileId}`,
+      headers: { host: 'acme.app.localhost', cookie },
+    });
+    expect(read.statusCode).toBe(410);
+
+    const rows = store.auditLog.filter((row) => row.action === 'file.expired');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ result: 'success', resourceId: fileId });
     await app.close();
   });
 
