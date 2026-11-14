@@ -1,0 +1,17 @@
+# Extend the upstream rules; only reviewed test placeholders are allowlisted.
+# Do not add broad path allowlists: a real credential committed under tests
+# must still fail the scan.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Reviewed non-secret placeholders used by redaction and validation tests"
+regexes = [
+  '''msk_test_placeholder''',
+  '''sk_live_abc123def456ghi789''',
+  '''A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6''',
+  '''cs_9f8e7d6c5b4a3210''',
+  '''0123456789abcdef0123456789abcdef''',
+  '''fase13-idempotency-key-0001''',
+  '''observability-order-0001''',
+]

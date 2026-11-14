@@ -11,8 +11,22 @@ allowBuilds:
   ssh2: false
   unrs-resolver: true
 
+minimumReleaseAge: 10080
+# Reviewed exceptions: these are pinned transitive versions required by the
+# toolchain that were published inside the 7-day window when the lockfile was
+# refreshed. Remove an entry after the package ages out and the lock is updated.
 minimumReleaseAgeExclude:
   - postcss@8.5.33
+  - '@babel/helper-string-parser@7.29.14'
+  - '@babel/parser@7.29.14'
+  - '@babel/types@7.29.14'
+
+blockExoticSubdeps: true
+trustPolicy: no-downgrade
+# semver 6.x is pulled by transitive tooling that still supports older Node.
+# The advisory is a trust-metadata downgrade, not a code vulnerability.
+trustPolicyExclude:
+  - semver@6.3.1
 
 onlyBuiltDependencies:
   - '@swc/core'

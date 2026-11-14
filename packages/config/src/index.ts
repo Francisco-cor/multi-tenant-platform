@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 const WEBHOOK_SECRET_KEY_BYTES = 32;
 const WEBHOOK_SECRET_IV_BYTES = 12;
+const WEBHOOK_SECRET_TAG_BYTES = 16;
 const WEBHOOK_SECRET_ALGORITHM = 'aes-256-gcm';
 const WEBHOOK_SECRET_FORMAT_VERSION = 'v1';
 
@@ -384,10 +385,16 @@ export function decryptWebhookSecret(ciphertext: string, keyMaterial: string): s
   const iv = Buffer.from(ivEncoded, 'base64url');
   const tag = Buffer.from(tagEncoded, 'base64url');
   const data = Buffer.from(dataEncoded, 'base64url');
-  if (iv.length !== WEBHOOK_SECRET_IV_BYTES || tag.length !== 16 || data.length === 0) {
+  if (
+    iv.length !== WEBHOOK_SECRET_IV_BYTES ||
+    tag.length !== WEBHOOK_SECRET_TAG_BYTES ||
+    data.length === 0
+  ) {
     throw new Error('webhook_secret_ciphertext_invalid');
   }
-  const decipher = createDecipheriv(WEBHOOK_SECRET_ALGORITHM, key, iv);
+  const decipher = createDecipheriv(WEBHOOK_SECRET_ALGORITHM, key, iv, {
+    authTagLength: WEBHOOK_SECRET_TAG_BYTES,
+  });
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(data), decipher.final()]).toString('utf8');
 }

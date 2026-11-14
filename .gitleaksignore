@@ -1,0 +1,4 @@
+# Reviewed false positives: deterministic placeholder values in config validation tests.
+# Fingerprints are commit:file:rule:line and only suppress these exact findings.
+94d5762b4f9c6142ba21416fb003d6c0fe4c7d26:packages/config/src/index.test.ts:stripe-access-token:117
+94d5762b4f9c6142ba21416fb003d6c0fe4c7d26:packages/config/src/index.test.ts:stripe-access-token:131
