@@ -6,7 +6,7 @@
 2. Mantén el alcance pequeño y conserva la separación entre apps y packages (`packages/*` no importa `apps/*` — verificado por `eslint-plugin-import`).
 3. Ejecuta `pnpm format:check`, `pnpm lint`, `pnpm typecheck`, `pnpm test:unit`, `pnpm build`, `pnpm openapi:check` y `node scripts/check-docs-links.mjs` antes de push. La integración real requiere servicios y corre en CI.
 4. Para cambios tenant-scoped, añade siempre una prueba negativa con dos tenants (usa `@platform/testing` + `withPostgres()` si necesitas DB real).
-5. Si tocas contratos HTTP, actualiza `docs/api/openapi.yaml` y el hash: `pnpm openapi:check` imprime el valor y el comando `echo <hash> > docs/api/.openapi.hash`; no lo genera automáticamente.
+5. Si tocas contratos HTTP, actualiza `docs/api/openapi.yaml`: `pnpm openapi:check` compara la especificación con la tabla real de rutas Fastify y falla ante drift, falta de 401/403 o `Idempotency-Key`. Si el cambio es intencional, actualiza también el hash recordatorio con `echo <hash> > docs/api/.openapi.hash` (el comando se imprime en el aviso).
 6. Describe migraciones (`schema/` vs `data/` vs `indexes/` + `CONCURRENTLY`), retries, observabilidad y rollback cuando el cambio los afecte.
 7. Verifica Docker builds si tocas `Dockerfile` o `tsconfig.build.json`: `docker build -f apps/<app>/Dockerfile -t test:local .`
 8. No presentes una fase como cerrada sin evidencia de CI; el estado vive en `README.md` y el anexo de `IMPLEMENTATION_PLAN.md`.

@@ -89,9 +89,9 @@
 
 ## Contrato API
 
-- [`api/README.md`](./api/README.md) — contrato y error envelope.
-- [`api/openapi.yaml`](./api/openapi.yaml) — especificación; tiene drift conocido de rutas y `sku` vs `productId`.
-- El pase posterior de OpenAPI es el dueño de reconciliar el contrato; estos documentos no editan el YAML.
+- [`api/README.md`](./api/README.md) — contrato, autenticación y gate de conformidad.
+- [`api/openapi.yaml`](./api/openapi.yaml) — especificación 3.1; las 65 operaciones implementadas están documentadas y verificadas contra la tabla real de rutas Fastify.
+- `pnpm openapi:check` falla ante drift de rutas/métodos, seguridad incompleta o falta de `Idempotency-Key`; el hash es un recordatorio de cambio intencional.
 
 ## Verificación
 

@@ -1,8 +1,18 @@
 openapi: 3.1.0
 info:
   title: Multi-Tenant Operations Hub API
-  version: 0.1.0
-  description: Contrato inicial versionado. Las rutas marcadas como planned se implementan por fases.
+  version: 0.2.0
+  description: |
+    Contrato ejecutable de la API. `scripts/check-openapi.mjs` construye la app
+    Fastify con adaptadores en memoria y compara esta especificación con la tabla
+    real de rutas; cualquier ruta, método o esquema de seguridad que diverja falla
+    el gate. El hash de `docs/api/.openapi.hash` solo recuerda revisar cambios
+    intencionales del contrato.
+
+    Autenticación: sesión web por cookie `platform_session`, token de sesión
+    `Authorization: Bearer`, o API key `X-Api-Key` (solo rutas con scope válido).
+    Las mutaciones con cookie requieren `X-CSRF-Token` cuando el navegador envía
+    `Origin`/`Sec-Fetch-Site`, además de un origen permitido.
 servers:
   - url: https://{tenant}.app.com
     variables:
@@ -11,65 +21,291 @@ servers:
   - url: http://localhost:4000
 tags:
   - name: Health
+  - name: Auth
   - name: Organizations
   - name: Members
-  - name: Orders
+  - name: Branches
   - name: Inventory
-  - name: Files
+  - name: Orders
+  - name: Payments
   - name: Webhooks
+  - name: API Keys
+  - name: Automations
+  - name: Files
+  - name: DLQ
+  - name: Feature Flags
+  - name: Audit
 paths:
   /health/live:
     get:
       tags: [Health]
       operationId: getLiveness
+      summary: Liveness del proceso
       responses:
         '200':
-          description: Process is alive.
+          description: El proceso está vivo.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HealthResponse'
+                $ref: '#/components/schemas/LivenessResponse'
   /health/ready:
     get:
       tags: [Health]
       operationId: getReadiness
+      summary: Readiness con dependencias
       responses:
         '200':
-          description: Process can accept traffic.
+          description: El proceso puede recibir tráfico.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ReadinessResponse'
+        '503':
+          description: Alguna dependencia está degradada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+  /health/startup:
+    get:
+      tags: [Health]
+      operationId: getStartup
+      summary: Startup con dependencias
+      responses:
+        '200':
+          description: El proceso terminó de arrancar.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+        '503':
+          description: Alguna dependencia está degradada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+  /metrics:
+    get:
+      tags: [Health]
+      operationId: getMetrics
+      summary: Métricas Prometheus
+      description: |
+        Si `METRICS_TOKEN` está configurado exige `Authorization: Bearer`.
+        En entornos production-like sin token responde 503. Rate limit de scrape
+        1000/min por IP.
+      security:
+        - {}
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Métricas en formato Prometheus.
+          content:
+            text/plain:
+              schema:
+                type: string
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /v1/meta:
     get:
       tags: [Health]
       operationId: getApiMetadata
+      summary: Metadatos de la API
       responses:
         '200':
-          description: API metadata.
+          description: Versión y estado del servicio.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/MetaResponse'
-  /v1/me:
+  /v1/auth/login:
     get:
-      tags: [Organizations]
-      operationId: getCurrentIdentity
-      security: [{ oidc: [] }]
+      tags: [Auth]
+      operationId: beginLogin
+      summary: Inicia el flujo OIDC
+      description: Devuelve un 302 al authorization endpoint y fija la cookie `oidc_state`.
+      responses:
+        '302':
+          description: Redirección al proveedor OIDC.
+          headers:
+            location:
+              schema: { type: string, format: uri }
+            set-cookie:
+              schema: { type: string }
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/auth/callback:
+    get:
+      tags: [Auth]
+      operationId: completeLogin
+      summary: Completa el flujo OIDC
+      description: Valida `state`, canjea el código y fija las cookies de sesión y CSRF.
+      parameters:
+        - name: code
+          in: query
+          required: false
+          schema: { type: string }
+        - name: state
+          in: query
+          required: false
+          schema: { type: string }
+        - name: error
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '302':
+          description: Redirección a la web con sesión iniciada.
+          headers:
+            location:
+              schema: { type: string, format: uri }
+            set-cookie:
+              schema: { type: string }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/auth/dev-login:
+    post:
+      tags: [Auth]
+      operationId: devLogin
+      summary: Login de desarrollo
+      description: Solo existe si `ALLOW_DEV_LOGIN=1`; en otro caso responde 404. Fija cookies de sesión y CSRF.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DevLoginRequest'
       responses:
         '200':
-          description: Current user and authorized memberships.
+          description: Sesión creada.
+          headers:
+            set-cookie:
+              schema: { type: string }
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CurrentIdentity'
+                $ref: '#/components/schemas/DevLoginResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/auth/me:
+    get:
+      tags: [Auth]
+      operationId: getAuthMe
+      summary: Identidad de la sesión actual
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Usuario, organizaciones y organización seleccionada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MeResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: Cierra la sesión actual
+      description: Idempotente; limpia las cookies de sesión y CSRF aunque no haya sesión.
+      responses:
+        '200':
+          description: Sesión cerrada.
+          headers:
+            set-cookie:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+  /v1/auth/sessions:
+    delete:
+      tags: [Auth]
+      operationId: revokeAllSessions
+      summary: Revoca todas las sesiones del usuario
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Sesiones revocadas.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RevokeSessionsResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: refreshSession
+      summary: Renueva la sesión
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Sesión renovada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefreshSessionResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/auth/switch-organization:
+    post:
+      tags: [Auth]
+      operationId: switchOrganization
+      summary: Selecciona la organización activa
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SwitchOrganizationRequest'
+      responses:
+        '200':
+          description: Organización seleccionada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizationHostResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /v1/organizations:
     post:
       tags: [Organizations]
       operationId: createOrganization
-      security: [{ oidc: [] }]
+      summary: Crea una organización
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -78,52 +314,466 @@ paths:
               $ref: '#/components/schemas/CreateOrganizationRequest'
       responses:
         '201':
-          description: Organization created.
+          description: Organización creada y seleccionada.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Organization'
+                $ref: '#/components/schemas/OrganizationHostResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '409':
           $ref: '#/components/responses/Conflict'
-  /v1/organizations/{organizationId}/members:
+  /v1/context:
+    get:
+      tags: [Organizations]
+      operationId: getContext
+      summary: Contexto tenant resuelto
+      description: Requiere host de tenant válido y permiso `organization:read`.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Usuario, organización, membership, roles y permisos.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContextResponse'
+        '400':
+          $ref: '#/components/responses/TenantRequired'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+  /v1/organization:
+    get:
+      tags: [Organizations]
+      operationId: getOrganization
+      summary: Organización actual
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Organización del contexto.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrganizationResponse'
+        '400':
+          $ref: '#/components/responses/TenantRequired'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+  /v1/branches:
+    get:
+      tags: [Branches]
+      operationId: listBranches
+      summary: Lista sucursales
+      description: Cache privada por tenant; cabeceras `x-cache` y `cache-control`.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Sucursales del tenant.
+          headers:
+            x-cache:
+              schema: { type: string, enum: [HIT, MISS] }
+            cache-control:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BranchListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    post:
+      tags: [Branches]
+      operationId: createBranch
+      summary: Crea una sucursal
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBranchRequest'
+      responses:
+        '201':
+          description: Sucursal creada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BranchResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/branches/{id}:
+    patch:
+      tags: [Branches]
+      operationId: updateBranch
+      summary: Actualiza una sucursal
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateBranchRequest'
+      responses:
+        '200':
+          description: Sucursal actualizada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BranchResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/members:
     get:
       tags: [Members]
       operationId: listMembers
-      security: [{ oidc: [] }]
+      summary: Lista miembros
+      description: Cache privada por tenant; cabeceras `x-cache` y `cache-control`.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Miembros del tenant.
+          headers:
+            x-cache:
+              schema: { type: string, enum: [HIT, MISS] }
+            cache-control:
+              schema: { type: string }
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MembershipListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/members/invitations:
+    post:
+      tags: [Members]
+      operationId: createInvitation
+      summary: Invita a un miembro
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInvitationRequest'
+      responses:
+        '201':
+          description: Invitación creada. El token solo se devuelve con dev-login habilitado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvitationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/members/invitations/{token}/accept:
+    post:
+      tags: [Members]
+      operationId: acceptInvitation
+      summary: Acepta una invitación
+      description: Requiere sesión y host de tenant; el email de la sesión debe coincidir con la invitación.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
       parameters:
-        - $ref: '#/components/parameters/OrganizationId'
+        - name: token
+          in: path
+          required: true
+          schema: { type: string, minLength: 20 }
+      responses:
+        '200':
+          description: Membership aceptada (o null si ya no está activa).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvitationAcceptResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /v1/members/{membershipId}:
+    patch:
+      tags: [Members]
+      operationId: updateMemberRole
+      summary: Cambia el rol de un miembro
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/MembershipId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRoleRequest'
+      responses:
+        '200':
+          description: Rol actualizado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MembershipResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    delete:
+      tags: [Members]
+      operationId: removeMember
+      summary: Elimina un miembro
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/MembershipId'
+      responses:
+        '200':
+          description: Membership eliminada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MembershipResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/inventory/reserve:
+    post:
+      tags: [Inventory]
+      operationId: reserveInventory
+      summary: Reserva stock
+      description: Invalida la caché de `GET /v1/inventory`. Rate limit de endpoint 30/min por tenant.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReserveInventoryRequest'
+      responses:
+        '201':
+          description: Reserva creada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReservationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/inventory/reservations:
+    get:
+      tags: [Inventory]
+      operationId: listInventoryReservations
+      summary: Lista reservas del tenant
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
+      responses:
+        '200':
+          description: Reservas del tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReservationListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/inventory:
+    get:
+      tags: [Inventory]
+      operationId: listInventory
+      summary: Lista stock por sucursal
+      description: Cache privada 30s por tenant+sucursal+query; `x-cache` HIT|MISS.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - name: branchId
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 100 }
+        - name: q
+          in: query
+          required: false
+          schema: { type: string, maxLength: 100 }
         - $ref: '#/components/parameters/Cursor'
         - $ref: '#/components/parameters/Limit'
       responses:
         '200':
-          description: Members in the authorized organization.
+          description: Stock paginado.
+          headers:
+            x-cache:
+              schema: { type: string, enum: [HIT, MISS] }
+            cache-control:
+              schema: { type: string }
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/MembershipPage'
+                $ref: '#/components/schemas/InventoryPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+        '429':
+          $ref: '#/components/responses/RateLimited'
   /v1/orders:
     get:
       tags: [Orders]
       operationId: listOrders
-      security: [{ oidc: [] }]
-      parameters:
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
+      summary: Lista órdenes
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
       responses:
         '200':
-          description: Orders for the tenant resolved from the request context. Rate limited per tenant 1000/min + per IP 100/min. Headers x-ratelimit-*.
+          description: Órdenes del tenant (máximo 25).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/OrderPage'
+                $ref: '#/components/schemas/OrderListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
         '429':
           $ref: '#/components/responses/RateLimited'
     post:
       tags: [Orders]
       operationId: createOrder
-      security: [{ oidc: [] }]
+      summary: Crea una orden y su payment attempt
+      description: |
+        `Idempotency-Key` es obligatorio (16..255 caracteres URL-safe). Repetir la
+        misma clave con el mismo cuerpo devuelve el resultado original y la
+        cabecera `idempotent-replayed: true`; con un cuerpo distinto responde 409.
+        El campo legado `body.idempotencyKey` se acepta solo como fallback.
+        Rate limit de endpoint 20/min por tenant.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -134,89 +784,142 @@ paths:
               $ref: '#/components/schemas/CreateOrderRequest'
       responses:
         '201':
-          description: Order accepted. Rate limited 20/min per tenant.
+          description: Orden y payment attempt creados (o replay idempotente).
+          headers:
+            idempotent-replayed:
+              schema: { type: string, enum: ['true'] }
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Order'
+                $ref: '#/components/schemas/CreateOrderResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
-  /v1/orders/{orderId}:
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/orders/{id}:
     get:
       tags: [Orders]
       operationId: getOrder
-      security: [{ oidc: [] }]
+      summary: Obtiene una orden
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
       parameters:
-        - name: orderId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Id'
       responses:
         '200':
-          description: Order tenant-scoped.
+          description: Orden del tenant.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Order'
+                $ref: '#/components/schemas/OrderResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
-  /v1/payments/{paymentId}:
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/payments/{id}:
     get:
-      tags: [Orders]
+      tags: [Payments]
       operationId: getPaymentAttempt
-      security: [{ oidc: [] }]
+      summary: Obtiene un payment attempt
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
       parameters:
-        - name: paymentId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Id'
       responses:
         '200':
-          description: Payment attempt tenant-scoped.
+          description: Payment attempt del tenant.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PaymentAttempt'
+                $ref: '#/components/schemas/PaymentAttemptResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
-  /v1/orders/{orderId}/payments:
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+  /v1/orders/{id}/payments:
     get:
-      tags: [Orders]
-      operationId: listPaymentsForOrder
-      security: [{ oidc: [] }]
+      tags: [Payments]
+      operationId: listOrderPayments
+      summary: Lista pagos de una orden
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
       parameters:
-        - name: orderId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Id'
       responses:
         '200':
-          description: Payment attempts for order, tenant-scoped.
+          description: Payment attempts de la orden.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PaymentPage'
+                $ref: '#/components/schemas/PaymentAttemptListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
   /v1/webhooks/payments:
     post:
       tags: [Webhooks]
-      operationId: inboundPaymentWebhook
-      security: [{ webhookHmac: [] }]
+      operationId: receivePaymentWebhook
+      summary: Webhook firmado de pagos
+      description: |
+        Verifica HMAC `v1,<hex>` de `${timestamp}.${rawBody}` con tolerancia de 5
+        minutos y deduplica por `eventId` y tenant. Para Stripe acepta
+        `Stripe-Signature` y normaliza el evento. `X-Tenant-Id` o `?tenantId=` solo
+        seleccionan el key ring; el tenant firmado del body debe coincidir.
+        Devuelve 202 `unresolved` cuando el evento no puede aplicarse todavía,
+        404 reintentable si aún no existe el payment attempt, y 409 si el importe
+        o la moneda no coinciden con la orden.
+      security:
+        - webhookHmac: []
       parameters:
-        - name: X-Webhook-Timestamp
-          in: header
-          required: true
-          schema: { type: string }
-        - name: X-Webhook-Signature
-          in: header
-          required: true
-          schema: { type: string }
-        - name: X-Tenant-Id
+        - $ref: '#/components/parameters/WebhookTimestamp'
+        - $ref: '#/components/parameters/WebhookSignature'
+        - name: Stripe-Signature
           in: header
           required: false
+          description: Firma Stripe cuando `PAYMENT_PROVIDER=stripe`.
+          schema: { type: string }
+        - $ref: '#/components/parameters/WebhookTenantSelector'
+        - name: tenantId
+          in: query
+          required: false
+          description: Selector de tenant alternativo a `X-Tenant-Id`.
           schema: { type: string, format: uuid }
       requestBody:
         required: true
@@ -226,471 +929,50 @@ paths:
               $ref: '#/components/schemas/PaymentWebhookRequest'
       responses:
         '200':
-          description: Webhook processed or already_processed (dedupe).
+          description: Evento procesado, duplicado o ignorado.
+          headers:
+            retry-after:
+              schema: { type: integer }
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/PaymentWebhookResponse'
+        '202':
+          description: Evento aceptado pero no resuelto; el reconciliador lo reintentará.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentWebhookResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
-  /v1/inventory/reservations:
-    post:
-      tags: [Inventory]
-      operationId: reserveInventory
-      security: [{ oidc: [] }]
-      parameters:
-        - $ref: '#/components/parameters/IdempotencyKey'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/ReserveInventoryRequest'
-      responses:
-        '201':
-          description: Inventory reservation created. Invalidates cache for GET /v1/inventory. Rate limited 30/min per tenant.
-        '409':
-          description: Insufficient stock or concurrent conflict.
+        '404':
+          description: No existe payment attempt para el providerRef; reintentar.
+          headers:
+            retry-after:
+              schema: { type: integer }
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ApiError'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-  /v1/inventory:
-    get:
-      tags: [Inventory]
-      operationId: listInventory
-      security: [{ oidc: [] }]
-      parameters:
-        - name: branchId
-          in: query
-          required: true
-          schema: { type: string }
-        - name: q
-          in: query
-          required: false
-          schema: { type: string }
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
-      responses:
-        '200':
-          description: Inventory by branch, tenant-scoped. Cached 30s per tenant+branch+query (x-cache HIT|MISS, private, stampede lock). Invalidated by POST reserve.
-          headers:
-            x-cache:
-              schema: { type: string, enum: [HIT, MISS] }
-            cache-control:
-              schema: { type: string }
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  items:
-                    type: array
-                    items:
-                      type: object
-                  nextCursor: { type: string, nullable: true }
-        '429':
-          $ref: '#/components/responses/RateLimited'
-  /v1/branches:
-    get:
-      tags: [Inventory]
-      operationId: listBranches
-      security: [{ oidc: [] }]
-      responses:
-        '200':
-          description: Branches for tenant, tenant-scoped. Cached 60s per tenant (x-cache HIT|MISS). Dual-read supports description (nullable expand, COALESCE fallback for vN).
-          headers:
-            x-cache:
-              schema: { type: string, enum: [HIT, MISS] }
-            cache-control:
-              schema: { type: string }
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    type: array
-                    items: { type: object }
-        '429':
-          $ref: '#/components/responses/RateLimited'
-    post:
-      tags: [Inventory]
-      operationId: createBranch
-      security: [{ oidc: [] }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required: [slug, name]
-              properties:
-                slug: { type: string, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$', maxLength: 63 }
-                name: { type: string, minLength: 1, maxLength: 120 }
-                description: { type: string, maxLength: 500 }
-      responses:
-        '201':
-          description: Branch created, expand-contract nullable description (vN without description still 201, vN+1 with description).
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  branch:
-                    type: object
-                    properties:
-                      id: { type: string }
-                      slug: { type: string }
-                      name: { type: string }
-                      description: { type: string }
-                      status: { type: string }
         '409':
           $ref: '#/components/responses/Conflict'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-  /v1/branches/{branchId}:
-    patch:
-      tags: [Inventory]
-      operationId: updateBranch
-      security: [{ oidc: [] }]
-      parameters:
-        - name: branchId
-          in: path
-          required: true
-          schema: { type: string }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                name: { type: string, minLength: 1, maxLength: 120 }
-                description: { type: string, maxLength: 500 }
-      responses:
-        '200':
-          description: Branch updated (description dual-read).
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  branch: { type: object }
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-  /v1/members:
-    get:
-      tags: [Members]
-      operationId: listMembersCached
-      security: [{ oidc: [] }]
-      responses:
-        '200':
-          description: Members for tenant, cached 30s per tenant (x-cache HIT|MISS).
-          headers:
-            x-cache:
-              schema: { type: string, enum: [HIT, MISS] }
-            cache-control:
-              schema: { type: string }
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/MembershipPage'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-  /v1/files/presigned-upload:
-    post:
-      tags: [Files]
-      operationId: createPresignedUpload
-      security: [{ oidc: [] }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/PresignRequest'
-      responses:
-        '201':
-          description: Presigned upload URL. Key is tenants/{tenantId}/{uuid}, TTL 300s. Rate limited 20/min per tenant. S3 via circuit breaker (503 if open, 2s timeout).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PresignedUploadResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '429':
-          $ref: '#/components/responses/RateLimited'
         '503':
-          description: Storage temporarily unavailable (circuit open).
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
-  /v1/files/presign:
-    post:
-      tags: [Files]
-      operationId: createUploadUrlLegacy
-      deprecated: true
-      security: [{ oidc: [] }]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/PresignRequest'
-      responses:
-        '201':
-          description: Presigned upload URL (legacy alias).
-  /v1/files:
-    get:
-      tags: [Files]
-      operationId: listFiles
-      security: [{ oidc: [] }]
-      parameters:
-        - $ref: '#/components/parameters/Cursor'
-        - $ref: '#/components/parameters/Limit'
-      responses:
-        '200':
-          description: Files for the tenant.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/FilePage'
-  /v1/files/{fileId}:
-    get:
-      tags: [Files]
-      operationId: getFile
-      security: [{ oidc: [] }]
-      parameters:
-        - name: fileId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-      responses:
-        '200':
-          description: File metadata.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/FileResponse'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '410':
-          description: Upload expired.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
-    post:
-      tags: [Files]
-      operationId: finalizeFile
-      security: [{ oidc: [] }]
-      parameters:
-        - name: fileId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/FinalizeFileRequest'
-      responses:
-        '200':
-          description: File ready.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/FileResponse'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '410':
-          description: Upload expired.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
-  /v1/files/{fileId}/finalize:
-    post:
-      tags: [Files]
-      operationId: finalizeFileById
-      security: [{ oidc: [] }]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-      requestBody:
-        required: false
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/FinalizeFileRequest'
-      responses:
-        '200':
-          description: File ready.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/FileResponse'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '410':
-          description: Upload expired.
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ApiError' }
-  /v1/files/{fileId}/download:
-    get:
-      tags: [Files]
-      operationId: getPresignedDownload
-      security: [{ oidc: [] }]
-      parameters:
-        - name: fileId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-      responses:
-        '200':
-          description: Presigned download URL, TTL 60s.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PresignedDownloadResponse'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-  /v1/files/{fileId}/presigned-download:
-    get:
-      tags: [Files]
-      operationId: getPresignedDownloadAlias
-      security: [{ oidc: [] }]
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-      responses:
-        '200':
-          description: Presigned download URL alias, TTL 60s.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PresignedDownloadResponse'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-  /metrics:
-    get:
-      tags: [Health]
-      operationId: getMetrics
-      responses:
-        '200':
-          description: Prometheus metrics (outbox_lag_seconds, dlq_size, payment_unknown, payment_pending).
-          content:
-            text/plain:
-              schema: { type: string }
-  /v1/dlq:
-    get:
-      tags: [Health]
-      operationId: listDlq
-      security: [{ oidc: [] }]
-      parameters:
-        - $ref: '#/components/parameters/Limit'
-      responses:
-        '200':
-          description: DLQ tenant-scoped.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/DlqPage'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-  /v1/dlq/{dlqId}/replay:
-    post:
-      tags: [Health]
-      operationId: replayDlq
-      security: [{ oidc: [] }]
-      parameters:
-        - name: dlqId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-      responses:
-        '200':
-          description: DLQ replayed.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/DlqReplayResponse'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-  /v1/admin/dlq:
-    get:
-      tags: [Health]
-      operationId: listAdminDlq
-      security: [{ oidc: [] }]
-      parameters:
-        - $ref: '#/components/parameters/Limit'
-      responses:
-        '200':
-          description: DLQ admin tenant-scoped (owner/admin).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/DlqPage'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-  /v1/admin/dlq/{dlqId}/replay:
-    post:
-      tags: [Health]
-      operationId: replayAdminDlq
-      security: [{ oidc: [] }]
-      parameters:
-        - name: dlqId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-      responses:
-        '200':
-          description: DLQ replayed (admin).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/DlqReplayResponse'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-  /v1/webhooks/{webhookId}/replay:
-    post:
-      tags: [Webhooks]
-      operationId: replayWebhook
-      security: [{ oidc: [] }]
-      parameters:
-        - name: webhookId
-          in: path
-          required: true
-          schema: { type: string }
-      responses:
-        '202':
-          description: Replay job accepted.
-        '403':
-          $ref: '#/components/responses/Forbidden'
+          $ref: '#/components/responses/ServiceUnavailable'
   /v1/webhooks/endpoints:
     get:
       tags: [Webhooks]
       operationId: listWebhookEndpoints
-      security: [{ oidc: [] }]
+      summary: Lista endpoints de webhook
+      description: Cache privada 60s por tenant.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
       responses:
         '200':
-          description: Endpoints tenant-scoped. Cached 60s per tenant (x-cache HIT|MISS, private).
+          description: Endpoints del tenant sin secretos.
           headers:
             x-cache:
               schema: { type: string, enum: [HIT, MISS] }
@@ -699,15 +981,26 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/WebhookEndpointPage'
+                $ref: '#/components/schemas/WebhookEndpointListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
         '429':
           $ref: '#/components/responses/RateLimited'
     post:
       tags: [Webhooks]
       operationId: createWebhookEndpoint
-      security: [{ oidc: [] }]
+      summary: Crea un endpoint de webhook
+      description: El secreto se devuelve una sola vez. Rate limit 20/min por tenant.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
       requestBody:
         required: true
         content:
@@ -716,43 +1009,61 @@ paths:
               $ref: '#/components/schemas/CreateWebhookEndpointRequest'
       responses:
         '201':
-          description: Endpoint created, secret returned once. Rate limited 20/min per tenant. Invalidates cache.
+          description: Endpoint creado.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/WebhookEndpointResponse'
+                $ref: '#/components/schemas/WebhookEndpointSecretResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
-  /v1/webhooks/endpoints/{endpointId}:
+  /v1/webhooks/endpoints/{id}:
     get:
       tags: [Webhooks]
       operationId: getWebhookEndpoint
-      security: [{ oidc: [] }]
+      summary: Obtiene un endpoint
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
       parameters:
-        - name: endpointId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Id'
       responses:
         '200':
-          description: Endpoint tenant-scoped.
+          description: Endpoint del tenant.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/WebhookEndpointResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
     patch:
       tags: [Webhooks]
       operationId: updateWebhookEndpoint
-      security: [{ oidc: [] }]
+      summary: Actualiza un endpoint
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
       parameters:
-        - name: endpointId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Id'
       requestBody:
         required: true
         content:
@@ -761,104 +1072,190 @@ paths:
               $ref: '#/components/schemas/UpdateWebhookEndpointRequest'
       responses:
         '200':
-          description: Endpoint updated.
+          description: Endpoint actualizado.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/WebhookEndpointResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+        '429':
+          $ref: '#/components/responses/RateLimited'
     delete:
       tags: [Webhooks]
       operationId: deleteWebhookEndpoint
-      security: [{ oidc: [] }]
+      summary: Elimina un endpoint
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
       parameters:
-        - name: endpointId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Id'
       responses:
         '200':
-          description: Endpoint deleted.
+          description: Endpoint eliminado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteStatusResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/webhooks/endpoints/{id}/rotate-secret:
+    post:
+      tags: [Webhooks]
+      operationId: rotateWebhookSecret
+      summary: Rota el secreto de un endpoint
+      description: Requiere owner o admin. La versión del endpoint incrementa.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '201':
+          description: Secreto rotado y devuelto una sola vez.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RotateWebhookSecretResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+        '429':
+          $ref: '#/components/responses/RateLimited'
   /v1/webhooks/deliveries:
     get:
       tags: [Webhooks]
       operationId: listWebhookDeliveries
-      security: [{ oidc: [] }]
+      summary: Lista entregas
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
       parameters:
         - name: endpointId
           in: query
           required: false
-          schema: { type: string, format: uuid }
-        - $ref: '#/components/parameters/Limit'
+          schema: { type: string }
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
       responses:
         '200':
-          description: Deliveries tenant-scoped.
+          description: Entregas del tenant.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/WebhookDeliveryPage'
+                $ref: '#/components/schemas/WebhookDeliveryListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-  /v1/webhooks/deliveries/{deliveryId}:
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/webhooks/deliveries/{id}:
     get:
       tags: [Webhooks]
       operationId: getWebhookDelivery
-      security: [{ oidc: [] }]
+      summary: Obtiene una entrega
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
       parameters:
-        - name: deliveryId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Id'
       responses:
         '200':
-          description: Delivery tenant-scoped.
+          description: Entrega sin payload ni secretos.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/WebhookDelivery'
+                $ref: '#/components/schemas/WebhookDeliveryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
-  /v1/webhooks/deliveries/{deliveryId}/replay:
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+  /v1/webhooks/deliveries/{id}/replay:
     post:
       tags: [Webhooks]
       operationId: replayWebhookDelivery
-      security: [{ oidc: [] }]
+      summary: Reintenta una entrega
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
       parameters:
-        - name: deliveryId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
+        - $ref: '#/components/parameters/Id'
       responses:
         '200':
-          description: Delivery replayed.
+          description: Entrega reencolada.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/WebhookDelivery'
-        '404':
-          $ref: '#/components/responses/NotFound'
+                $ref: '#/components/schemas/ReplayWebhookDeliveryResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
   /v1/webhooks/inbound:
     post:
       tags: [Webhooks]
-      security: [{ webhookHmac: [] }]
+      operationId: receiveInboundWebhook
+      summary: Webhook genérico firmado
+      description: Verifica HMAC y deduplica por tenant+eventId. El tenant firmado del body es obligatorio.
+      security:
+        - webhookHmac: []
       parameters:
-        - name: X-Webhook-Timestamp
-          in: header
-          required: true
-          schema: { type: string }
-        - name: X-Webhook-Signature
-          in: header
-          required: true
-          schema: { type: string }
-        - name: X-Tenant-Id
-          in: header
+        - $ref: '#/components/parameters/WebhookTimestamp'
+        - $ref: '#/components/parameters/WebhookSignature'
+        - $ref: '#/components/parameters/WebhookTenantSelector'
+        - name: tenantId
+          in: query
           required: false
-          schema: { type: string }
+          schema: { type: string, format: uuid }
       requestBody:
         required: true
         content:
@@ -867,31 +1264,57 @@ paths:
               $ref: '#/components/schemas/InboundWebhookRequest'
       responses:
         '200':
-          description: Inbound webhook processed or already_processed.
+          description: Evento procesado o ya procesado.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/InboundWebhookResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
   /v1/api-keys:
     get:
-      tags: [Webhooks]
+      tags: [API Keys]
       operationId: listApiKeys
-      security: [{ oidc: [] }]
+      summary: Lista API keys
+      description: Solo autenticación humana.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
       responses:
         '200':
-          description: Api keys tenant-scoped.
+          description: API keys del tenant sin hash ni valor raw.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ApiKeyPage'
+                $ref: '#/components/schemas/ApiKeyListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
     post:
-      tags: [Webhooks]
+      tags: [API Keys]
       operationId: createApiKey
-      security: [{ oidc: [] }]
+      summary: Crea una API key
+      description: Solo owner/admin con sesión humana; el valor raw se devuelve una vez.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
       requestBody:
         required: true
         content:
@@ -900,46 +1323,108 @@ paths:
               $ref: '#/components/schemas/CreateApiKeyRequest'
       responses:
         '201':
-          description: Api key created, raw returned once.
+          description: API key creada.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ApiKeyResponse'
+                $ref: '#/components/schemas/ApiKeySecretResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-  /v1/api-keys/{apiKeyId}:
-    delete:
-      tags: [Webhooks]
-      operationId: revokeApiKey
-      security: [{ oidc: [] }]
-      parameters:
-        - name: apiKeyId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-      responses:
-        '200':
-          description: Api key revoked.
         '404':
           $ref: '#/components/responses/NotFound'
-  /v1/automations:
-    get:
-      tags: [Webhooks]
-      operationId: listAutomations
-      security: [{ oidc: [] }]
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/api-keys/{id}:
+    delete:
+      tags: [API Keys]
+      operationId: revokeApiKey
+      summary: Revoca una API key
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
       responses:
         '200':
-          description: Automations tenant-scoped.
+          description: API key revocada.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AutomationPage'
+                $ref: '#/components/schemas/RevokeApiKeyResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/api-keys/{id}/rotate:
     post:
-      tags: [Webhooks]
+      tags: [API Keys]
+      operationId: rotateApiKey
+      summary: Rota una API key
+      description: Revoca la anterior y devuelve el nuevo valor raw una vez.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '201':
+          description: API key rotada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiKeySecretResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/automations:
+    get:
+      tags: [Automations]
+      operationId: listAutomations
+      summary: Lista automatizaciones
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
+      responses:
+        '200':
+          description: Automatizaciones del tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AutomationListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+    post:
+      tags: [Automations]
       operationId: createAutomation
-      security: [{ oidc: [] }]
+      summary: Crea una automatización
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
       requestBody:
         required: true
         content:
@@ -948,250 +1433,666 @@ paths:
               $ref: '#/components/schemas/CreateAutomationRequest'
       responses:
         '201':
-          description: Automation created (versioned, no eval).
+          description: Automatización creada.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Automation'
+                $ref: '#/components/schemas/AutomationResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
-  /v1/flags:
-    get:
-      tags: [Organizations]
-      operationId: listFlags
-      security: [{ oidc: [] }]
-      responses:
-        '200':
-          description: Feature flags per tenant (kill switches). Tenant-scoped, RLS FORCE.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  data:
-                    type: array
-                    items: { type: object }
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
-  /v1/flags/{flag}:
-    get:
-      tags: [Organizations]
-      operationId: getFlag
-      security: [{ oidc: [] }]
-      parameters:
-        - name: flag
-          in: path
-          required: true
-          schema: { type: string, pattern: '^[a-z0-9_]{3,64}$' }
-      responses:
-        '200':
-          description: Flag state per tenant.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  flag: { type: string }
-                  enabled: { type: boolean }
-                  payload: { type: object }
-                  updatedAt: { type: string, nullable: true }
-        '400':
-          $ref: '#/components/responses/BadRequest'
-    put:
-      tags: [Organizations]
-      operationId: updateFlag
-      security: [{ oidc: [] }]
-      parameters:
-        - name: flag
-          in: path
-          required: true
-          schema: { type: string, pattern: '^[a-z0-9_]{3,64}$' }
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/files/presigned-upload:
+    post:
+      tags: [Files]
+      operationId: createPresignedUpload
+      summary: Crea una URL de subida
+      description: |
+        Crea el registro pendiente y devuelve una URL prefirmada de 300s. La
+        respuesta no expone la key S3, el tenant ni el owner. Rate limit 20/min.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              type: object
-              required: [enabled]
-              properties:
-                enabled: { type: boolean }
-                payload: { type: object }
+              $ref: '#/components/schemas/PresignFileRequest'
       responses:
-        '200':
-          description: Flag updated (owner/admin only), audit flag.updated.
+        '201':
+          description: Subida prefirmada creada.
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  flag: { type: string }
-                  enabled: { type: boolean }
-                  payload: { type: object }
-                  updatedAt: { type: string }
-        '403':
-          $ref: '#/components/responses/Forbidden'
+                $ref: '#/components/schemas/PresignedUploadResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/files/presign:
+    post:
+      tags: [Files]
+      operationId: createPresignedUploadLegacy
+      summary: Alias legado de presigned-upload
+      deprecated: true
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PresignFileRequest'
+      responses:
+        '201':
+          description: Subida prefirmada creada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PresignedUploadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/files/{id}/finalize:
+    post:
+      tags: [Files]
+      operationId: finalizeFile
+      summary: Confirma una subida
+      description: La verificación usa HEAD contra S3, no el `sizeActual` del cliente.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FinalizeFileRequest'
+      responses:
+        '200':
+          description: Archivo listo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/files/{id}:
+    get:
+      tags: [Files]
+      operationId: getFile
+      summary: Obtiene metadatos de un archivo
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Metadatos del archivo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+  /v1/files:
+    get:
+      tags: [Files]
+      operationId: listFiles
+      summary: Lista archivos
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: Archivos del tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FileListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /v1/files/{id}/download:
+    get:
+      tags: [Files]
+      operationId: getFileDownload
+      summary: URL de descarga prefirmada
+      description: TTL 60s. Solo archivos listos.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: URL de descarga.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PresignedDownloadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/files/{id}/presigned-download:
+    get:
+      tags: [Files]
+      operationId: getFileDownloadLegacy
+      summary: Alias legado de descarga prefirmada
+      deprecated: true
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: URL de descarga.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PresignedDownloadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+  /v1/dlq:
+    get:
+      tags: [DLQ]
+      operationId: listDlq
+      summary: Lista la dead-letter queue
+      description: Requiere owner/admin y permiso `audit:read`.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+      responses:
+        '200':
+          description: Entradas DLQ del tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DlqListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+  /v1/admin/dlq:
+    get:
+      tags: [DLQ]
+      operationId: listAdminDlq
+      summary: Alias admin de la DLQ
+      description: Misma implementación que `GET /v1/dlq`.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+      responses:
+        '200':
+          description: Entradas DLQ del tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DlqListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+  /v1/dlq/{id}/replay:
+    post:
+      tags: [DLQ]
+      operationId: replayDlq
+      summary: Reencola una entrada DLQ
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Job reencolado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DlqReplayResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /v1/admin/dlq/{id}/replay:
+    post:
+      tags: [DLQ]
+      operationId: replayAdminDlq
+      summary: Alias admin de replay DLQ
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Job reencolado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DlqReplayResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /v1/dlq/{id}/discard:
+    post:
+      tags: [DLQ]
+      operationId: discardDlq
+      summary: Descarta una entrada DLQ
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Entrada descartada.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiscardStatusResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /v1/flags:
+    get:
+      tags: [Feature Flags]
+      operationId: listFlags
+      summary: Lista feature flags
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Flags del tenant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FlagListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+  /v1/flags/{flag}:
+    get:
+      tags: [Feature Flags]
+      operationId: getFlag
+      summary: Obtiene un flag
+      description: Un flag ausente se devuelve deshabilitado con payload vacío.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/FlagName'
+      responses:
+        '200':
+          description: Estado del flag.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Flag'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
+    put:
+      tags: [Feature Flags]
+      operationId: updateFlag
+      summary: Actualiza un flag
+      description: Requiere owner/admin y permiso `audit:read`; escribe auditoría `flag.updated`.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/FlagName'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateFlagRequest'
+      responses:
+        '200':
+          description: Flag actualizado.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Flag'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
   /v1/audit:
     get:
-      tags: [Members]
+      tags: [Audit]
       operationId: listAudit
-      security: [{ oidc: [] }]
+      summary: Lista eventos de auditoría
+      description: Append-only, paginado por cursor; incluye traceId, ip y resultado.
+      security:
+        - cookieAuth: []
+        - bearerAuth: []
+        - apiKeyAuth: []
       parameters:
-        - $ref: '#/components/parameters/Limit'
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
         - $ref: '#/components/parameters/Cursor'
         - name: action
           in: query
           required: false
-          schema: { type: string }
+          schema: { type: string, minLength: 1 }
       responses:
         '200':
-          description: Audit log tenant-scoped, append-only, paginated. Requires audit:read. Fields traceId, ip, result included (Fase 11).
-          headers:
-            x-ratelimit-limit: { schema: { type: integer } }
-            x-cache: { schema: { type: string } }
+          description: Eventos de auditoría del tenant.
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  data:
-                    type: array
-                    items:
-                      type: object
-                      properties:
-                        id: { type: string }
-                        action: { type: string }
-                        actorUserId: { type: string }
-                        tenantId: { type: string }
-                        resourceId: { type: string }
-                        requestId: { type: string }
-                        traceId: { type: string }
-                        ip: { type: string }
-                        result: { type: string, enum: [success, failure] }
-                        at: { type: integer }
-                        metadata: { type: object }
-                  nextCursor: { type: string, nullable: true }
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-  /v1/webhooks/endpoints/{endpointId}/rotate-secret:
-    post:
-      tags: [Webhooks]
-      operationId: rotateWebhookSecret
-      security: [{ oidc: [] }]
-      parameters:
-        - name: endpointId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-      responses:
-        '201':
-          description: Webhook secret rotated without downtime, version++ and audit webhook.secret_rotated.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  endpoint: { $ref: '#/components/schemas/WebhookEndpoint' }
-                  secret: { type: string }
+                $ref: '#/components/schemas/AuditListResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/OrganizationSelectionRequired'
         '429':
           $ref: '#/components/responses/RateLimited'
-  /v1/api-keys/{apiKeyId}/rotate:
-    post:
-      tags: [Webhooks]
-      operationId: rotateApiKey
-      security: [{ oidc: [] }]
-      parameters:
-        - name: apiKeyId
-          in: path
-          required: true
-          schema: { type: string, format: uuid }
-      responses:
-        '201':
-          description: API key rotated, old revoked, new prefix/hash, audit api_key.rotated.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ApiKeyResponse'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
 components:
   securitySchemes:
-    oidc:
-      type: openIdConnect
-      openIdConnectUrl: https://issuer.example.com/.well-known/openid-configuration
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: platform_session
+      description: |
+        Cookie de sesión HttpOnly. Las mutaciones desde navegador requieren
+        `X-CSRF-Token` igual a la cookie `platform_csrf` y un `Origin` permitido.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: 'Token de sesión opaco enviado como `Authorization: Bearer <token>`.'
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: API key `pk_...`; las rutas que la aceptan comprueban el scope requerido por la operación.
     webhookHmac:
       type: apiKey
       in: header
       name: X-Webhook-Signature
+      description: |
+        Firma HMAC-SHA256 en formato `v1,<hex>` sobre `${X-Webhook-Timestamp}.${rawBody}`.
+        Tolerancia de 5 minutos. Stripe usa `Stripe-Signature` en su lugar.
   parameters:
-    OrganizationId:
-      name: organizationId
+    Id:
+      name: id
       in: path
       required: true
-      schema: { type: string }
+      schema: { type: string, minLength: 1 }
+    MembershipId:
+      name: membershipId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1 }
+    FlagName:
+      name: flag
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[a-z0-9_]{3,64}$' }
     Cursor:
       name: cursor
       in: query
-      schema: { type: string }
+      required: false
+      schema: { type: string, minLength: 1 }
     Limit:
       name: limit
       in: query
+      required: false
       schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
     IdempotencyKey:
       name: Idempotency-Key
       in: header
       required: true
-      schema: { type: string, minLength: 16, maxLength: 255 }
+      description: Clave opaca de 16..255 caracteres URL-safe para deduplicar la creación.
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 255
+        pattern: '^[A-Za-z0-9._~:/+=@-]+$'
+    WebhookTimestamp:
+      name: X-Webhook-Timestamp
+      in: header
+      required: true
+      description: Segundos (o milisegundos) Unix usados en la firma.
+      schema: { type: string }
+    WebhookSignature:
+      name: X-Webhook-Signature
+      in: header
+      required: true
+      schema: { type: string, pattern: '^v1[,=][a-f0-9]{32,128}$' }
+    WebhookTenantSelector:
+      name: X-Tenant-Id
+      in: header
+      required: false
+      description: Selecciona el key ring; debe coincidir con el tenant firmado del body.
+      schema: { type: string }
   responses:
     Unauthorized:
-      description: Authentication required.
+      description: Falta autenticación, la sesión/API key es inválida o la firma HMAC no verifica.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ApiError' }
     Forbidden:
-      description: Permission denied or resource not visible in this tenant.
-      content:
-        application/json:
-          schema: { $ref: '#/components/schemas/ApiError' }
-    Conflict:
-      description: Request conflicts with current state or idempotency record.
+      description: Autenticado pero sin permiso, rol, scope, CSRF u organización seleccionada.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ApiError' }
     BadRequest:
-      description: Invalid request.
+      description: Body, query o path inválido, o tenant host ausente.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ApiError' }
     NotFound:
-      description: Resource not found or not visible in this tenant.
+      description: Recurso inexistente o no visible para el tenant.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ApiError' }
+    Conflict:
+      description: Conflicto de estado, idempotencia, stock o unicidad.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ApiError' }
+    Gone:
+      description: Recurso expirado (por ejemplo una subida pendiente).
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ApiError' }
     RateLimited:
-      description: Too many requests. Check x-ratelimit-* and retry-after headers.
+      description: Demasiadas peticiones; respeta `retry-after` y `x-ratelimit-*`.
       headers:
         x-ratelimit-limit:
           schema: { type: integer }
-          description: Limit per window (e.g. 100/min IP, 1000/min tenant, 20/min endpoint)
         x-ratelimit-remaining:
           schema: { type: integer }
-          description: Remaining requests in window
         x-ratelimit-reset:
           schema: { type: integer }
-          description: Seconds until window reset
         retry-after:
           schema: { type: integer }
-          description: Seconds to wait before retry
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ApiError' }
+    ServiceUnavailable:
+      description: Dependencia no disponible, kill switch o configuración ausente.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ApiError' }
+    TenantRequired:
+      description: Falta un host de tenant válido.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ApiError' }
+    OrganizationSelectionRequired:
+      description: El usuario pertenece a varias organizaciones y debe seleccionar una.
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ApiError' }
@@ -1207,27 +2108,52 @@ components:
             code: { type: string }
             message: { type: string }
             requestId: { type: string }
-            details: { type: object, additionalProperties: true }
-    HealthResponse:
+            details:
+              type: object
+              additionalProperties: true
+    LivenessResponse:
       type: object
-      required: [status, service]
+      required: [status, service, uptimeMs]
       properties:
         status: { type: string, enum: [ok] }
-        service: { type: string }
+        service: { type: string, enum: [api] }
+        uptimeMs: { type: integer, minimum: 0 }
+    HealthCheck:
+      type: object
+      required: [name, status]
+      properties:
+        name: { type: string }
+        status: { type: string, enum: [ok, fail, skip] }
+        latencyMs: { type: integer, minimum: 0 }
+        error: { type: string }
     ReadinessResponse:
       type: object
-      required: [status, service, dependencies]
+      required: [status, service, dependencies, uptimeMs]
       properties:
         status: { type: string, enum: [ok, degraded] }
-        service: { type: string }
-        dependencies: { type: array, items: { type: string } }
+        service: { type: string, enum: [api] }
+        dependencies:
+          type: array
+          items: { $ref: '#/components/schemas/HealthCheck' }
+        uptimeMs: { type: integer, minimum: 0 }
     MetaResponse:
       type: object
-      required: [apiVersion, service, status]
+      required: [service, status, apiVersion]
       properties:
-        apiVersion: { type: string, example: v1 }
-        service: { type: string }
+        service: { type: string, enum: [api] }
         status: { type: string, enum: [ok] }
+        apiVersion: { type: string, example: v1 }
+    User:
+      type: object
+      required: [id, email, displayName, status]
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        displayName: { type: string }
+        status: { type: string, enum: [active, suspended] }
+    Role:
+      type: string
+      enum: [owner, admin, manager, operator, auditor]
     Organization:
       type: object
       required: [id, slug, name, status]
@@ -1236,257 +2162,480 @@ components:
         slug: { type: string, pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$' }
         name: { type: string, minLength: 1, maxLength: 120 }
         status: { type: string, enum: [active, suspended, archived] }
-    CreateOrganizationRequest:
-      type: object
-      required: [slug, name]
-      properties:
-        slug: { type: string }
-        name: { type: string }
+    OrganizationWithRole:
+      allOf:
+        - $ref: '#/components/schemas/Organization'
+        - type: object
+          required: [role]
+          properties:
+            role: { $ref: '#/components/schemas/Role' }
     Membership:
       type: object
-      required: [id, userId, organizationId, role, status]
+      required: [id, userId, role, status]
       properties:
         id: { type: string }
         userId: { type: string }
-        organizationId: { type: string }
-        role: { type: string, enum: [owner, admin, manager, operator, auditor] }
+        email: { type: string }
+        displayName: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
         status: { type: string, enum: [invited, active, suspended, removed] }
-    MembershipPage:
-      allOf:
-        - $ref: '#/components/schemas/CursorPage'
-      properties:
-        data: { type: array, items: { $ref: '#/components/schemas/Membership' } }
-    CurrentIdentity:
+    DevLoginRequest:
       type: object
-      required: [userId, memberships]
+      required: [userId]
+      additionalProperties: false
       properties:
-        userId: { type: string }
-        memberships: { type: array, items: { $ref: '#/components/schemas/Membership' } }
-    Order:
+        userId: { type: string, minLength: 1 }
+    DevLoginResponse:
       type: object
-      required: [id, status]
+      required: [user, organizations]
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        organizations:
+          type: array
+          items: { $ref: '#/components/schemas/Organization' }
+    MeResponse:
+      type: object
+      required: [user, organizations, selectedOrganizationId]
+      properties:
+        user: { $ref: '#/components/schemas/User' }
+        organizations:
+          type: array
+          items: { $ref: '#/components/schemas/OrganizationWithRole' }
+        selectedOrganizationId:
+          type: [string, 'null']
+    StatusResponse:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [ok] }
+    RevokeSessionsResponse:
+      type: object
+      required: [status, revoked]
+      properties:
+        status: { type: string, enum: [ok] }
+        revoked: { type: integer, minimum: 0 }
+    RefreshSessionResponse:
+      type: object
+      required: [status, expiresAt]
+      properties:
+        status: { type: string, enum: [ok] }
+        expiresAt: { type: integer }
+    SwitchOrganizationRequest:
+      type: object
+      required: [slug]
+      additionalProperties: false
+      properties:
+        slug: { type: string, minLength: 1, maxLength: 63 }
+    OrganizationHostResponse:
+      type: object
+      required: [organization, host]
+      properties:
+        organization: { $ref: '#/components/schemas/Organization' }
+        host: { type: string }
+    CreateOrganizationRequest:
+      type: object
+      required: [name, slug]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        slug:
+          type: string
+          maxLength: 63
+          pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
+    ContextResponse:
+      type: object
+      required: [requestId, user, organization, membership, roles, permissions]
+      properties:
+        requestId: { type: string }
+        user: { $ref: '#/components/schemas/User' }
+        organization: { $ref: '#/components/schemas/Organization' }
+        membership: { $ref: '#/components/schemas/Membership' }
+        roles:
+          type: array
+          items: { $ref: '#/components/schemas/Role' }
+        permissions:
+          type: array
+          items: { type: string }
+    OrganizationResponse:
+      type: object
+      required: [organization]
+      properties:
+        organization: { $ref: '#/components/schemas/Organization' }
+    Branch:
+      type: object
+      required: [id, slug, name, status]
       properties:
         id: { type: string }
-        status:
-          {
-            type: string,
-            enum: [draft, pending_payment, paid, processing, completed, cancelled, failed],
-          }
-        branchId: { type: string, format: uuid }
-        amountCents: { type: integer, minimum: 1 }
-        currency: { type: string, example: USD }
-        tenantId: { type: string, format: uuid }
-        createdAt: { type: integer }
-    OrderPage:
-      allOf:
-        - $ref: '#/components/schemas/CursorPage'
-      properties:
-        data: { type: array, items: { $ref: '#/components/schemas/Order' } }
-    CreateOrderRequest:
-      type: object
-      required: [branchId, amountCents]
-      properties:
-        branchId: { type: string }
-        amountCents: { type: integer, minimum: 1, maximum: 100000000 }
-        currency: { type: string, minLength: 3, maxLength: 10, default: USD }
-        lines:
-          type: array
-          minItems: 1
-          items:
-            type: object
-            required: [sku, quantity]
-            properties:
-              sku: { type: string }
-              quantity: { type: integer, minimum: 1 }
-    PaymentAttempt:
-      type: object
-      required: [id, orderId, providerKey, status, amountCents, currency]
-      properties:
-        id: { type: string, format: uuid }
-        tenantId: { type: string, format: uuid }
-        orderId: { type: string, format: uuid }
-        providerKey: { type: string, pattern: '^[a-f0-9]{32}$' }
-        status: { type: string, enum: [created, pending, paid, failed, unknown] }
-        providerRef: { type: string, nullable: true }
-        amountCents: { type: integer, minimum: 1 }
-        currency: { type: string }
-        attempts: { type: integer, minimum: 0 }
-        createdAt: { type: integer }
-        updatedAt: { type: integer }
-    PaymentPage:
+        slug: { type: string }
+        name: { type: string }
+        description: { type: string }
+        status: { type: string, enum: [active, archived] }
+    BranchListResponse:
       type: object
       required: [data]
       properties:
-        data: { type: array, items: { $ref: '#/components/schemas/PaymentAttempt' } }
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Branch' }
+    BranchResponse:
+      type: object
+      required: [branch]
+      properties:
+        branch: { $ref: '#/components/schemas/Branch' }
+    CreateBranchRequest:
+      type: object
+      required: [slug, name]
+      additionalProperties: false
+      properties:
+        slug:
+          type: string
+          maxLength: 63
+          pattern: '^[a-z0-9]+(?:-[a-z0-9]+)*$'
+        name: { type: string, minLength: 1, maxLength: 120 }
+        description: { type: string, maxLength: 500 }
+    UpdateBranchRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        description: { type: string, maxLength: 500 }
+    MembershipListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Membership' }
+    MembershipResponse:
+      type: object
+      required: [membership]
+      properties:
+        membership: { $ref: '#/components/schemas/Membership' }
+    CreateInvitationRequest:
+      type: object
+      required: [email, role]
+      additionalProperties: false
+      properties:
+        email: { type: string, format: email, maxLength: 320 }
+        role: { $ref: '#/components/schemas/Role' }
+    Invitation:
+      type: object
+      required: [id, email, role, expiresAt]
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        role: { $ref: '#/components/schemas/Role' }
+        expiresAt: { type: integer }
+    InvitationResponse:
+      type: object
+      required: [invitation]
+      properties:
+        invitation: { $ref: '#/components/schemas/Invitation' }
+        token:
+          type: string
+          description: Solo presente cuando `ALLOW_DEV_LOGIN=1`.
+    InvitationAcceptResponse:
+      type: object
+      required: [membership]
+      properties:
+        membership:
+          oneOf:
+            - $ref: '#/components/schemas/Membership'
+            - type: 'null'
+    UpdateRoleRequest:
+      type: object
+      required: [role]
+      additionalProperties: false
+      properties:
+        role: { $ref: '#/components/schemas/Role' }
+    Reservation:
+      type: object
+      required:
+        [id, tenantId, branchId, productId, quantity, status, expiresAt, createdBy, correlationId]
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        branchId: { type: string }
+        productId: { type: string }
+        quantity: { type: integer, minimum: 1 }
+        status: { type: string, enum: [active, released, consumed, expired] }
+        expiresAt: { type: integer }
+        createdBy: { type: string }
+        correlationId: { type: string }
+    ReserveInventoryRequest:
+      type: object
+      required: [branchId, productId, quantity]
+      additionalProperties: false
+      properties:
+        branchId: { type: string, minLength: 1, maxLength: 100 }
+        productId: { type: string, minLength: 1, maxLength: 100 }
+        quantity: { type: integer, minimum: 1, maximum: 1000 }
+    ReservationResponse:
+      type: object
+      required: [reservation]
+      properties:
+        reservation: { $ref: '#/components/schemas/Reservation' }
+    ReservationListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Reservation' }
+    InventoryItem:
+      type: object
+      required: [productId, sku, name, branchId, available]
+      properties:
+        productId: { type: string }
+        sku: { type: string }
+        name: { type: string }
+        branchId: { type: string }
+        available: { type: integer, minimum: 0 }
+    InventoryPage:
+      type: object
+      required: [items, nextCursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/InventoryItem' }
+        nextCursor:
+          type: [string, 'null']
+    Order:
+      type: object
+      required: [id, tenantId, branchId, status, amountCents, currency, createdBy, createdAt]
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        branchId: { type: string }
+        status:
+          type: string
+          enum: [draft, pending_payment, paid, processing, completed, cancelled, failed]
+        amountCents: { type: integer, minimum: 1 }
+        currency: { type: string, minLength: 3, maxLength: 10 }
+        createdBy: { type: string }
+        createdAt: { type: integer }
+    PaymentAttempt:
+      type: object
+      required:
+        [
+          id,
+          tenantId,
+          orderId,
+          providerKey,
+          status,
+          providerRef,
+          amountCents,
+          currency,
+          attempts,
+          lastError,
+          createdAt,
+          updatedAt,
+        ]
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        orderId: { type: string }
+        providerKey: { type: string, pattern: '^[a-f0-9]{32}$' }
+        status: { type: string, enum: [created, pending, paid, failed, unknown] }
+        providerRef: { type: [string, 'null'] }
+        amountCents: { type: integer, minimum: 1 }
+        currency: { type: string }
+        attempts: { type: integer, minimum: 0 }
+        lastError: { type: [string, 'null'] }
+        createdAt: { type: integer }
+        updatedAt: { type: integer }
+    CreateOrderRequest:
+      type: object
+      required: [branchId, amountCents]
+      additionalProperties: false
+      properties:
+        branchId: { type: string, minLength: 1, maxLength: 100 }
+        amountCents: { type: integer, minimum: 1, maximum: 100000000 }
+        currency: { type: string, minLength: 3, maxLength: 10, default: USD }
+        paymentMethodId: { type: string, minLength: 3, maxLength: 128 }
+        idempotencyKey:
+          type: string
+          minLength: 16
+          maxLength: 255
+          description: Fallback legado; se prefiere la cabecera `Idempotency-Key`.
+    CreateOrderResponse:
+      type: object
+      required: [order, paymentAttempt]
+      properties:
+        order: { $ref: '#/components/schemas/Order' }
+        paymentAttempt: { $ref: '#/components/schemas/PaymentAttempt' }
+    OrderResponse:
+      type: object
+      required: [order]
+      properties:
+        order: { $ref: '#/components/schemas/Order' }
+    OrderListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Order' }
+    PaymentAttemptResponse:
+      type: object
+      required: [paymentAttempt]
+      properties:
+        paymentAttempt: { $ref: '#/components/schemas/PaymentAttempt' }
+    PaymentAttemptListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/PaymentAttempt' }
     PaymentWebhookRequest:
       type: object
       required: [eventId, providerRef, status, tenantId]
+      additionalProperties: false
       properties:
         eventId: { type: string, minLength: 8, maxLength: 128 }
         providerRef: { type: string, minLength: 3, maxLength: 128 }
         status: { type: string, enum: [paid, failed, unknown] }
-        providerKey: { type: string }
-        amountCents: { type: integer }
-        tenantId: { type: string, format: uuid }
+        providerKey: { type: string, minLength: 8, maxLength: 128 }
+        amountCents: { type: integer, minimum: 1 }
+        currency: { type: string, minLength: 3, maxLength: 10 }
+        tenantId:
+          type: string
+          description: Tenant firmado; obligatorio tras normalizar Stripe.
     PaymentWebhookResponse:
       type: object
       required: [status, eventId]
       properties:
-        status: { type: string, enum: [processed, already_processed] }
+        status:
+          type: string
+          enum: [processed, already_processed, unresolved, ignored]
         eventId: { type: string }
-    ReserveInventoryRequest:
-      type: object
-      required: [branchId, sku, quantity]
-      properties:
-        branchId: { type: string }
-        sku: { type: string }
-        quantity: { type: integer, minimum: 1 }
-    PresignRequest:
-      type: object
-      required: [filename, contentType, size]
-      properties:
-        filename: { type: string, minLength: 1, maxLength: 255, pattern: '^[^/\\]+$' }
-        contentType: { type: string, minLength: 3, maxLength: 127 }
-        size: { type: integer, minimum: 1, maximum: 52428800 }
-    File:
-      type: object
-      required: [id, filename, contentType, sizeExpected, status]
-      properties:
-        id: { type: string, format: uuid }
-        filename: { type: string }
-        contentType: { type: string }
-        sizeExpected: { type: integer, minimum: 1 }
-        sizeActual: { type: integer, nullable: true }
-        status: { type: string, enum: [pending, ready, expired, deleted] }
-        createdAt: { type: integer }
-        expiresAt: { type: integer }
-    FileResponse:
-      type: object
-      required: [file]
-      properties:
-        file: { $ref: '#/components/schemas/File' }
-    FilePage:
-      allOf:
-        - $ref: '#/components/schemas/CursorPage'
-      properties:
-        data: { type: array, items: { $ref: '#/components/schemas/File' } }
-    PresignedUploadResponse:
-      type: object
-      required: [file, upload]
-      properties:
-        file: { $ref: '#/components/schemas/File' }
-        upload:
-          type: object
-          required: [url, expiresAt]
-          properties:
-            url: { type: string, format: uri }
-            expiresAt: { type: integer }
-            headers: { type: object, additionalProperties: { type: string } }
-            key: { type: string }
-    PresignedDownloadResponse:
-      type: object
-      required: [file, download]
-      properties:
-        file: { $ref: '#/components/schemas/File' }
-        download:
-          type: object
-          required: [url, expiresAt]
-          properties:
-            url: { type: string, format: uri }
-            expiresAt: { type: integer }
-    FinalizeFileRequest:
-      type: object
-      properties:
-        sizeActual: { type: integer, minimum: 1, maximum: 52428800 }
-        checksum: { type: string, maxLength: 128 }
-    DlqEntry:
-      type: object
-      required: [id, jobId, queue, cause, attempts, status]
-      properties:
-        id: { type: string, format: uuid }
-        jobId: { type: string }
-        queue: { type: string }
-        cause: { type: string }
-        attempts: { type: integer }
-        status: { type: string, enum: [pending, replayed, discarded, dead_letter] }
-        createdAt: { type: integer }
-    DlqPage:
-      type: object
-      required: [data]
-      properties:
-        data: { type: array, items: { $ref: '#/components/schemas/DlqEntry' } }
-    DlqReplayResponse:
-      type: object
-      required: [jobId, status]
-      properties:
-        jobId: { type: string }
-        status: { type: string, enum: [replayed] }
-    CursorPage:
-      type: object
-      required: [data, nextCursor, hasMore]
-      properties:
-        data: { type: array, items: {} }
-        nextCursor: { type: string, nullable: true }
-        hasMore: { type: boolean }
+        reason:
+          type: string
+          description: Motivo cuando el estado es `unresolved`.
     WebhookEndpoint:
       type: object
       required: [id, url, events, status, version]
       properties:
-        id: { type: string, format: uuid }
+        id: { type: string }
         url: { type: string, format: uri, pattern: '^https://' }
-        events: { type: array, items: { type: string } }
+        events:
+          type: array
+          items: { type: string }
         status: { type: string, enum: [active, disabled, dead_letter] }
         version: { type: integer, minimum: 1 }
-    CreateWebhookEndpointRequest:
-      type: object
-      required: [url, events]
-      properties:
-        url: { type: string, format: uri, pattern: '^https://' }
-        secret: { type: string, minLength: 8, maxLength: 128 }
-        events: { type: array, items: { type: string }, minItems: 1 }
-    UpdateWebhookEndpointRequest:
-      type: object
-      properties:
-        url: { type: string, format: uri, pattern: '^https://' }
-        events: { type: array, items: { type: string }, minItems: 1 }
-        status: { type: string, enum: [active, disabled, dead_letter] }
     WebhookEndpointResponse:
       type: object
       required: [endpoint]
       properties:
         endpoint: { $ref: '#/components/schemas/WebhookEndpoint' }
+    WebhookEndpointSecretResponse:
+      type: object
+      required: [endpoint, secret]
+      properties:
+        endpoint: { $ref: '#/components/schemas/WebhookEndpoint' }
         secret: { type: string }
-    WebhookEndpointPage:
+    RotateWebhookSecretResponse:
+      type: object
+      required: [endpoint, secret]
+      properties:
+        endpoint:
+          type: object
+          required: [id, version]
+          properties:
+            id: { type: string }
+            version: { type: integer, minimum: 1 }
+        secret: { type: string }
+    WebhookEndpointListResponse:
       type: object
       required: [data]
       properties:
-        data: { type: array, items: { $ref: '#/components/schemas/WebhookEndpoint' } }
-    WebhookDelivery:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/WebhookEndpoint' }
+    CreateWebhookEndpointRequest:
       type: object
-      required: [id, endpointId, eventId, eventType, status, attempts]
+      required: [url, events]
+      additionalProperties: false
       properties:
-        id: { type: string, format: uuid }
-        endpointId: { type: string, format: uuid }
+        url: { type: string, format: uri, pattern: '^https://', maxLength: 2048 }
+        secret: { type: string, minLength: 8, maxLength: 128 }
+        events:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items: { type: string, minLength: 3, maxLength: 80 }
+        status: { type: string, enum: [active, disabled] }
+    UpdateWebhookEndpointRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        url: { type: string, format: uri, pattern: '^https://', maxLength: 2048 }
+        events:
+          type: array
+          minItems: 1
+          maxItems: 20
+          items: { type: string, minLength: 3, maxLength: 80 }
+        status: { type: string, enum: [active, disabled, dead_letter] }
+    WebhookDeliverySummary:
+      type: object
+      required: [id, endpointId, eventId, eventType, status, attempts, nextAttemptAt]
+      properties:
+        id: { type: string }
+        endpointId: { type: string }
         eventId: { type: string }
         eventType: { type: string }
-        payload: { type: object, additionalProperties: true }
         status:
-          { type: string, enum: [pending, retrying, delivered, failed, dead_letter, disabled] }
+          type: string
+          enum: [pending, retrying, delivered, failed, dead_letter, disabled]
         attempts: { type: integer, minimum: 0 }
-        lastError: { type: string, nullable: true }
         nextAttemptAt: { type: integer }
-    WebhookDeliveryPage:
+    WebhookDeliveryDetail:
+      type: object
+      required: [id, endpointId, eventId, eventType, status, attempts, lastError]
+      properties:
+        id: { type: string }
+        endpointId: { type: string }
+        eventId: { type: string }
+        eventType: { type: string }
+        status:
+          type: string
+          enum: [pending, retrying, delivered, failed, dead_letter, disabled]
+        attempts: { type: integer, minimum: 0 }
+        lastError: { type: [string, 'null'] }
+    WebhookDeliveryListResponse:
       type: object
       required: [data]
       properties:
-        data: { type: array, items: { $ref: '#/components/schemas/WebhookDelivery' } }
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/WebhookDeliverySummary' }
+    WebhookDeliveryResponse:
+      type: object
+      required: [delivery]
+      properties:
+        delivery: { $ref: '#/components/schemas/WebhookDeliveryDetail' }
+    ReplayWebhookDeliveryResponse:
+      type: object
+      required: [delivery]
+      properties:
+        delivery:
+          type: object
+          required: [id, eventId, status]
+          properties:
+            id: { type: string }
+            eventId: { type: string }
+            status: { type: string }
     InboundWebhookRequest:
       type: object
       required: [eventId, tenantId]
+      additionalProperties: false
       properties:
         eventId: { type: string, minLength: 8, maxLength: 128 }
-        source: { type: string }
-        payload: { type: object, additionalProperties: true }
+        source: { type: string, minLength: 2, maxLength: 40 }
+        payload:
+          type: object
+          additionalProperties: true
         tenantId: { type: string }
     InboundWebhookResponse:
       type: object
@@ -1498,83 +2647,265 @@ components:
       type: object
       required: [id, prefix, name, scopes]
       properties:
-        id: { type: string, format: uuid }
+        id: { type: string }
         prefix: { type: string }
         name: { type: string }
-        scopes: { type: array, items: { type: string } }
-        expiresAt: { type: integer, nullable: true }
-    CreateApiKeyRequest:
-      type: object
-      required: [name, scopes]
-      properties:
-        name: { type: string, minLength: 1, maxLength: 100 }
-        scopes: { type: array, items: { type: string }, minItems: 1 }
-        expiresInMs: { type: integer, minimum: 60000 }
-    ApiKeyResponse:
+        scopes:
+          type: array
+          items: { type: string }
+        expiresAt: { type: [integer, 'null'] }
+        lastUsedAt: { type: [integer, 'null'] }
+        createdAt: { type: integer }
+    ApiKeySecretResponse:
       type: object
       required: [apiKey, raw]
       properties:
-        apiKey: { $ref: '#/components/schemas/ApiKey' }
+        apiKey:
+          type: object
+          required: [id, prefix, name, scopes]
+          properties:
+            id: { type: string }
+            prefix: { type: string }
+            name: { type: string }
+            scopes:
+              type: array
+              items: { type: string }
         raw: { type: string }
-    ApiKeyPage:
+    ApiKeyListResponse:
       type: object
-      required: [data]
+      required: [data, nextCursor]
       properties:
-        data: { type: array, items: { $ref: '#/components/schemas/ApiKey' } }
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/ApiKey' }
+        nextCursor:
+          type: [string, 'null']
+    CreateApiKeyRequest:
+      type: object
+      required: [name, scopes]
+      additionalProperties: false
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        scopes:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items: { type: string, minLength: 1, maxLength: 40 }
+        expiresInMs:
+          type: integer
+          minimum: 60000
+          maximum: 31536000000
+    RevokeApiKeyResponse:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [revoked] }
+    AutomationTrigger:
+      type: string
+      enum:
+        - order.created
+        - order.paid
+        - order.failed
+        - payment.paid
+        - payment.failed
+        - file.ready
+        - inventory.reserved
+    AutomationAction:
+      type: object
+      required: [type]
+      additionalProperties: false
+      properties:
+        type: { type: string, enum: [webhook, log, noop] }
+        params:
+          type: object
+          additionalProperties: true
     Automation:
       type: object
-      required: [id, trigger, action, version, enabled]
+      required: [id, trigger, action, version]
       properties:
-        id: { type: string, format: uuid }
-        trigger:
-          {
-            type: string,
-            enum:
-              [
-                order.created,
-                order.paid,
-                order.failed,
-                payment.paid,
-                payment.failed,
-                file.ready,
-                inventory.reserved,
-              ],
-          }
-        action: { type: object, additionalProperties: true }
-        version: { type: integer, minimum: 1 }
+        id: { type: string }
+        trigger: { $ref: '#/components/schemas/AutomationTrigger' }
+        action: { $ref: '#/components/schemas/AutomationAction' }
+        version: { type: integer, minimum: 1, maximum: 10 }
         enabled: { type: boolean }
     CreateAutomationRequest:
       type: object
       required: [trigger, action]
+      additionalProperties: false
       properties:
-        trigger:
-          {
-            type: string,
-            enum:
-              [
-                order.created,
-                order.paid,
-                order.failed,
-                payment.paid,
-                payment.failed,
-                file.ready,
-                inventory.reserved,
-              ],
-          }
-        action:
-          {
-            type: object,
-            properties:
-              {
-                type: { type: string, enum: [webhook, log, noop] },
-                params: { type: object, additionalProperties: true },
-              },
-            required: [type],
-          }
-        version: { type: integer, minimum: 1 }
+        trigger: { $ref: '#/components/schemas/AutomationTrigger' }
+        action: { $ref: '#/components/schemas/AutomationAction' }
+        version: { type: integer, minimum: 1, maximum: 10 }
         enabled: { type: boolean }
-    AutomationPage:
+    AutomationResponse:
+      type: object
+      required: [automation]
+      properties:
+        automation: { $ref: '#/components/schemas/Automation' }
+    AutomationListResponse:
       type: object
       required: [data]
       properties:
-        data: { type: array, items: { $ref: '#/components/schemas/Automation' } }
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Automation' }
+    File:
+      type: object
+      required: [id, filename, contentType, sizeExpected, sizeActual, status, createdAt]
+      properties:
+        id: { type: string }
+        filename: { type: string }
+        contentType: { type: string }
+        sizeExpected: { type: integer, minimum: 1 }
+        sizeActual: { type: [integer, 'null'] }
+        status: { type: string, enum: [pending, ready, expired, deleted] }
+        createdAt: { type: integer }
+        updatedAt: { type: integer }
+        expiresAt: { type: integer }
+    PresignFileRequest:
+      type: object
+      required: [filename, contentType, size]
+      additionalProperties: false
+      properties:
+        filename:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Sin `/`, `\\` ni `..`.
+        contentType: { type: string, minLength: 3, maxLength: 127 }
+        size: { type: integer, minimum: 1, maximum: 52428800 }
+    PresignedUploadResponse:
+      type: object
+      required: [file, upload]
+      properties:
+        file: { $ref: '#/components/schemas/File' }
+        upload:
+          type: object
+          required: [url, expiresAt, headers]
+          properties:
+            url: { type: string, format: uri }
+            expiresAt: { type: integer }
+            headers:
+              type: object
+              additionalProperties: { type: string }
+    FinalizeFileRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        sizeActual: { type: integer, minimum: 1, maximum: 52428800 }
+        checksum: { type: string, maxLength: 128 }
+    FileResponse:
+      type: object
+      required: [file]
+      properties:
+        file: { $ref: '#/components/schemas/File' }
+    FileListResponse:
+      type: object
+      required: [data, nextCursor]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/File' }
+        nextCursor:
+          type: [string, 'null']
+    PresignedDownloadResponse:
+      type: object
+      required: [file, download]
+      properties:
+        file: { $ref: '#/components/schemas/File' }
+        download:
+          type: object
+          required: [url, expiresAt]
+          properties:
+            url: { type: string, format: uri }
+            expiresAt: { type: integer }
+    DlqEntry:
+      type: object
+      required: [id, jobId, tenantId, queue, payload, cause, attempts, status, createdAt]
+      properties:
+        id: { type: string }
+        jobId: { type: string }
+        tenantId: { type: string }
+        queue: { type: string }
+        payload:
+          type: object
+          additionalProperties: true
+        cause: { type: string }
+        attempts: { type: integer, minimum: 0 }
+        status: { type: string, enum: [pending, replayed, discarded] }
+        createdAt: { type: integer }
+    DlqListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/DlqEntry' }
+    DlqReplayResponse:
+      type: object
+      required: [jobId, status]
+      properties:
+        jobId: { type: string }
+        status: { type: string, enum: [replayed] }
+    DiscardStatusResponse:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [discarded] }
+    DeleteStatusResponse:
+      type: object
+      required: [status]
+      properties:
+        status: { type: string, enum: [deleted] }
+    Flag:
+      type: object
+      required: [flag, enabled, payload, updatedAt]
+      properties:
+        flag: { type: string, pattern: '^[a-z0-9_]{3,64}$' }
+        enabled: { type: boolean }
+        payload:
+          type: object
+          additionalProperties: true
+        updatedAt: { type: [integer, 'null'] }
+    FlagListResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/Flag' }
+    UpdateFlagRequest:
+      type: object
+      required: [enabled]
+      additionalProperties: false
+      properties:
+        enabled: { type: boolean }
+        payload:
+          type: object
+          additionalProperties: true
+    AuditEntry:
+      type: object
+      required: [id, action, actorUserId, tenantId, result, at]
+      properties:
+        id: { type: string }
+        action: { type: string }
+        actorUserId: { type: string }
+        tenantId: { type: string }
+        resourceId: { type: string }
+        requestId: { type: string }
+        traceId: { type: string }
+        ip: { type: string }
+        result: { type: string, enum: [success, failure] }
+        at: { type: integer }
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+    AuditListResponse:
+      type: object
+      required: [data, nextCursor]
+      properties:
+        data:
+          type: array
+          items: { $ref: '#/components/schemas/AuditEntry' }
+        nextCursor:
+          type: [string, 'null']
