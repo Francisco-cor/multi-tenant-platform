@@ -82,6 +82,8 @@ export type AuditAction =
   | 'payment.paid'
   | 'payment.failed'
   | 'payment.webhook'
+  | 'payment.webhook_rejected'
+  | 'payment.webhook_unresolved'
   | 'webhook.created'
   | 'webhook.updated'
   | 'webhook.deleted'
@@ -612,7 +614,8 @@ export class InMemoryIdentityStore {
     if (options.cursor) {
       try {
         const decoded = Buffer.from(options.cursor, 'base64url').toString('utf8');
-        const idx = filtered.findIndex((r) => r.id === decoded);
+        const cursorId = decoded.includes('|') ? decoded.split('|').pop() : decoded;
+        const idx = cursorId ? filtered.findIndex((r) => r.id === cursorId) : -1;
         if (idx >= 0) start = idx + 1;
       } catch {
         // ignore

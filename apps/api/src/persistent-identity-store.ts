@@ -683,6 +683,10 @@ export class PersistentIdentityStore implements IdentityStore {
     role: Role,
   ): Promise<MembershipRecord> {
     return this.withTenant(context, async (transaction) => {
+      // Serialize owner-affecting changes per tenant. Row locks alone are not
+      // enough: two concurrent demotions of two different owners each see the
+      // other owner and both commit, leaving zero owners.
+      await transaction.execute(sql`select pg_advisory_xact_lock(hashtext(${context.tenantId}))`);
       const currentRows = await transaction.execute<MembershipRow>(sql`
         select id, tenant_id, user_id, role, active
         from memberships
@@ -721,6 +725,7 @@ export class PersistentIdentityStore implements IdentityStore {
     membershipId: string,
   ): Promise<MembershipRecord> {
     return this.withTenant(context, async (transaction) => {
+      await transaction.execute(sql`select pg_advisory_xact_lock(hashtext(${context.tenantId}))`);
       const currentRows = await transaction.execute<MembershipRow>(sql`
         select id, tenant_id, user_id, role, active
         from memberships

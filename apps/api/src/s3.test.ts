@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AwsS3Service, FakeS3Service } from './s3.js';
+import { AwsS3Service, FakeS3Service, MAX_PRESIGN_TTL_SECONDS } from './s3.js';
 
 describe('S3 service', () => {
   it('generates SigV4 upload and download URLs without exposing credentials', async () => {
@@ -25,6 +25,23 @@ describe('S3 service', () => {
 
     const download = await s3.generateDownloadUrl({ key: 'tenant-a/file.txt' });
     expect(new URL(download.url).searchParams.get('X-Amz-Signature')).toMatch(/^[a-f0-9]{64}$/u);
+  });
+
+  it('caps presign expiry at the signature TTL', async () => {
+    const s3 = new FakeS3Service();
+    const upload = await s3.generateUploadUrl({
+      key: 'tenant-a/file.txt',
+      contentType: 'text/plain',
+      sizeExpected: 12,
+      expiresSeconds: 999_999_999,
+    });
+    const delta = upload.expiresAt - Date.now();
+    expect(delta).toBeLessThanOrEqual(MAX_PRESIGN_TTL_SECONDS * 1000);
+    expect(new URL(upload.url).searchParams.get('X-Amz-Expires')).toBe(
+      String(MAX_PRESIGN_TTL_SECONDS),
+    );
+    const download = await s3.generateDownloadUrl({ key: 'tenant-a/file.txt', expiresSeconds: -5 });
+    expect(download.expiresAt - Date.now()).toBeGreaterThan(50_000);
   });
 
   it('keeps the fake adapter available for deterministic local tests', async () => {

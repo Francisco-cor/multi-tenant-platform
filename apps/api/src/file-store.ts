@@ -58,6 +58,8 @@ export interface FileStore {
   createPending(context: StoreTenantContext, input: CreateFileInput): Promise<FileRecord>;
   getById(context: StoreTenantContext, fileId: string): Promise<FileRecord | null>;
   finalize(context: StoreTenantContext, fileId: string, input?: FinalizeInput): Promise<FileRecord>;
+  /** Mark a pending upload expired after its object was deleted. */
+  markExpired(context: StoreTenantContext, fileId: string): Promise<boolean>;
   getDownloadKey(
     context: StoreTenantContext,
     fileId: string,
@@ -163,12 +165,8 @@ export class InMemoryFileStore implements FileStore {
   async getById(context: StoreTenantContext, fileId: string): Promise<FileRecord | null> {
     const rec = this.files.get(this.toKey(context.tenantId, fileId)) ?? null;
     if (!rec) return null;
-    // Simulate expiry check: if pending and expiresAt <= now, mark expired (lazy)
-    if (rec.status === 'pending' && rec.expiresAt <= Date.now()) {
-      rec.status = 'expired';
-      rec.updatedAt = Date.now();
-      this.files.set(this.toKey(context.tenantId, fileId), rec);
-    }
+    // Expiry is applied by the caller after deleting the object, or by the GC
+    // sweep. Never flip status here: it would leak an object that still exists.
     return rec;
   }
 
@@ -183,21 +181,14 @@ export class InMemoryFileStore implements FileStore {
     if (rec.status === 'ready') return rec; // idempotent
     if (rec.status !== 'pending') throw new Error('file_not_pending');
     if (rec.expiresAt <= Date.now()) {
-      rec.status = 'expired';
-      rec.updatedAt = Date.now();
-      this.files.set(this.toKey(context.tenantId, fileId), rec);
+      // Leave pending: the caller deletes the object, then calls markExpired.
       throw new Error('file_expired');
     }
     // Optionally validate size
     if (input.sizeActual !== undefined) {
       if (input.sizeActual <= 0 || input.sizeActual > MAX_FILE_SIZE)
         throw new Error('size_invalid');
-      // Allow small mismatch? For now require exact or close? We'll allow if not exceeding expected + tolerate.
-      // Spec says HEAD verifies content-length; we enforce if provided it must match expected within tolerance.
-      if (input.sizeActual !== rec.sizeExpected) {
-        // Allow? We'll permit but record actual. However if S3 HEAD shows mismatch, we should error.
-        // Here we just record; caller (API) will have already checked via S3 head if available.
-      }
+      if (input.sizeActual !== rec.sizeExpected) throw new Error('size_mismatch');
       rec.sizeActual = input.sizeActual;
     } else {
       rec.sizeActual = rec.sizeExpected;
@@ -207,6 +198,15 @@ export class InMemoryFileStore implements FileStore {
     rec.updatedAt = Date.now();
     this.files.set(this.toKey(context.tenantId, fileId), rec);
     return rec;
+  }
+
+  async markExpired(context: StoreTenantContext, fileId: string): Promise<boolean> {
+    const rec = this.files.get(this.toKey(context.tenantId, fileId));
+    if (!rec || rec.status !== 'pending') return false;
+    rec.status = 'expired';
+    rec.updatedAt = Date.now();
+    this.files.set(this.toKey(context.tenantId, fileId), rec);
+    return true;
   }
 
   async getDownloadKey(
@@ -376,8 +376,9 @@ export class PersistentFileStore implements FileStore {
       `);
       const row = rows[0];
       if (!row) return null;
-      // Lazy expiry: if pending and expired, update to expired in same tx? We'll let GC handle, but return as is.
-      const rec: FileRecord = {
+      // No lazy status write here: an expired pending row may still own an S3
+      // object. The caller deletes the object first and then calls markExpired.
+      return {
         id: row.id,
         tenantId: row.tenant_id,
         ownerId: row.owner_id,
@@ -392,15 +393,6 @@ export class PersistentFileStore implements FileStore {
         updatedAt: new Date(row.updated_at).getTime(),
         expiresAt: new Date(row.expires_at).getTime(),
       };
-      if (rec.status === 'pending' && rec.expiresAt <= Date.now()) {
-        // Optimistically mark expired (best effort)
-        await tx.execute(sql`
-          update files set status = 'expired', updated_at = now()
-          where id = ${fileId}::uuid and tenant_id = ${context.tenantId}::uuid and status = 'pending' and expires_at <= now()
-        `);
-        rec.status = 'expired';
-      }
-      return rec;
     });
   }
 
@@ -454,15 +446,14 @@ export class PersistentFileStore implements FileStore {
       if (row.status !== 'pending') throw new Error('file_not_pending');
       const expiresAt = new Date(row.expires_at).getTime();
       if (expiresAt <= Date.now()) {
-        await tx.execute(sql`
-          update files set status = 'expired', updated_at = now()
-          where id = ${fileId}::uuid and tenant_id = ${context.tenantId}::uuid and status = 'pending'
-        `);
+        // Leave the row pending so the API can delete the object first and
+        // then mark it expired. Marking here would leak the object.
         throw new Error('file_expired');
       }
       const sizeActual = input.sizeActual ?? row.size_expected;
       if (sizeActual !== undefined && (sizeActual <= 0 || sizeActual > MAX_FILE_SIZE))
         throw new Error('size_invalid');
+      if (sizeActual !== row.size_expected) throw new Error('size_mismatch');
 
       const updated = await tx.execute<{
         id: string;
@@ -504,6 +495,18 @@ export class PersistentFileStore implements FileStore {
         updatedAt: new Date(upd.updated_at).getTime(),
         expiresAt: new Date(upd.expires_at).getTime(),
       };
+    });
+  }
+
+  async markExpired(context: StoreTenantContext, fileId: string): Promise<boolean> {
+    return withTenantTransaction(this.db, context, async (tx) => {
+      const rows = await tx.execute<{ id: string }>(sql`
+        update files set status = 'expired', updated_at = now()
+        where id = ${fileId}::uuid and tenant_id = ${context.tenantId}::uuid
+          and status = 'pending'
+        returning id
+      `);
+      return rows.length > 0;
     });
   }
 
