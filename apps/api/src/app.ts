@@ -580,11 +580,10 @@ function organizationView(organization: OrganizationRecord) {
   };
 }
 
-async function membershipView(
+function membershipView(
   membership: MembershipRecord,
-  store: IdentityStore,
-): Promise<Record<string, unknown>> {
-  const user = await store.getUser(membership.userId);
+  user: { email: string; displayName: string } | null,
+): Record<string, unknown> {
   return {
     id: membership.id,
     userId: membership.userId,
@@ -1579,7 +1578,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       requestId: request.id,
       user: userView(context.user),
       organization: organizationView(context.organization),
-      membership: await membershipView(context.membership, store),
+      membership: membershipView(context.membership, context.user),
       roles: context.roles,
       permissions: PERMISSIONS.filter((permission) =>
         rolesHavePermission(context.roles, permission),
@@ -1785,8 +1784,9 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     requirePermission(context, 'members:read');
     const cacheKey = buildCacheKey(context.tenantId, 'members', {});
     const { value, hit } = await cache.getOrLoad(cacheKey, CACHE_TTLS.members, async () => ({
-      data: await Promise.all(
-        (await store.listMembershipsForOrganization(context)).map((m) => membershipView(m, store)),
+      // One tenant-scoped join for the whole page; no per-member getUser.
+      data: (await store.listMembershipsWithUsers(context)).map(({ membership, user }) =>
+        membershipView(membership, user),
       ),
     }));
     reply.header('x-cache', hit ? 'HIT' : 'MISS');
@@ -1895,7 +1895,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           resourceId: invitation.id,
         }),
       );
-      return { membership: membership ? await membershipView(membership, store) : null };
+      return { membership: membership ? membershipView(membership, auth.user) : null };
     },
   );
 
@@ -1938,7 +1938,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           }),
         );
         await invalidateCache(context.tenantId, 'members');
-        return { membership: await membershipView(updated, store) };
+        return { membership: membershipView(updated, await store.getUser(updated.userId)) };
       } catch (error) {
         if (error instanceof Error && error.message === 'last_owner') {
           throw new RequestProblem(409, 'CONFLICT', 'An organization must keep an active owner');
@@ -1974,7 +1974,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       );
       await invalidateCache(context.tenantId, 'members');
       await revokeMemberApiKeys(context, removed.userId);
-      return { membership: await membershipView(removed, store) };
+      return { membership: membershipView(removed, await store.getUser(removed.userId)) };
     } catch (error) {
       if (error instanceof Error && error.message === 'last_owner') {
         throw new RequestProblem(409, 'CONFLICT', 'An organization must keep an active owner');
