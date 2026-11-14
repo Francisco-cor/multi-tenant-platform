@@ -1167,12 +1167,19 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     userId: string,
   ): Promise<void> => {
     try {
-      const keys = await apiKeyStore.list(context);
-      await Promise.all(
-        keys
-          .filter((key) => key.createdBy === userId && !key.revokedAt)
-          .map((key) => revokeApiKeyQuietly(key.id, context.tenantId, context.userId ?? null)),
-      );
+      // Paginate: a member can own more keys than one page and every one must
+      // be revoked when the membership is removed.
+      let cursor: string | undefined;
+      for (let page = 0; page < 50; page += 1) {
+        const { items, nextCursor } = await apiKeyStore.list(context, { limit: 100, cursor });
+        await Promise.all(
+          items
+            .filter((key) => key.createdBy === userId && !key.revokedAt)
+            .map((key) => revokeApiKeyQuietly(key.id, context.tenantId, context.userId ?? null)),
+        );
+        if (!nextCursor) break;
+        cursor = nextCursor;
+      }
     } catch {
       // Persistent removal already revokes keys inside the membership transaction.
     }
@@ -2989,12 +2996,25 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     const context = await requireTenantContext(request);
     requireHumanAuth(context);
     requirePermission(context, 'webhooks:read');
-    const keys = await apiKeyStore.list({
-      tenantId: context.tenantId,
-      requestId: request.id,
-      userId: context.user.id,
-    });
+    const query = parseOrThrow(
+      z
+        .object({
+          limit: z.coerce.number().int().min(1).max(100).default(50),
+          cursor: z.string().min(1).optional(),
+        })
+        .strict(),
+      request.query,
+    );
+    const { items: keys, nextCursor } = await apiKeyStore.list(
+      {
+        tenantId: context.tenantId,
+        requestId: request.id,
+        userId: context.user.id,
+      },
+      { limit: query.limit, cursor: query.cursor },
+    );
     return {
+      nextCursor,
       data: keys.map((k) => ({
         id: k.id,
         prefix: k.prefix,

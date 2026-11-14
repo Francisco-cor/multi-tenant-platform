@@ -24,6 +24,12 @@ export class CircuitBreaker {
   private successes = 0;
   private nextAttempt = 0;
   private halfOpenProbeInFlight = false;
+  /**
+   * Bumped by reset(). A request that was already in flight when the breaker
+   * was reset must not report its outcome into the new generation, otherwise
+   * one stale failure can immediately reopen a manually reset circuit.
+   */
+  private generation = 0;
   private readonly failureThreshold: number;
   private readonly successThreshold: number;
   private readonly timeoutMs: number;
@@ -81,6 +87,7 @@ export class CircuitBreaker {
   }
 
   async execute<T>(fn: () => Promise<T>): Promise<T> {
+    const generation = this.generation;
     const st = this.getState();
     if (st === 'OPEN') {
       metrics.recordCircuitRejected(this.name);
@@ -104,10 +111,10 @@ export class CircuitBreaker {
     }
     try {
       const result = await withTimeout(fn(), this.requestTimeoutMs, `circuit:${this.name}`);
-      this.recordSuccess();
+      if (generation === this.generation) this.recordSuccess();
       return result;
     } catch (err) {
-      this.recordFailure();
+      if (generation === this.generation) this.recordFailure();
       throw err;
     } finally {
       if (st === 'HALF_OPEN') this.halfOpenProbeInFlight = false;
@@ -116,6 +123,7 @@ export class CircuitBreaker {
 
   // For tests: force reset
   reset(): void {
+    this.generation += 1;
     this.state = 'CLOSED';
     this.failures = 0;
     this.successes = 0;

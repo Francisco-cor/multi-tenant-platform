@@ -74,6 +74,6 @@ suite('persistent API keys with PostgreSQL RLS', () => {
 
     await store.revoke(contextA, rotated.record.id);
     await expect(store.verify(rotated.record.prefix, rotated.raw, tenantA)).resolves.toBeNull();
-    await expect(store.list(contextB)).resolves.toEqual([]);
+    await expect(store.list(contextB)).resolves.toEqual({ items: [], nextCursor: null });
   });
 });
