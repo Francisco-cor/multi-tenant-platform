@@ -13,6 +13,7 @@ import { createOrderAction } from '../actions';
 const ERRORS: Record<string, string> = {
   invalid_amount: 'El importe debe ser mayor que cero y menor que un millón.',
   invalid_currency: 'La moneda debe ser un código ISO de tres letras.',
+  invalid_request: 'El formulario caducó. Recarga la página e inténtalo de nuevo.',
   forbidden: 'Tu rol no permite crear pedidos.',
   conflict: 'La operación entra en conflicto con el estado actual.',
   unavailable: 'La API no está disponible en este momento.',
@@ -33,7 +34,7 @@ export default async function OrdersPage({
   const branches = canReadBranches ? await listBranches(token, host).catch(() => []) : [];
   const error = await firstParam(searchParams, 'error');
   const ok = await firstParam(searchParams, 'ok');
-  const idempotencyKey = crypto.randomUUID().replace(/-/gu, '');
+  const idempotencyNonce = crypto.randomUUID().replace(/-/gu, '');
 
   return (
     <div className="stack">
@@ -112,7 +113,7 @@ export default async function OrdersPage({
             </p>
           ) : (
             <form action={createOrderAction} className="form-grid">
-              <input type="hidden" name="idempotencyKey" value={idempotencyKey} />
+              <input type="hidden" name="idempotencyKey" value={idempotencyNonce} />
               <div className="field">
                 <label htmlFor="order-branch">Sucursal</label>
                 <select id="order-branch" name="branchId" required defaultValue={branches[0]?.id}>
@@ -152,8 +153,9 @@ export default async function OrdersPage({
             </form>
           )}
           <p className="muted small section">
-            Cada envío incluye una clave de idempotencia; la API todavía no deduplica reintentos
-            (ver limitaciones en el resumen del proyecto).
+            Cada formulario lleva una clave de idempotencia estable: reintentar el mismo envío
+            devuelve el mismo pedido y no duplica el cobro. Si cambias el importe, la sucursal o la
+            moneda, se crea un pedido nuevo.
           </p>
         </section>
       ) : null}

@@ -87,6 +87,12 @@ jobs:
       - name: Unit tests + coverage (fail on zero executed/passed/all-skipped)
         run: pnpm test:coverage
 
+      # The coverage gate above excludes @platform/web on purpose (it has no
+      # coverage threshold yet). Run its unit tests as a separate, non-weakening
+      # gate so web logic still runs on every PR.
+      - name: Web unit tests
+        run: pnpm --filter @platform/web test
+
   integration:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -311,33 +317,15 @@ jobs:
             -c 'test -e node_modules/.bin/tsx'
 
   e2e:
-    # Real E2E is opt-in (vars.ENABLE_E2E=true) because it starts the full API.
-    if: ${{ vars.ENABLE_E2E == 'true' }}
+    # In-memory API + fake S3 + Next dev server(s) are started by
+    # playwright.config.ts, so no Postgres/Redis services or secrets are needed.
+    # Only same-repository PRs and main run this: fork PRs never execute here
+    # with repository context.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    services:
-      postgres:
-        image: postgres@sha256:f377d590e5474681d4d7838635031a2b50647923b7abfa803ce9b5ff35d5c663
-        env:
-          POSTGRES_DB: platform
-          POSTGRES_USER: platform
-          POSTGRES_PASSWORD: platform
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U platform -d platform"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-      redis:
-        image: redis@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
+    timeout-minutes: 25
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -356,36 +344,23 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --ignore-scripts
 
-      - name: Install Playwright browser
+      - name: Install Playwright Chromium
         run: pnpm exec playwright install --with-deps chromium
 
-      - name: Migrate + seed
-        run: |
-          pnpm --filter @platform/db migrate
-          pnpm --filter @platform/db seed
+      # Playwright starts the real API (in-memory stores, ALLOW_DEV_LOGIN=1,
+      # RATE_LIMIT_ENABLED=0, S3_PROVIDER=fake) and the Next dev server.
+      - name: Run browser E2E suite
+        run: pnpm exec playwright test
         env:
-          DATABASE_URL: postgresql://platform:platform@localhost:5432/platform
-
-      - name: Start API
-        run: |
-          nohup pnpm --filter @platform/api dev > /tmp/api.log 2>&1 &
-          for attempt in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:4000/health/live >/dev/null; then exit 0; fi
-            echo "waiting for API ($attempt/60)"
-            sleep 2
-          done
-          cat /tmp/api.log
-          exit 1
-        env:
-          DATABASE_URL: postgresql://platform:platform@localhost:5432/platform
-          REDIS_URL: redis://localhost:6379
+          CI: 'true'
           TENANT_BASE_DOMAIN: app.localhost
-          S3_PROVIDER: fake
-          ALLOW_DEV_LOGIN: '1'
-          CSRF_STRICT: '0'
 
-      - name: Run root E2E suite
-        run: pnpm test:e2e
-        env:
-          API_URL: http://127.0.0.1:4000
-          TENANT_BASE_DOMAIN: app.localhost
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7

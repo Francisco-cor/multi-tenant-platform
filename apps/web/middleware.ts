@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { tenantAllowlist, tenantBaseDomain, isProduction, sessionCookieName } from './lib/config';
-import { parseTenantHost, normalizeHostWithPort } from './lib/tenant';
+import { parseTenantHost, normalizeHostWithPort, normalizeHostHeader } from './lib/tenant';
 
 const TENANT_HEADER = 'x-tenant-slug';
 const TENANT_HOST_HEADER = 'x-tenant-host';
@@ -9,6 +9,12 @@ const TENANT_ERROR_HEADER = 'x-tenant-error';
 
 /** Paths that must work without a tenant host (container/orchestrator probes). */
 const TENANT_EXEMPT_PATHS = new Set(['/api/health', '/status/404']);
+
+/** Next's internal server-action redirects target the loopback listener. */
+function isLoopbackHost(rawHost: string): boolean {
+  const hostname = normalizeHostHeader(rawHost);
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '0.0.0.0';
+}
 
 function buildCsp(nonce: string): string {
   const scriptSrc = isProduction
@@ -70,10 +76,25 @@ export function middleware(request: NextRequest): NextResponse {
   const forwarded = trustProxy ? request.headers.get('x-forwarded-host') : null;
   const rawHost = forwarded ?? request.headers.get('host');
 
-  const resolved = parseTenantHost(rawHost, tenantBaseDomain, {
+  let resolved = parseTenantHost(rawHost, tenantBaseDomain, {
     allowlist: tenantAllowlist,
     trustProxy,
   });
+
+  // Next renders server-action redirects with an internal RSC fetch to its own
+  // loopback origin (__NEXT_PRIVATE_ORIGIN), while keeping the middleware-set
+  // tenant headers. Recover the tenant only on that loopback origin and only
+  // when both headers agree; a request from a tenant host still resolves from
+  // Host and the app re-checks membership server-side.
+  if (!resolved.ok && rawHost && isLoopbackHost(rawHost)) {
+    const internalHost = request.headers.get(TENANT_HOST_HEADER);
+    const internalSlug = request.headers.get(TENANT_HEADER);
+    const fromHeader = internalHost
+      ? parseTenantHost(internalHost, tenantBaseDomain, { allowlist: tenantAllowlist, trustProxy })
+      : { ok: false as const, reason: 'missing_tenant' as const };
+    if (fromHeader.ok && fromHeader.tenant.slug === internalSlug) resolved = fromHeader;
+  }
+
   if (!resolved.ok) {
     return tenantNotFound(request, resolved.reason, csp);
   }
@@ -101,7 +122,13 @@ export function middleware(request: NextRequest): NextResponse {
   requestHeaders.delete(TENANT_HOST_HEADER);
   requestHeaders.delete(TENANT_BASE_HEADER);
   requestHeaders.set(TENANT_HEADER, resolved.tenant.slug);
-  requestHeaders.set(TENANT_HOST_HEADER, normalizeHostWithPort(rawHost) ?? resolved.tenant.host);
+  // An internal action-redirect fetch arrives on loopback; keep the tenant host
+  // the original browser used so the BFF calls the API with the right tenant.
+  const tenantHost =
+    normalizeHostHeader(rawHost) === resolved.tenant.host
+      ? (normalizeHostWithPort(rawHost) ?? resolved.tenant.host)
+      : resolved.tenant.host;
+  requestHeaders.set(TENANT_HOST_HEADER, tenantHost);
   requestHeaders.set(TENANT_BASE_HEADER, resolved.tenant.baseDomain);
   requestHeaders.set('x-nonce', nonce);
   requestHeaders.set('content-security-policy', csp);
