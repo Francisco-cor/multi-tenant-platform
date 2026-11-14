@@ -20,6 +20,9 @@ export const EVENT_CONTRACTS = {
   'payment.reconciled_paid': { payloadVersions: [1], effect: 'ack' },
   'payment.reconciled_failed': { payloadVersions: [1], effect: 'ack' },
   'payment.reconciled_unknown': { payloadVersions: [1], effect: 'ack' },
+  'payment.paid_after_failure': { payloadVersions: [1], effect: 'ack' },
+  'payment.reconciliation_required': { payloadVersions: [1], effect: 'process' },
+  'order.paid_after_failure': { payloadVersions: [1], effect: 'ack' },
   'webhook.created': { payloadVersions: [1], effect: 'ack' },
   'webhook.secret_rotated': { payloadVersions: [1], effect: 'ack' },
   'webhook.replayed': { payloadVersions: [1], effect: 'process' },
@@ -169,6 +172,30 @@ export const EVENT_PAYLOAD_SCHEMAS: {
       ...ORDER_ID,
       providerKey: z.string().min(1).max(64).optional(),
       status: z.string().min(1).max(40).optional(),
+    }),
+  },
+  'payment.paid_after_failure': {
+    1: loose({
+      ...ATTEMPT_ID,
+      ...ORDER_ID,
+      providerRef: z.string().min(1).max(255).optional(),
+      compensating: z.boolean().optional(),
+    }),
+  },
+  'payment.reconciliation_required': {
+    1: loose({
+      ...ATTEMPT_ID,
+      ...ORDER_ID,
+      providerRef: z.string().min(1).max(255).optional(),
+      reason: z.string().min(1).max(200),
+    }),
+  },
+  'order.paid_after_failure': {
+    1: loose({
+      ...ORDER_ID,
+      ...ATTEMPT_ID,
+      providerRef: z.string().min(1).max(255).optional(),
+      compensating: z.boolean().optional(),
     }),
   },
   'webhook.created': {

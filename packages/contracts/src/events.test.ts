@@ -34,6 +34,13 @@ const MINIMAL_PAYLOADS: Record<string, unknown> = {
   'payment.reconciled_paid': { attemptId: 'attempt-1', orderId: 'order-1' },
   'payment.reconciled_failed': { attemptId: 'attempt-1', orderId: 'order-1' },
   'payment.reconciled_unknown': { attemptId: 'attempt-1', orderId: 'order-1' },
+  'payment.paid_after_failure': { attemptId: 'attempt-1', orderId: 'order-1' },
+  'payment.reconciliation_required': {
+    attemptId: 'attempt-1',
+    orderId: 'order-1',
+    reason: 'invalid_transition',
+  },
+  'order.paid_after_failure': { orderId: 'order-1', attemptId: 'attempt-1' },
   'webhook.created': { endpointId: 'endpoint-1', url: 'https://example.test/hook' },
   'webhook.secret_rotated': { endpointId: 'endpoint-1', version: 2 },
   'webhook.replayed': { deliveryId: 'delivery-1' },

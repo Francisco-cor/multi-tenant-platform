@@ -32,7 +32,8 @@ describe('Fase 13 — unitarias dominio (policies, firmas, idempotencia, transic
 
   it('payment state machine: transiciones válidas e inválidas', () => {
     expect(canTransition('created', 'pending')).toBe(true);
-    expect(canTransition('created', 'paid')).toBe(false);
+    // Provider may have charged before the local pending write landed.
+    expect(canTransition('created', 'paid')).toBe(true);
     expect(canTransition('pending', 'paid')).toBe(true);
     expect(canTransition('pending', 'failed')).toBe(true);
     expect(canTransition('pending', 'unknown')).toBe(true);
@@ -42,6 +43,8 @@ describe('Fase 13 — unitarias dominio (policies, firmas, idempotencia, transic
     expect(canTransition('unknown', 'pending')).toBe(false);
     expect(canTransition('paid', 'failed')).toBe(false);
     expect(canTransition('failed', 'unknown')).toBe(false);
+    // Compensating late payment is allowed so money is never lost.
+    expect(canTransition('failed', 'paid')).toBe(true);
     // unknown no debe auto-reembolsar: solo reconciler resuelve
     expect(shouldReconcile({ status: 'pending', updatedAt: Date.now() - 6 * 60 * 1000 })).toBe(
       true,
