@@ -54,6 +54,8 @@ suite('persistent API keys with PostgreSQL RLS', () => {
       tenantId: tenantA,
       scopes: ['orders:read'],
     });
+    const used = await store.verify(created.record.prefix, created.raw, tenantA);
+    expect(used?.lastUsedAt).toBeGreaterThan(0);
     await expect(store.verify(created.record.prefix, created.raw, tenantB)).resolves.toBeNull();
 
     const rotated = await store.rotate(contextA, created.record.id);

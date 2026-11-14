@@ -11,6 +11,11 @@ export interface UserRecord {
   email: string;
   displayName: string;
   status: UserStatus;
+  /**
+   * Whether the IdP asserted `email_verified`. Persisted users were verified at
+   * login; in-memory seed users are treated as verified fixtures.
+   */
+  emailVerified?: boolean;
 }
 
 export interface OrganizationRecord {
@@ -52,6 +57,7 @@ export interface SessionRecord {
   tokenHash: string;
   userId: string;
   expiresAt: number;
+  absoluteExpiresAt?: number;
   selectedTenantId?: string;
 }
 
@@ -138,7 +144,13 @@ export interface IdentityStore {
   createSession(userId: string): string | PromiseLike<string>;
   getSession(token: string): SessionRecord | PromiseLike<SessionRecord | null> | null;
   revokeSession(token: string): void | PromiseLike<void>;
-  refreshSession(token: string): SessionRecord | PromiseLike<SessionRecord | null> | null;
+  revokeAllSessions(userId: string): number | PromiseLike<number>;
+  refreshSession(
+    token: string,
+  ):
+    | { session: SessionRecord; token: string }
+    | PromiseLike<{ session: SessionRecord; token: string } | null>
+    | null;
   selectTenant(token: string, tenantId: string): void | PromiseLike<void>;
   getOrganizationBySlug(
     slug: string,
@@ -197,6 +209,7 @@ export interface IdentityStore {
 }
 
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const SESSION_ABSOLUTE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const INVITATION_TTL_MS = 48 * 60 * 60 * 1000;
 
 function hashToken(token: string): string {
@@ -295,6 +308,7 @@ export class InMemoryIdentityStore {
     if (existing) {
       existing.email = normalizeEmail(identity.email);
       existing.displayName = identity.displayName ?? existing.displayName;
+      if (identity.emailVerified !== undefined) existing.emailVerified = identity.emailVerified;
       return existing;
     }
     const user: UserRecord = {
@@ -304,6 +318,7 @@ export class InMemoryIdentityStore {
       email: normalizeEmail(identity.email),
       displayName: identity.displayName ?? identity.email,
       status: 'active',
+      emailVerified: identity.emailVerified ?? true,
     };
     this.users.set(user.id, user);
     return user;
@@ -324,6 +339,7 @@ export class InMemoryIdentityStore {
       tokenHash: hashToken(token),
       userId,
       expiresAt: now + SESSION_TTL_MS,
+      absoluteExpiresAt: now + SESSION_ABSOLUTE_TTL_MS,
     };
     this.sessions.set(record.tokenHash, record);
     return token;
@@ -332,7 +348,11 @@ export class InMemoryIdentityStore {
   getSession(token: string, now = Date.now()): SessionRecord | null {
     const tokenHash = hashToken(token);
     const session = this.sessions.get(tokenHash);
-    if (!session || session.expiresAt <= now) {
+    if (
+      !session ||
+      session.expiresAt <= now ||
+      (session.absoluteExpiresAt !== undefined && session.absoluteExpiresAt <= now)
+    ) {
       this.sessions.delete(tokenHash);
       return null;
     }
@@ -343,12 +363,35 @@ export class InMemoryIdentityStore {
     this.sessions.delete(hashToken(token));
   }
 
-  refreshSession(token: string, now = Date.now()): SessionRecord | null {
+  revokeAllSessions(userId: string): number {
+    let revoked = 0;
+    for (const [tokenHash, session] of this.sessions) {
+      if (session.userId === userId) {
+        this.sessions.delete(tokenHash);
+        revoked += 1;
+      }
+    }
+    return revoked;
+  }
+
+  refreshSession(
+    token: string,
+    now = Date.now(),
+  ): { session: SessionRecord; token: string } | null {
     const record = this.getSession(token, now);
     if (!record) return null;
-    // Sliding window: extend 8h from now if session still valid
-    record.expiresAt = now + SESSION_TTL_MS;
-    return record;
+    this.sessions.delete(record.tokenHash);
+    const nextToken = randomBytes(32).toString('base64url');
+    const next: SessionRecord = {
+      ...record,
+      tokenHash: hashToken(nextToken),
+      expiresAt: Math.min(
+        now + SESSION_TTL_MS,
+        record.absoluteExpiresAt ?? now + SESSION_ABSOLUTE_TTL_MS,
+      ),
+    };
+    this.sessions.set(next.tokenHash, next);
+    return { session: next, token: nextToken };
   }
 
   selectTenant(token: string, tenantId: string): void {

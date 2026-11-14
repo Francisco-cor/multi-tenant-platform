@@ -3,6 +3,8 @@ import { sql } from '@platform/db';
 import type { OidcIdentity } from '@platform/auth';
 import {
   createDatabase,
+  withAuthBootstrapTransaction,
+  withAuthTransaction,
   withTenantTransaction,
   type DatabaseExecutor,
   type DatabaseHandle,
@@ -91,7 +93,13 @@ interface AuditRow extends Record<string, unknown> {
 }
 
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const SESSION_ABSOLUTE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const INVITATION_TTL_MS = 48 * 60 * 60 * 1000;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isUuid(value: string | undefined): value is string {
+  return typeof value === 'string' && UUID_PATTERN.test(value);
+}
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
@@ -113,6 +121,9 @@ function mapUser(row: UserRow): UserRecord {
     email: row.email,
     displayName: row.display_name,
     status: row.active ? 'active' : 'suspended',
+    // The identity was verified by the IdP before the user row was created;
+    // suspension is represented separately by `active`.
+    emailVerified: true,
   };
 }
 
@@ -202,11 +213,28 @@ export class PersistentIdentityStore implements IdentityStore {
     return this.database.close();
   }
 
-  private async withApplicationTransaction<T>(
+  private withAuth<T>(
+    userId: string,
+    callback: (transaction: DatabaseExecutor) => Promise<T>,
+  ): Promise<T> {
+    return withAuthTransaction(this.database, { userId, requestId: 'identity.auth' }, callback);
+  }
+
+  private withAuthBootstrap<T>(
+    callback: (transaction: DatabaseExecutor) => Promise<T>,
+  ): Promise<T> {
+    return withAuthBootstrapTransaction(
+      this.database,
+      { requestId: 'identity.bootstrap' },
+      callback,
+    );
+  }
+
+  private withApplicationTransaction<T>(
     callback: (transaction: DatabaseExecutor) => Promise<T>,
   ): Promise<T> {
     const role = this.database.role;
-    if (!role) throw new Error('database_role_required');
+    if (role !== 'platform_app') throw new Error('database_role_required:platform_app');
     return this.database.db.transaction(async (transaction) => {
       await transaction.execute(sql.raw(`set local role "${role}"`));
       return callback(transaction);
@@ -221,7 +249,8 @@ export class PersistentIdentityStore implements IdentityStore {
   }
 
   public async getUser(userId: string): Promise<UserRecord | null> {
-    return this.withApplicationTransaction(async (transaction) => {
+    if (!isUuid(userId)) return null;
+    return this.withAuth(userId, async (transaction) => {
       const rows = await transaction.execute<UserRow>(sql`
         select id, oidc_issuer, oidc_subject, email, display_name, active
         from users
@@ -233,7 +262,7 @@ export class PersistentIdentityStore implements IdentityStore {
   }
 
   public async upsertOidcUser(identity: OidcIdentity): Promise<UserRecord> {
-    return this.withApplicationTransaction(async (transaction) => {
+    return this.withAuthBootstrap(async (transaction) => {
       const rows = await transaction.execute<UserRow>(sql`
         insert into users (oidc_issuer, oidc_subject, email, display_name, active)
         values (${identity.issuer}, ${identity.subject}, ${normalizeEmail(identity.email)}, ${identity.displayName ?? identity.email}, true)
@@ -241,7 +270,6 @@ export class PersistentIdentityStore implements IdentityStore {
         do update set
           email = excluded.email,
           display_name = excluded.display_name,
-          active = true,
           updated_at = now()
         returning id, oidc_issuer, oidc_subject, email, display_name, active
       `);
@@ -253,10 +281,16 @@ export class PersistentIdentityStore implements IdentityStore {
 
   public async createSession(userId: string): Promise<string> {
     const token = randomBytes(32).toString('base64url');
-    await this.withApplicationTransaction(async (transaction) => {
+    const now = Date.now();
+    await this.withAuth(userId, async (transaction) => {
       await transaction.execute(sql`
-        insert into sessions (token_hash, user_id, expires_at)
-        values (${hashToken(token)}, ${userId}, ${new Date(Date.now() + SESSION_TTL_MS).toISOString()})
+        insert into sessions (token_hash, user_id, expires_at, absolute_expires_at)
+        values (
+          ${hashToken(token)},
+          ${userId},
+          ${new Date(now + SESSION_TTL_MS).toISOString()},
+          ${new Date(now + SESSION_ABSOLUTE_TTL_MS).toISOString()}
+        )
       `);
       return undefined;
     });
@@ -264,12 +298,13 @@ export class PersistentIdentityStore implements IdentityStore {
   }
 
   public async getSession(token: string): Promise<SessionRecord | null> {
-    return this.withApplicationTransaction(async (transaction) => {
+    return this.withAuthBootstrap(async (transaction) => {
       const rows = await transaction.execute<SessionRow>(sql`
         select token_hash, user_id, expires_at, selected_tenant_id
         from sessions
         where token_hash = ${hashToken(token)}
           and expires_at > now()
+          and (absolute_expires_at is null or absolute_expires_at > now())
         limit 1
       `);
       return rows[0] ? mapSession(rows[0]) : null;
@@ -277,31 +312,60 @@ export class PersistentIdentityStore implements IdentityStore {
   }
 
   public async revokeSession(token: string): Promise<void> {
-    await this.withApplicationTransaction(async (transaction) => {
-      await transaction.execute(sql`delete from sessions where token_hash = ${hashToken(token)}`);
+    const record = await this.getSession(token);
+    if (!record) return;
+    await this.withAuth(record.userId, async (transaction) => {
+      await transaction.execute(sql`
+        delete from sessions
+        where token_hash = ${hashToken(token)} and user_id = ${record.userId}::uuid
+      `);
       return undefined;
     });
   }
 
-  public async refreshSession(token: string): Promise<SessionRecord | null> {
-    return this.withApplicationTransaction(async (transaction) => {
+  public async revokeAllSessions(userId: string): Promise<number> {
+    return this.withAuth(userId, async (transaction) => {
+      const rows = await transaction.execute<{ token_hash: string }>(sql`
+        delete from sessions where user_id = ${userId}::uuid returning token_hash
+      `);
+      return rows.length;
+    });
+  }
+
+  public async refreshSession(
+    token: string,
+  ): Promise<{ session: SessionRecord; token: string } | null> {
+    const record = await this.getSession(token);
+    if (!record) return null;
+    const nextToken = randomBytes(32).toString('base64url');
+    return this.withAuth(record.userId, async (transaction) => {
       const rows = await transaction.execute<SessionRow>(sql`
         update sessions
-        set expires_at = now() + interval '8 hours'
+        set
+          token_hash = ${hashToken(nextToken)},
+          expires_at = least(now() + interval '8 hours', coalesce(absolute_expires_at, now() + interval '30 days')),
+          rotated_at = now()
         where token_hash = ${hashToken(token)}
+          and user_id = ${record.userId}::uuid
           and expires_at > now()
+          and (absolute_expires_at is null or absolute_expires_at > now())
         returning token_hash, user_id, expires_at, selected_tenant_id
       `);
-      return rows[0] ? mapSession(rows[0]) : null;
+      const row = rows[0];
+      if (!row) return null;
+      return { session: mapSession(row), token: nextToken };
     });
   }
 
   public async selectTenant(token: string, tenantId: string): Promise<void> {
-    await this.withApplicationTransaction(async (transaction) => {
+    const record = await this.getSession(token);
+    if (!record) throw new Error('session_not_found');
+    await this.withAuth(record.userId, async (transaction) => {
       await transaction.execute(sql`
         update sessions
-        set selected_tenant_id = ${tenantId}
+        set selected_tenant_id = ${tenantId}::uuid
         where token_hash = ${hashToken(token)}
+          and user_id = ${record.userId}::uuid
           and expires_at > now()
       `);
       return undefined;
@@ -346,10 +410,11 @@ export class PersistentIdentityStore implements IdentityStore {
   }
 
   public async listMembershipsForUser(userId: string): Promise<MembershipRecord[]> {
-    return this.withApplicationTransaction(async (transaction) => {
+    if (!isUuid(userId)) return [];
+    return this.withAuth(userId, async (transaction) => {
       const rows = await transaction.execute<MembershipRow>(sql`
         select id, tenant_id, user_id, role, active
-        from platform_list_memberships_for_user(${userId}::uuid)
+        from platform_list_my_memberships()
       `);
       return rows.map(mapMembership);
     });
@@ -685,71 +750,88 @@ export class PersistentIdentityStore implements IdentityStore {
       `);
       const removed = rows[0];
       if (!removed) throw new Error('membership_not_found');
+      // A revoked membership must not leave working machine credentials behind.
+      await transaction.execute(sql`
+        update api_keys
+        set revoked_at = now(), updated_at = now()
+        where tenant_id = ${context.tenantId}::uuid
+          and created_by = ${removed.user_id}::uuid
+          and revoked_at is null
+      `);
       return mapMembership(removed);
     });
   }
 
   public async addAudit(record: Omit<AuditRecord, 'id' | 'at'>): Promise<AuditRecord> {
-    const insert = async (transaction: DatabaseExecutor): Promise<AuditRecord> => {
-      // Gracefully handle pre-migration rows without trace_id/ip/result columns: try full insert, fallback to minimal
-      try {
-        const rows = await transaction.execute<AuditRow>(sql`
-          insert into audit_log (tenant_id, actor_user_id, action, resource_id, request_id, trace_id, ip, result, metadata)
+    const metadata: Record<string, string> = { ...(record.metadata ?? {}) };
+    const resourceId = isUuid(record.resourceId) ? record.resourceId : null;
+    if (record.resourceId && !resourceId) metadata.resourceRef = record.resourceId;
+
+    const insert = async (
+      transaction: DatabaseExecutor,
+      table: 'audit_log' | 'platform_audit_log',
+    ): Promise<AuditRecord> => {
+      if (table === 'platform_audit_log') {
+        // platform_auth may INSERT global rows but has no SELECT policy on the
+        // table (platform_auditor reads them), so RETURNING would violate RLS.
+        const id = randomUUID();
+        const at = Date.now();
+        await transaction.execute(sql`
+          insert into platform_audit_log (id, tenant_id, actor_user_id, action, resource_id, request_id, trace_id, ip, result, metadata, created_at)
           values (
-            ${record.tenantId ? sql`${record.tenantId}::uuid` : sql`null`},
+            ${id}::uuid,
+            null,
             ${record.actorUserId}::uuid,
             ${record.action},
-            ${record.resourceId ? sql`${record.resourceId}::uuid` : sql`null`},
+            ${resourceId ? sql`${resourceId}::uuid` : sql`null`},
             ${record.requestId},
             ${record.traceId ?? null},
             ${record.ip ?? null},
             ${record.result ?? null},
-            ${JSON.stringify(record.metadata ?? {})}::jsonb
+            ${JSON.stringify(metadata)}::jsonb,
+            ${new Date(at).toISOString()}::timestamptz
           )
-          returning id, tenant_id, actor_user_id, action, resource_id, request_id, trace_id, ip, result, created_at, metadata
         `);
-        const row = rows[0];
-        if (!row) throw new Error('audit_create_failed');
-        return mapAudit(row);
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        if (
-          msg.includes('trace_id') ||
-          msg.includes('column') ||
-          msg.includes('result') ||
-          msg.includes('ip')
-        ) {
-          const rows = await transaction.execute<AuditRow>(sql`
-            insert into audit_log (tenant_id, actor_user_id, action, resource_id, request_id, metadata)
-            values (
-              ${record.tenantId ? sql`${record.tenantId}::uuid` : sql`null`},
-              ${record.actorUserId}::uuid,
-              ${record.action},
-              ${record.resourceId ? sql`${record.resourceId}::uuid` : sql`null`},
-              ${record.requestId},
-              ${JSON.stringify(record.metadata ?? {})}::jsonb
-            )
-            returning id, tenant_id, actor_user_id, action, resource_id, request_id, created_at, metadata
-          `);
-          const row = rows[0];
-          if (!row) throw new Error('audit_create_failed');
-          return mapAudit({
-            ...row,
-            trace_id: record.traceId ?? null,
-            ip: record.ip ?? null,
-            result: record.result ?? null,
-          } as AuditRow);
-        }
-        throw error;
+        return {
+          id,
+          action: record.action,
+          actorUserId: record.actorUserId,
+          requestId: record.requestId,
+          ...(record.traceId ? { traceId: record.traceId } : {}),
+          ...(record.ip ? { ip: record.ip } : {}),
+          ...(record.result ? { result: record.result } : {}),
+          at,
+          metadata,
+        };
       }
+      const rows = await transaction.execute<AuditRow>(sql`
+        insert into audit_log (tenant_id, actor_user_id, action, resource_id, request_id, trace_id, ip, result, metadata)
+        values (
+          ${record.tenantId ? sql`${record.tenantId}::uuid` : sql`null`},
+          ${record.actorUserId}::uuid,
+          ${record.action},
+          ${resourceId ? sql`${resourceId}::uuid` : sql`null`},
+          ${record.requestId},
+          ${record.traceId ?? null},
+          ${record.ip ?? null},
+          ${record.result ?? null},
+          ${JSON.stringify(metadata)}::jsonb
+        )
+        returning id, tenant_id, actor_user_id, action, resource_id, request_id, trace_id, ip, result, created_at, metadata
+      `);
+      const row = rows[0];
+      if (!row) throw new Error('audit_create_failed');
+      return mapAudit(row);
     };
+
     if (record.tenantId) {
+      // Bind the actor so audit_log's insert policy and actor guard agree.
       return this.withTenant(
         { tenantId: record.tenantId, requestId: record.requestId, userId: record.actorUserId },
-        insert,
+        (transaction) => insert(transaction, 'audit_log'),
       );
     }
-    return this.withApplicationTransaction(insert);
+    return this.withAuthBootstrap((transaction) => insert(transaction, 'platform_audit_log'));
   }
 
   public async listAudit(
@@ -779,40 +861,20 @@ export class PersistentIdentityStore implements IdentityStore {
           // ignore
         }
       }
-      // Try with new columns, fallback without
-      try {
-        const rows = await transaction.execute<AuditRow>(sql`
-          select id, tenant_id, actor_user_id, action, resource_id, request_id, trace_id, ip, result, created_at, metadata
-          from audit_log
-          where tenant_id = ${context.tenantId}::uuid
-            and (${action}::text is null or action = ${action})
-            and (
-              ${cursorCreatedAt}::timestamptz is null
-              or (created_at, id) > (${cursorCreatedAt}::timestamptz, ${cursorId}::uuid)
-            )
-          order by created_at, id
-          limit ${limit}
-        `);
-        return rows.map(mapAudit);
-      } catch {
-        const rows = await transaction.execute<AuditRow>(sql`
-          select id, tenant_id, actor_user_id, action, resource_id, request_id, created_at, metadata
-          from audit_log
-          where tenant_id = ${context.tenantId}::uuid
-            and (${action}::text is null or action = ${action})
-          order by created_at, id
-          limit ${limit}
-        `);
-        // manual cursor for fallback (filter in memory if needed)
-        let filtered: AuditRow[] = [...(rows as unknown as AuditRow[])];
-        if (cursorId) {
-          const idx = filtered.findIndex((r) => r.id === cursorId);
-          if (idx >= 0) filtered = filtered.slice(idx + 1, idx + 1 + limit);
-        }
-        return filtered.map((r) =>
-          mapAudit({ ...r, trace_id: null, ip: null, result: null } as AuditRow),
-        );
-      }
+      const safeCursorId = isUuid(cursorId ?? undefined) ? cursorId : null;
+      const rows = await transaction.execute<AuditRow>(sql`
+        select id, tenant_id, actor_user_id, action, resource_id, request_id, trace_id, ip, result, created_at, metadata
+        from audit_log
+        where tenant_id = ${context.tenantId}::uuid
+          and (${action}::text is null or action = ${action})
+          and (
+            ${cursorCreatedAt}::timestamptz is null
+            or (created_at, id) > (${cursorCreatedAt}::timestamptz, ${safeCursorId}::uuid)
+          )
+        order by created_at, id
+        limit ${limit}
+      `);
+      return rows.map(mapAudit);
     });
   }
 }

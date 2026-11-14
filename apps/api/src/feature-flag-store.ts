@@ -1,5 +1,5 @@
 import { createDatabase, withTenantTransaction, sql } from '@platform/db';
-import type { TenantRepositoryContext } from '@platform/db';
+import type { DatabaseHandle, TenantRepositoryContext } from '@platform/db';
 
 export interface FlagRecord extends Record<string, unknown> {
   tenantId: string;
@@ -66,10 +66,15 @@ export class InMemoryFeatureFlagStore implements FeatureFlagStore {
 }
 
 export class PersistentFeatureFlagStore implements FeatureFlagStore {
-  constructor(
-    private connectionString: string,
-    private role: string = 'platform_app',
-  ) {}
+  private readonly db: DatabaseHandle;
+
+  constructor(connectionStringOrHandle: string | DatabaseHandle, role: string = 'platform_app') {
+    this.db =
+      typeof connectionStringOrHandle === 'string'
+        ? createDatabase(connectionStringOrHandle, { role })
+        : connectionStringOrHandle;
+    if (!this.db.role) throw new Error('database_role_required');
+  }
 
   static fromConnectionString(
     connectionString: string,
@@ -78,65 +83,43 @@ export class PersistentFeatureFlagStore implements FeatureFlagStore {
     return new PersistentFeatureFlagStore(connectionString, role);
   }
 
-  async list(context: TenantRepositoryContext): Promise<FlagRecord[]> {
-    const db = createDatabase(this.connectionString, { role: this.role });
+  private mapRow(row: FlagRecord & { payload_raw?: string }): FlagRecord {
+    let payload: Record<string, unknown> = {};
     try {
-      const rows = await withTenantTransaction(db, context, async (tx) =>
-        tx.execute<FlagRecord>(
-          sql`select tenant_id as "tenantId", flag, enabled, payload::text as payload_raw, updated_at as "updatedAt", created_at as "createdAt" from tenant_feature_flags where tenant_id = ${context.tenantId}::uuid order by flag`,
-        ),
-      );
-      // payload is jsonb -> text, parse
-      return rows.map((r: unknown) => {
-        const rec = r as FlagRecord & { payload_raw?: string };
-        let payload: Record<string, unknown> = {};
-        try {
-          payload = rec.payload_raw ? JSON.parse(rec.payload_raw) : {};
-        } catch (_e) {
-          void _e;
-          payload = {};
-        }
-        return {
-          tenantId: rec.tenantId,
-          flag: rec.flag,
-          enabled: rec.enabled,
-          payload,
-          updatedAt: rec.updatedAt,
-          createdAt: rec.createdAt,
-        };
-      });
-    } finally {
-      await db.close();
+      payload = row.payload_raw ? JSON.parse(row.payload_raw) : {};
+    } catch {
+      payload = {};
     }
+    return {
+      tenantId: row.tenantId,
+      flag: row.flag,
+      enabled: row.enabled,
+      payload,
+      updatedAt: row.updatedAt,
+      createdAt: row.createdAt,
+    };
+  }
+
+  async close(): Promise<void> {
+    await this.db.close();
+  }
+
+  async list(context: TenantRepositoryContext): Promise<FlagRecord[]> {
+    const rows = await withTenantTransaction(this.db, context, async (tx) =>
+      tx.execute<FlagRecord & { payload_raw?: string }>(
+        sql`select tenant_id as "tenantId", flag, enabled, payload::text as payload_raw, updated_at as "updatedAt", created_at as "createdAt" from tenant_feature_flags where tenant_id = ${context.tenantId}::uuid order by flag`,
+      ),
+    );
+    return rows.map((row) => this.mapRow(row));
   }
 
   async get(context: TenantRepositoryContext, flag: string): Promise<FlagRecord | null> {
-    const db = createDatabase(this.connectionString, { role: this.role });
-    try {
-      const rows = await withTenantTransaction(db, context, async (tx) =>
-        tx.execute<FlagRecord>(
-          sql`select tenant_id as "tenantId", flag, enabled, payload::text as payload_raw, updated_at as "updatedAt", created_at as "createdAt" from tenant_feature_flags where tenant_id = ${context.tenantId}::uuid and flag = ${flag} limit 1`,
-        ),
-      );
-      if (rows.length === 0) return null;
-      const rec = rows[0] as unknown as FlagRecord & { payload_raw: string };
-      let payload: Record<string, unknown> = {};
-      try {
-        payload = rec.payload_raw ? JSON.parse(rec.payload_raw) : {};
-      } catch (_e) {
-        void _e;
-      }
-      return {
-        tenantId: rec.tenantId,
-        flag: rec.flag,
-        enabled: rec.enabled,
-        payload,
-        updatedAt: rec.updatedAt,
-        createdAt: rec.createdAt,
-      };
-    } finally {
-      await db.close();
-    }
+    const rows = await withTenantTransaction(this.db, context, async (tx) =>
+      tx.execute<FlagRecord & { payload_raw?: string }>(
+        sql`select tenant_id as "tenantId", flag, enabled, payload::text as payload_raw, updated_at as "updatedAt", created_at as "createdAt" from tenant_feature_flags where tenant_id = ${context.tenantId}::uuid and flag = ${flag} limit 1`,
+      ),
+    );
+    return rows[0] ? this.mapRow(rows[0]) : null;
   }
 
   async set(
@@ -148,35 +131,17 @@ export class PersistentFeatureFlagStore implements FeatureFlagStore {
   ): Promise<FlagRecord> {
     void _updatedBy;
     if (!/^[a-z0-9_]{3,64}$/.test(flag)) throw new Error('flag_name_invalid');
-    const db = createDatabase(this.connectionString, { role: this.role });
-    try {
-      const rows = await withTenantTransaction(db, context, async (tx) => {
-        const res = await tx.execute<FlagRecord>(sql`
-          insert into tenant_feature_flags (tenant_id, flag, enabled, payload, updated_by)
-          values (${context.tenantId}::uuid, ${flag}, ${enabled}, ${JSON.stringify(payload)}::jsonb, ${context.userId ?? null}::uuid)
-          on conflict (tenant_id, flag) do update set enabled = excluded.enabled, payload = excluded.payload, updated_at = now(), updated_by = excluded.updated_by
-          returning tenant_id as "tenantId", flag, enabled, payload::text as payload_raw, updated_at as "updatedAt", created_at as "createdAt"
-        `);
-        return res;
-      });
-      const rec = rows[0] as unknown as FlagRecord & { payload_raw: string };
-      let parsedPayload: Record<string, unknown> = {};
-      try {
-        parsedPayload = rec.payload_raw ? JSON.parse(rec.payload_raw) : payload;
-      } catch (_e) {
-        void _e;
-      }
-      return {
-        tenantId: rec.tenantId,
-        flag: rec.flag,
-        enabled: rec.enabled,
-        payload: parsedPayload,
-        updatedAt: rec.updatedAt,
-        createdAt: rec.createdAt,
-      };
-    } finally {
-      await db.close();
-    }
+    const rows = await withTenantTransaction(this.db, context, async (tx) =>
+      tx.execute<FlagRecord & { payload_raw?: string }>(sql`
+        insert into tenant_feature_flags (tenant_id, flag, enabled, payload, updated_by)
+        values (${context.tenantId}::uuid, ${flag}, ${enabled}, ${JSON.stringify(payload)}::jsonb, ${context.userId ?? null}::uuid)
+        on conflict (tenant_id, flag) do update set enabled = excluded.enabled, payload = excluded.payload, updated_at = now(), updated_by = excluded.updated_by
+        returning tenant_id as "tenantId", flag, enabled, payload::text as payload_raw, updated_at as "updatedAt", created_at as "createdAt"
+      `),
+    );
+    const row = rows[0];
+    if (!row) throw new Error('flag_update_failed');
+    return this.mapRow(row);
   }
 
   async isEnabled(context: TenantRepositoryContext, flag: string): Promise<boolean> {
