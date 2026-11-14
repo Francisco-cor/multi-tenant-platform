@@ -36,7 +36,7 @@ export const ApiErrorSchema = z.object({
     code: ErrorCodeSchema,
     message: z.string(),
     requestId: z.string().min(1),
-    details: z.record(z.unknown()).optional(),
+    details: z.record(z.string(), z.unknown()).optional(),
   }),
 });
 export type ApiError = z.infer<typeof ApiErrorSchema>;

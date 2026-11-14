@@ -11,6 +11,16 @@ allowBuilds:
   ssh2: false
   unrs-resolver: true
 
+minimumReleaseAgeExclude:
+  - postcss@8.5.33
+
 onlyBuiltDependencies:
   - '@swc/core'
   - esbuild
+
+overrides:
+  fast-uri@^3.0.0: ^3.1.9
+  fast-uri@^4.0.0: ^4.1.5
+  postcss: ^8.5.33
+  sharp: ^0.35.5
+  source-map-js: ^1.2.2
