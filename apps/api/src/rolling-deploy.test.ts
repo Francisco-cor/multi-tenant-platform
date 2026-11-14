@@ -134,6 +134,7 @@ describe('Fase 14 — expand-contract rolling deploy + flags', () => {
           host: 'contoso.app.localhost',
           cookie: bobCookie,
           'content-type': 'application/json',
+          'idempotency-key': 'rolling-deploy-order-0001',
         },
         payload: { branchId: 'branch-contoso-main', amountCents: 1000 },
       });

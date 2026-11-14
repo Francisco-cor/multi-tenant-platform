@@ -335,7 +335,11 @@ describe('API integration — cache headers + rate limit + tenant isolation', ()
     const order = await app.inject({
       method: 'POST',
       url: '/v1/orders',
-      headers: { host: 'acme.app.localhost', cookie },
+      headers: {
+        host: 'acme.app.localhost',
+        cookie,
+        'idempotency-key': 'cache-rate-limit-order-01',
+      },
       payload: { branchId: 'branch-acme-main', amountCents: 1000 },
     });
     expect([201, 400].includes(order.statusCode)).toBe(true);

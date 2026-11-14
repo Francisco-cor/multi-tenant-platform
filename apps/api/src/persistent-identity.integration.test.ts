@@ -231,7 +231,11 @@ suite('persistent API tenant isolation', () => {
     const response = await app.inject({
       method: 'POST',
       url: '/v1/orders',
-      headers: { host: `api-a-${tenantA}.app.localhost`, cookie },
+      headers: {
+        host: `api-a-${tenantA}.app.localhost`,
+        cookie,
+        'idempotency-key': 'persistent-identity-order-01',
+      },
       payload: { branchId: 'not-a-uuid', amountCents: 100 },
     });
     expect(response.statusCode).toBe(400);

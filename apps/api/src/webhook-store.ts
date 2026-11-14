@@ -3,6 +3,7 @@ import { encryptWebhookSecret } from '@platform/config';
 import { sql, writeOutboxEvent } from '@platform/db';
 import { createDatabase, withTenantTransaction, type DatabaseHandle } from '@platform/db';
 import type { StoreTenantContext } from './identity-store.js';
+import { validateWebhookUrl } from './webhook-url.js';
 
 export interface WebhookEndpoint {
   id: string;
@@ -59,53 +60,7 @@ export function hashSecret(secret: string): string {
 }
 
 export function validateUrl(url: string): void {
-  if (!url.startsWith('https://')) throw new Error('webhook_url_must_be_https');
-  if (url.length > 2048) throw new Error('webhook_url_too_long');
-  let u: URL;
-  try {
-    u = new URL(url);
-    if (u.protocol !== 'https:') throw new Error('webhook_url_must_be_https');
-  } catch {
-    throw new Error('webhook_url_invalid');
-  }
-  // SSRF: block private/metadata/loopback hosts
-  const host = u.hostname.toLowerCase();
-  const blockedHosts = new Set([
-    'localhost',
-    '127.0.0.1',
-    '::1',
-    '0.0.0.0',
-    '169.254.169.254',
-    'metadata.google.internal',
-  ]);
-  if (blockedHosts.has(host)) throw new Error('webhook_url_private_blocked');
-  // IPv4 private ranges
-  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (ipv4) {
-    const a = Number(ipv4[1]),
-      b = Number(ipv4[2]);
-    if (a === 10) throw new Error('webhook_url_private_blocked');
-    if (a === 192 && b === 168) throw new Error('webhook_url_private_blocked');
-    if (a === 172 && b >= 16 && b <= 31) throw new Error('webhook_url_private_blocked');
-    if (a === 127) throw new Error('webhook_url_private_blocked');
-    if (a === 169 && b === 254) throw new Error('webhook_url_private_blocked');
-    if (a === 0) throw new Error('webhook_url_private_blocked');
-  }
-  // IPv6 private / link-local / loopback
-  if (host.includes(':')) {
-    const lower = host.toLowerCase();
-    if (
-      lower === '::1' ||
-      lower.startsWith('fc') ||
-      lower.startsWith('fd') ||
-      lower.startsWith('fe80:') ||
-      lower.startsWith('::ffff:')
-    ) {
-      throw new Error('webhook_url_private_blocked');
-    }
-  }
-  // No userinfo
-  if (u.username || u.password) throw new Error('webhook_url_invalid');
+  validateWebhookUrl(url);
 }
 
 export function validateEvents(events: string[]): void {
@@ -741,12 +696,33 @@ export class PersistentWebhookStore implements WebhookStore {
         event_type: string;
         payload: string;
         secret_version: number;
+        current_secret_version: number;
+        previous_secret_version: number | null;
+        previous_secret_expires_at: string | null;
       }>(sql`
-        select id, tenant_id, endpoint_id, event_id, event_type, payload::text as payload, secret_version from webhook_deliveries
-        where id=${deliveryId}::uuid and tenant_id=${context.tenantId}::uuid for update
+        select d.id, d.tenant_id, d.endpoint_id, d.event_id, d.event_type,
+               d.payload::text as payload, d.secret_version,
+               e.secret_version as current_secret_version,
+               e.previous_secret_version,
+               e.previous_secret_expires_at
+        from webhook_deliveries d
+        join webhook_endpoints e on e.id = d.endpoint_id and e.tenant_id = d.tenant_id
+        where d.id=${deliveryId}::uuid and d.tenant_id=${context.tenantId}::uuid
+        for update of d
       `);
       const r = rows[0];
       if (!r) throw new Error('delivery_not_found');
+      // Replay with the delivery's version while it is still verifiable;
+      // otherwise sign with the current version. Never pin a retired version
+      // past its overlap window (new deliveries use the current one).
+      const previousUsable =
+        r.previous_secret_version === r.secret_version &&
+        r.previous_secret_expires_at !== null &&
+        new Date(r.previous_secret_expires_at).getTime() > Date.now();
+      const replaySecretVersion =
+        r.secret_version === r.current_secret_version || previousUsable
+          ? r.secret_version
+          : r.current_secret_version;
       // Check permission: only active endpoints can be replayed, but we allow replay even if endpoint disabled (creates new pending)
       const newId = randomUUID();
       const newRows = await tx.execute<{
@@ -764,7 +740,7 @@ export class PersistentWebhookStore implements WebhookStore {
         last_error: string | null;
       }>(sql`
         insert into webhook_deliveries (id, tenant_id, endpoint_id, delivery_key, event_id, event_type, payload, secret_version, status, attempts, next_attempt_at)
-        values (${newId}::uuid, ${r.tenant_id}::uuid, ${r.endpoint_id}::uuid, ${newId}, ${r.event_id}, ${r.event_type}, ${r.payload}::jsonb, ${r.secret_version}, 'pending', 0, now())
+        values (${newId}::uuid, ${r.tenant_id}::uuid, ${r.endpoint_id}::uuid, ${newId}, ${r.event_id}, ${r.event_type}, ${r.payload}::jsonb, ${replaySecretVersion}, 'pending', 0, now())
         returning id, tenant_id, endpoint_id, event_id, event_type, payload::text as payload, status, attempts, next_attempt_at, delivered_at, created_at, last_error
       `);
       const nr = newRows[0];

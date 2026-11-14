@@ -36,6 +36,13 @@ export interface S3Service {
   ensureBucket?(): Promise<void>;
 }
 
+export const MAX_PRESIGN_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+function clampPresignSeconds(seconds: number, fallback: number): number {
+  if (!Number.isFinite(seconds) || seconds <= 0) return fallback;
+  return Math.min(Math.floor(seconds), MAX_PRESIGN_TTL_SECONDS);
+}
+
 function s3Endpoint(): string {
   return process.env.S3_ENDPOINT ?? 'http://localhost:9000';
 }
@@ -183,7 +190,7 @@ export class FakeS3Service implements S3Service {
     sizeExpected: number;
     expiresSeconds?: number;
   }): Promise<PresignedUpload> {
-    const expires = input.expiresSeconds ?? 300;
+    const expires = clampPresignSeconds(input.expiresSeconds ?? 300, 300);
     const url = buildFakePresignedUrl(input.key, expires, { 'content-type': input.contentType });
     return {
       url,
@@ -197,7 +204,7 @@ export class FakeS3Service implements S3Service {
     key: string;
     expiresSeconds?: number;
   }): Promise<PresignedDownload> {
-    const expires = input.expiresSeconds ?? 60;
+    const expires = clampPresignSeconds(input.expiresSeconds ?? 60, 60);
     const url = buildFakePresignedUrl(input.key, expires);
     return { url, expiresAt: nowMs() + expires * 1000, key: input.key };
   }
@@ -253,7 +260,7 @@ export class AwsS3Service implements S3Service {
     sizeExpected: number;
     expiresSeconds?: number;
   }): Promise<PresignedUpload> {
-    const expires = input.expiresSeconds ?? 300;
+    const expires = clampPresignSeconds(input.expiresSeconds ?? 300, 300);
     return {
       url: signedUrl({
         endpoint: this.endpoint,
@@ -276,7 +283,7 @@ export class AwsS3Service implements S3Service {
     key: string;
     expiresSeconds?: number;
   }): Promise<PresignedDownload> {
-    const expires = input.expiresSeconds ?? 60;
+    const expires = clampPresignSeconds(input.expiresSeconds ?? 60, 60);
     return {
       url: signedUrl({
         endpoint: this.endpoint,

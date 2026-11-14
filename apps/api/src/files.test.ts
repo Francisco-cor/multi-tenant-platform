@@ -1,6 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { buildApp } from './app.js';
 import { InMemoryFileStore } from './file-store.js';
+import { FakeS3Service, getDefaultS3Service, setDefaultS3Service } from './s3.js';
+
+function keyFromUploadUrl(url: string): string {
+  const parsed = new URL(url);
+  return decodeURIComponent(parsed.pathname.split('/').slice(2).join('/'));
+}
+
+function putUploadedObject(uploadUrl: string, size: number, contentType: string): void {
+  const s3 = getDefaultS3Service();
+  if (!(s3 instanceof FakeS3Service)) throw new Error('fake_s3_required');
+  s3.putFakeObject(keyFromUploadUrl(uploadUrl), size, contentType);
+}
 
 function sessionCookie(response: { headers: Record<string, unknown> }): string {
   const value = response.headers['set-cookie'];
@@ -36,16 +48,16 @@ describe('files presigned flow — tenant isolation', () => {
     expect(body.file.id).toBeDefined();
     expect(body.file.filename).toBe('report.pdf');
     expect(body.file.status).toBe('pending');
-    expect(body.upload.key).toMatch(/^tenants\/.+\/.+-.+-.+-.+-.+$/);
-    expect(body.upload.key.startsWith('tenants/')).toBe(true);
+    expect(body.upload.key).toBeUndefined();
+    const key = keyFromUploadUrl(body.upload.url as string);
+    expect(key).toMatch(/^tenants\/.+\/.+-.+-.+-.+-.+$/);
+    expect(key.startsWith('tenants/')).toBe(true);
     // TTL 300s => expiresAt within 5min + tolerance
     const delta = body.upload.expiresAt - Date.now();
     expect(delta).toBeGreaterThan(290_000);
     expect(delta).toBeLessThan(310_000);
     // URL contains bucket and encoded key, not logged server side
-    expect(body.upload.url).toContain(
-      body.upload.key.split('/').slice(-1)[0]?.slice(0, 8) ?? 'tenants',
-    );
+    expect(body.upload.url).toContain(key.split('/').slice(-1)[0]?.slice(0, 8) ?? 'tenants');
     await app.close();
   });
 
@@ -127,7 +139,8 @@ describe('files presigned flow — tenant isolation', () => {
     });
     expect(pendingDl.statusCode).toBe(409);
 
-    // Finalize then download succeeds
+    // Finalize then download succeeds. HEAD verifies the real object.
+    putUploadedObject(up.json().upload.url as string, 2048, 'application/pdf');
     const fin = await app.inject({
       method: 'POST',
       url: `/v1/files/${fileId}/finalize`,
@@ -218,6 +231,7 @@ describe('files presigned flow — tenant isolation', () => {
     expect(crossFin.statusCode).toBe(404);
 
     // Acme finalize twice -> both 200 same id
+    putUploadedObject(up.json().upload.url as string, 500, 'application/pdf');
     const fin1 = await app.inject({
       method: 'POST',
       url: `/v1/files/${fileId}/finalize`,
@@ -234,6 +248,114 @@ describe('files presigned flow — tenant isolation', () => {
     expect(fin2.statusCode).toBe(200);
     expect(fin2.json().file.id).toBe(fileId);
     expect(fin2.json().file.status).toBe('ready');
+
+    await app.close();
+  });
+
+  it('finalize verifies HEAD size/content-type and only expires after delete succeeds', async () => {
+    const store = new InMemoryFileStore();
+    const app = buildApp({ allowDevLogin: true, fileStore: store });
+    const cookie = await loginAs(app, 'user-acme-only');
+
+    const up = await app.inject({
+      method: 'POST',
+      url: '/v1/files/presigned-upload',
+      headers: { host: 'acme.app.localhost', cookie },
+      payload: { filename: 'verify.pdf', contentType: 'application/pdf', size: 1000 },
+    });
+    const fileId = up.json().file.id as string;
+    const uploadUrl = up.json().upload.url as string;
+
+    // Object missing -> cannot finalize.
+    const missing = await app.inject({
+      method: 'POST',
+      url: `/v1/files/${fileId}/finalize`,
+      headers: { host: 'acme.app.localhost', cookie },
+      payload: {},
+    });
+    expect(missing.statusCode).toBe(409);
+
+    // Object with a different size than the presign -> reject even if the
+    // caller claims sizeActual matches.
+    putUploadedObject(uploadUrl, 999, 'application/pdf');
+    const wrongSize = await app.inject({
+      method: 'POST',
+      url: `/v1/files/${fileId}/finalize`,
+      headers: { host: 'acme.app.localhost', cookie },
+      payload: { sizeActual: 999 },
+    });
+    expect(wrongSize.statusCode).toBe(400);
+
+    // Wrong content-type -> reject.
+    putUploadedObject(uploadUrl, 1000, 'text/plain');
+    const wrongType = await app.inject({
+      method: 'POST',
+      url: `/v1/files/${fileId}/finalize`,
+      headers: { host: 'acme.app.localhost', cookie },
+      payload: {},
+    });
+    expect(wrongType.statusCode).toBe(400);
+
+    // Correct object finalizes.
+    putUploadedObject(uploadUrl, 1000, 'application/pdf');
+    const ok = await app.inject({
+      method: 'POST',
+      url: `/v1/files/${fileId}/finalize`,
+      headers: { host: 'acme.app.localhost', cookie },
+      payload: {},
+    });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json().file).not.toHaveProperty('tenantId');
+    expect(ok.json().file).not.toHaveProperty('ownerId');
+    expect(ok.json().file).not.toHaveProperty('key');
+
+    // Expiry: a failing delete must not mark the row expired.
+    const exp = await app.inject({
+      method: 'POST',
+      url: '/v1/files/presigned-upload',
+      headers: { host: 'acme.app.localhost', cookie },
+      payload: { filename: 'expire-me.pdf', contentType: 'application/pdf', size: 10 },
+    });
+    const expId = exp.json().file.id as string;
+    await store.setStatus(expId, 'pending', Date.now() - 1000);
+    const failing = new FakeS3Service();
+    failing.deleteObject = async () => {
+      throw new Error('s3_delete_failed:500');
+    };
+    setDefaultS3Service(failing);
+    try {
+      const failedGet = await app.inject({
+        method: 'GET',
+        url: `/v1/files/${expId}`,
+        headers: { host: 'acme.app.localhost', cookie },
+      });
+      expect(failedGet.statusCode).toBe(503);
+      expect(
+        (
+          await store.getById(
+            { tenantId: 'tenant-acme', requestId: 't', userId: 'u' } as never,
+            expId,
+          )
+        )?.status,
+      ).toBe('pending');
+    } finally {
+      setDefaultS3Service(null);
+    }
+
+    const deleted = await app.inject({
+      method: 'GET',
+      url: `/v1/files/${expId}`,
+      headers: { host: 'acme.app.localhost', cookie },
+    });
+    expect(deleted.statusCode).toBe(410);
+    expect(
+      (
+        await store.getById(
+          { tenantId: 'tenant-acme', requestId: 't', userId: 'u' } as never,
+          expId,
+        )
+      )?.status,
+    ).toBe('expired');
 
     await app.close();
   });
@@ -283,6 +405,7 @@ describe('files presigned flow — tenant isolation', () => {
       payload: { filename: 'alias.pdf', contentType: 'application/pdf', size: 100 },
     });
     const fileId = up.json().file.id as string;
+    putUploadedObject(up.json().upload.url as string, 100, 'application/pdf');
     await app.inject({
       method: 'POST',
       url: `/v1/files/${fileId}/finalize`,

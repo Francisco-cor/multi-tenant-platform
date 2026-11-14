@@ -11,13 +11,12 @@ import {
   type OidcStateRecord,
   type OidcStateStore,
 } from '@platform/auth';
-import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
+import { randomBytes, randomUUID, timingSafeEqual, createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { API_VERSION, metaResponse } from '@platform/contracts';
 import {
   PERMISSIONS,
   canAssignRole,
-  canTransition,
   requiresOwnerApproval,
   rolesHavePermission,
   type Permission,
@@ -84,10 +83,11 @@ import { InMemoryDlqStore, PersistentDlqStore, type DlqStore } from './dlq-store
 import {
   InMemoryPaymentStore,
   PersistentPaymentStore,
+  validateIdempotencyKey,
   type PaymentStore,
 } from './payment-store.js';
 import { verifyStripeWebhookSignature, verifyWebhookSignature } from './webhook-payment.js';
-import { sql, createDatabase, withTenantTransaction, writeOutboxEvent } from '@platform/db';
+import { sql, createDatabase, withTenantTransaction } from '@platform/db';
 import type { DatabaseHandle } from '@platform/db';
 import {
   InMemoryWebhookStore,
@@ -95,6 +95,7 @@ import {
   type WebhookStore,
 } from './webhook-store.js';
 import { InMemoryApiKeyStore, PersistentApiKeyStore, type ApiKeyStore } from './api-key-store.js';
+import { ProviderSecretStore, type InboundProvider } from './provider-secret-store.js';
 import { validateAutomation } from '@platform/domain';
 import {
   InMemoryFeatureFlagStore,
@@ -114,6 +115,8 @@ const CSRF_TOKEN_BYTES = 32;
 const METRICS_SCRAPE_RATE_LIMIT = { windowMs: 60_000, max: 1000 };
 const CSRF_EXEMPT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/** Audit actor for provider callbacks, which have no authenticated user. */
+const SYSTEM_ACTOR_ID = '00000000-0000-4000-8000-000000000000';
 
 /**
  * Bounded, self-expiring set for in-memory webhook dedupe. The previous
@@ -238,7 +241,7 @@ const OrderCreateSchema = z
     amountCents: z.number().int().min(1).max(100000000),
     currency: z.string().min(3).max(10).default('USD').optional(),
     paymentMethodId: z.string().min(3).max(128).optional(),
-    idempotencyKey: z.string().min(8).max(64).optional(),
+    idempotencyKey: z.string().min(16).max(255).optional(),
   })
   .strict();
 const PaymentWebhookSchema = z
@@ -248,6 +251,7 @@ const PaymentWebhookSchema = z
     status: z.enum(['paid', 'failed', 'unknown']),
     providerKey: z.string().min(8).max(128).optional(),
     amountCents: z.number().int().min(1).optional(),
+    currency: z.string().min(3).max(10).optional(),
     tenantId: z.string().min(1).max(128).optional(),
   })
   .strict();
@@ -374,6 +378,7 @@ interface AppOptions {
   dlqStore?: DlqStore;
   paymentStore?: PaymentStore;
   webhookStore?: WebhookStore;
+  providerSecretStore?: ProviderSecretStore;
   apiKeyStore?: ApiKeyStore;
   featureFlagStore?: FeatureFlagStore;
   cache?: Cache;
@@ -708,6 +713,8 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           maxConnections: 4,
         })
       : undefined;
+  const providerSecretStore: ProviderSecretStore =
+    options.providerSecretStore ?? new ProviderSecretStore(directDatabase ?? null);
   const s3Breaker: CircuitBreaker =
     options.circuitBreakers?.s3 ??
     createCircuitBreaker('s3', { failureThreshold: 5, timeoutMs: 30_000, requestTimeoutMs: 2000 });
@@ -759,7 +766,6 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     csrfCookie(newCsrfToken(), secureCookies, sessionCookieDomain),
   ];
 
-  const webhookDedupe = new BoundedDedupeSet();
   const inboundDedupe = new BoundedDedupeSet();
 
   const structuredLogger = createLogger({
@@ -1242,6 +1248,53 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     } catch {
       // fail-open
     }
+  };
+
+  /** Public file projection: never expose tenantId, ownerId or the raw S3 key. */
+  const fileView = (file: {
+    id: string;
+    filename: string;
+    contentType: string;
+    sizeExpected: number;
+    sizeActual: number | null;
+    status: string;
+    createdAt: number;
+    updatedAt: number;
+    expiresAt: number;
+  }): Record<string, unknown> => ({
+    id: file.id,
+    filename: file.filename,
+    contentType: file.contentType,
+    sizeExpected: file.sizeExpected,
+    sizeActual: file.sizeActual,
+    status: file.status,
+    createdAt: file.createdAt,
+    updatedAt: file.updatedAt,
+    expiresAt: file.expiresAt,
+  });
+
+  /**
+   * A pending upload past its TTL still owns an S3 object. Delete first; only
+   * mark the row expired after the delete succeeds. A failed delete leaves the
+   * row pending so GC retries instead of leaking the object.
+   */
+  const expirePendingFile = async (
+    context: { tenantId: string; requestId: string; userId: string },
+    file: { id: string; key: string; status: string; expiresAt: number },
+  ): Promise<void> => {
+    if (file.status !== 'pending' || file.expiresAt > Date.now()) return;
+    try {
+      await s3Breaker.execute(() => getDefaultS3Service().deleteObject(file.key));
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        (error as unknown as { code?: string }).code === 'CIRCUIT_OPEN'
+      ) {
+        throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Storage temporarily unavailable');
+      }
+      throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Could not expire upload');
+    }
+    await fileStore.markExpired(context, file.id);
   };
 
   const jwksCache = new Map<string, { keys: OidcJsonWebKey[]; fetchedAt: number }>();
@@ -2032,6 +2085,32 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       if (e instanceof RequestProblem) throw e;
     }
     const body = parseOrThrow(OrderCreateSchema, request.body);
+    const idempotencyHeader = request.headers['idempotency-key'];
+    const rawIdempotencyKey = Array.isArray(idempotencyHeader)
+      ? idempotencyHeader[0]
+      : (idempotencyHeader ?? body.idempotencyKey);
+    let idempotencyKey: string;
+    try {
+      idempotencyKey = validateIdempotencyKey(rawIdempotencyKey);
+    } catch (error) {
+      throw new RequestProblem(
+        400,
+        'BAD_REQUEST',
+        error instanceof Error && error.message === 'idempotency_key_required'
+          ? 'Idempotency-Key header is required'
+          : 'Idempotency-Key is invalid',
+      );
+    }
+    const requestHash = createHash('sha256')
+      .update(
+        JSON.stringify({
+          branchId: body.branchId,
+          amountCents: body.amountCents,
+          currency: body.currency ?? 'USD',
+          paymentMethodId: body.paymentMethodId ?? null,
+        }),
+      )
+      .digest('hex');
     const persistentOrders = Boolean(directDatabase);
     if (persistentOrders) requireUuid(body.branchId, 'branchId');
     // branch must belong to tenant: check via store.listBranches
@@ -2051,24 +2130,43 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           ...(body.paymentMethodId ? { paymentMethodId: body.paymentMethodId } : {}),
           correlationId: getCorrelationId(request),
           createdBy: context.user.id,
+          idempotencyKey,
+          requestHash,
         },
       );
-      await store.addAudit(
-        auditBase(request, {
-          action: 'order.created',
-          actorUserId: context.user.id,
-          tenantId: context.tenantId,
-          resourceId: result.order.id,
-          metadata: {
-            amountCents: String(result.order.amountCents),
-            providerKey: result.paymentAttempt.providerKey,
-          },
-        }),
-      );
+      if (!result.idempotentReplay) {
+        await store.addAudit(
+          auditBase(request, {
+            action: 'order.created',
+            actorUserId: context.user.id,
+            tenantId: context.tenantId,
+            resourceId: result.order.id,
+            metadata: {
+              amountCents: String(result.order.amountCents),
+              providerKey: result.paymentAttempt.providerKey,
+            },
+          }),
+        );
+      }
+      if (result.idempotentReplay) reply.header('idempotent-replayed', 'true');
       return reply.status(201).send({ order: result.order, paymentAttempt: result.paymentAttempt });
     } catch (error) {
       if (error instanceof Error && error.message === 'amount_invalid') {
         throw new RequestProblem(400, 'BAD_REQUEST', 'Invalid amount');
+      }
+      if (error instanceof Error && error.message === 'idempotency_key_reused') {
+        throw new RequestProblem(
+          409,
+          'CONFLICT',
+          'Idempotency-Key was already used with a different request body',
+        );
+      }
+      if (error instanceof Error && error.message === 'idempotency_in_progress') {
+        throw new RequestProblem(
+          409,
+          'CONFLICT',
+          'Request with this Idempotency-Key is in progress',
+        );
       }
       throw error;
     }
@@ -2132,7 +2230,12 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     return { data: attempts };
   });
 
-  // Webhook inbound — no session auth, HMAC + dedupe per tenant
+  // Webhook inbound — no session auth, HMAC + dedupe per tenant.
+  //
+  // Tenant selection comes from an untrusted header/query selector and is only
+  // used to choose the key ring. The signed body must name the same tenant.
+  // Events either apply atomically in one transaction or are stored as
+  // unprocessed and handed to the reconciler; a no-op is never ACKed as 200.
   app.post(
     '/v1/webhooks/payments',
     { bodyLimit: SMALL_BODY_LIMIT, config: { rawBody: true } },
@@ -2140,6 +2243,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       const rawBody =
         rawBodyByRequest.get(request) ?? Buffer.from(JSON.stringify(request.body ?? {}), 'utf8');
       const providerIsStripe = process.env.PAYMENT_PROVIDER === 'stripe';
+      const provider: InboundProvider = providerIsStripe ? 'stripe' : 'generic';
       const stripeSignature = request.headers['stripe-signature'] as string | undefined;
       const timestamp =
         (request.headers['x-webhook-timestamp'] as string) ??
@@ -2149,27 +2253,54 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
         (request.headers['x-webhook-signature'] as string) ??
         (request.headers['x-signature'] as string) ??
         '';
-      const configuredSecret = providerIsStripe
-        ? process.env.PAYMENT_PROVIDER_WEBHOOK_SECRET
-        : process.env.PAYMENT_WEBHOOK_SECRET;
-      if (!configuredSecret && productionLike) {
-        throw new RequestProblem(
-          503,
-          'WEBHOOK_NOT_CONFIGURED',
-          'Payment webhook is not configured',
+
+      const query = request.query as { tenantId?: string } | undefined;
+      const selectorTenantId =
+        (request.headers['x-tenant-id'] as string | undefined) ?? query?.tenantId ?? null;
+
+      let candidates: Array<{ version: number; secret: string }> = [];
+      if (selectorTenantId && UUID_PATTERN.test(selectorTenantId) && providerSecretStore.enabled) {
+        candidates = await providerSecretStore.verificationSecrets(
+          { tenantId: selectorTenantId, requestId: request.id },
+          provider,
         );
       }
-      const secret = configuredSecret ?? 'test_webhook_secret';
-      const verify = providerIsStripe
-        ? verifyStripeWebhookSignature({ secret, rawBody, signatureHeader: stripeSignature })
-        : verifyWebhookSignature({ secret, timestamp, rawBody, signatureHeader });
-      if (!verify.valid) {
-        throw new RequestProblem(
-          401,
-          'UNAUTHORIZED',
-          `Webhook signature invalid: ${verify.reason}`,
-        );
+      if (candidates.length === 0) {
+        // Single shared env secret is a local/development fallback only. It is
+        // never silently used in production-like environments.
+        if (productionLike) {
+          throw new RequestProblem(
+            503,
+            'WEBHOOK_NOT_CONFIGURED',
+            'Provider webhook secret is not configured for this tenant',
+          );
+        }
+        const envSecret = providerIsStripe
+          ? process.env.PAYMENT_PROVIDER_WEBHOOK_SECRET
+          : process.env.PAYMENT_WEBHOOK_SECRET;
+        candidates = [{ version: 0, secret: envSecret ?? 'test_webhook_secret' }];
       }
+
+      const verification = candidates.map((candidate) =>
+        providerIsStripe
+          ? verifyStripeWebhookSignature({
+              secret: candidate.secret,
+              rawBody,
+              signatureHeader: stripeSignature,
+            })
+          : verifyWebhookSignature({
+              secret: candidate.secret,
+              timestamp,
+              rawBody,
+              signatureHeader,
+            }),
+      );
+      const verified = verification.find((result) => result.valid);
+      if (!verified) {
+        const reason = verification[0]?.reason ?? 'signature_missing';
+        throw new RequestProblem(401, 'UNAUTHORIZED', `Webhook signature invalid: ${reason}`);
+      }
+
       let body: z.infer<typeof PaymentWebhookSchema>;
       if (providerIsStripe) {
         const stripeEvent = request.body as {
@@ -2210,176 +2341,126 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           ...(typeof paymentIntent.amount === 'number'
             ? { amountCents: paymentIntent.amount }
             : {}),
+          ...(typeof paymentIntent.currency === 'string'
+            ? { currency: paymentIntent.currency.toUpperCase() }
+            : {}),
         });
       } else {
         body = parseOrThrow(PaymentWebhookSchema, request.body);
       }
-      // Tenant identity must be inside the signed body. A header alone is not covered by HMAC.
-      const headerTenantId = (request.headers['x-tenant-id'] as string) ?? null;
-      const bodyWithTenant = request.body as Record<string, unknown>;
-      const bodyTenantId =
-        typeof bodyWithTenant.tenantId === 'string' ? bodyWithTenant.tenantId : null;
-      if (!bodyTenantId) {
+
+      // Tenant identity must come from the normalized (signed) body, never
+      // from request.body directly: Stripe's tenant is in metadata.
+      if (!body.tenantId) {
         throw new RequestProblem(400, 'BAD_REQUEST', 'Signed tenantId is required in webhook body');
       }
-      if (headerTenantId && headerTenantId !== bodyTenantId) {
+      if (selectorTenantId && selectorTenantId !== body.tenantId) {
         throw new RequestProblem(401, 'UNAUTHORIZED', 'Webhook tenant mismatch');
       }
-      const tenantId = bodyTenantId;
-
-      // Validate tenantId format
-      if (
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(tenantId)
-      ) {
-        if (directDatabase) {
-          throw new RequestProblem(
-            400,
-            'BAD_REQUEST',
-            'Persistent webhook tenantId must be a UUID',
-          );
-        }
+      const tenantId = body.tenantId;
+      if (directDatabase && !UUID_PATTERN.test(tenantId)) {
+        throw new RequestProblem(400, 'BAD_REQUEST', 'Persistent webhook tenantId must be a UUID');
       }
 
-      // Dedupe via inbound_payment_events per tenant
-      // Use paymentStore? For now handle via direct DB if available, else in-memory map
-      // For InMemory path, we simulate dedupe via global map (attached to app)
-      const dedupeKey = `${tenantId}:${body.eventId}`;
-      if (webhookDedupe.has(dedupeKey)) {
+      const outcome = await paymentStore.applyPaymentWebhook(
+        { tenantId, requestId: request.id },
+        {
+          eventId: body.eventId,
+          providerRef: body.providerRef,
+          ...(body.providerKey ? { providerKey: body.providerKey } : {}),
+          status: body.status,
+          ...(body.amountCents !== undefined ? { amountCents: body.amountCents } : {}),
+          ...(body.currency !== undefined ? { currency: body.currency } : {}),
+          correlationId: getCorrelationId(request),
+        },
+      );
+
+      if (outcome.outcome === 'duplicate') {
         return { status: 'already_processed', eventId: body.eventId };
       }
-
-      // The persistent dedupe insert and payment transition must commit together.
-      // Otherwise a failed transition could be acknowledged as already processed on retry.
-      if (directDatabase) {
-        const db = directDatabase;
-        if (!db)
-          throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Database is not configured');
-        try {
-          const outcome = await withTenantTransaction(
-            db,
-            { tenantId, requestId: request.id },
-            async (tx) => {
-              const inserted = await tx.execute<{ id: string }>(sql`
-              insert into inbound_payment_events (tenant_id, event_id, provider_ref, status, payload)
-              values (${tenantId}::uuid, ${body.eventId}, ${body.providerRef}, ${body.status}, ${JSON.stringify(body)}::jsonb)
-              on conflict (tenant_id, event_id) do nothing
-              returning id
-            `);
-              if (inserted.length === 0) return { duplicate: true } as const;
-
-              // Find attempt by provider_ref or provider_key inside this tenant transaction.
-              const rows = await tx.execute<{ id: string; status: string; order_id: string }>(sql`
-              select id, status, order_id from payment_attempts
-              where tenant_id=${tenantId}::uuid and (provider_ref=${body.providerRef} or provider_key=${body.providerKey ?? ''} or provider_ref=${body.providerRef})
-              limit 1
-            `);
-              let attempt = rows[0];
-              if (!attempt && body.providerRef) {
-                const byKey = await tx.execute<{
-                  id: string;
-                  status: string;
-                  order_id: string;
-                }>(sql`
-                select id, status, order_id from payment_attempts where tenant_id=${tenantId}::uuid and provider_ref=${body.providerRef} limit 1
-              `);
-                attempt = byKey[0];
-              }
-              if (!attempt) {
-                const anyRows = await tx.execute<{
-                  id: string;
-                  status: string;
-                  order_id: string;
-                }>(sql`
-                select id, status, order_id from payment_attempts where tenant_id=${tenantId}::uuid order by created_at desc limit 1
-              `);
-                if (
-                  anyRows.length === 1 &&
-                  (anyRows[0]!.status === 'pending' ||
-                    anyRows[0]!.status === 'unknown' ||
-                    anyRows[0]!.status === 'created')
-                ) {
-                  attempt = anyRows[0];
-                }
-              }
-
-              if (!attempt) return { duplicate: false, applied: false } as const;
-              const cur = attempt.status;
-              const target = body.status;
-              if (cur !== target && cur !== 'paid' && cur !== 'failed') {
-                if (canTransition(cur as never, target as never)) {
-                  await tx.execute(sql`
-                  update payment_attempts set status=${target}, provider_ref=${body.providerRef}, updated_at=now()
-                  where id=${attempt.id}::uuid and tenant_id=${tenantId}::uuid
-                `);
-                  if (target === 'paid') {
-                    await tx.execute(sql`
-                    update orders set status='paid', updated_at=now()
-                    where id=${attempt.order_id}::uuid and tenant_id=${tenantId}::uuid
-                  `);
-                  } else if (target === 'failed') {
-                    await tx.execute(sql`
-                    update orders set status='failed', updated_at=now()
-                    where id=${attempt.order_id}::uuid and tenant_id=${tenantId}::uuid
-                  `);
-                  }
-                  await writeOutboxEvent(tx, {
-                    tenantId,
-                    aggregateType: 'payment',
-                    aggregateId: attempt.id,
-                    eventType: `payment.webhook_${target}`,
-                    payload: {
-                      attemptId: attempt.id,
-                      orderId: attempt.order_id,
-                      providerRef: body.providerRef,
-                      status: target,
-                      eventId: body.eventId,
-                    },
-                    correlationId: getCorrelationId(request),
-                  });
-                  return { duplicate: false, applied: true } as const;
-                }
-              }
-              return { duplicate: false, applied: false } as const;
-            },
+      if (outcome.outcome === 'not_found') {
+        // Retryable: the provider may deliver before the order row is visible.
+        reply.header('retry-after', '5');
+        throw new RequestProblem(
+          404,
+          'NOT_FOUND',
+          'No payment attempt matches this provider reference for this tenant',
+        );
+      }
+      if (outcome.outcome === 'mismatch') {
+        metrics.recordAudit('payment.webhook_mismatch');
+        const actorUserId = outcome.actorUserId ?? (directDatabase ? null : SYSTEM_ACTOR_ID);
+        if (actorUserId) {
+          await store.addAudit(
+            auditBase(request, {
+              action: 'payment.webhook_rejected',
+              actorUserId,
+              tenantId,
+              result: 'failure',
+              metadata: {
+                reason: `amount_or_currency_${outcome.reason}_mismatch`,
+                expectedAmountCents: String(outcome.expectedAmountCents),
+                expectedCurrency: outcome.expectedCurrency,
+                eventId: body.eventId,
+                providerRef: body.providerRef,
+              },
+            }),
           );
-          if (outcome.duplicate) {
-            webhookDedupe.add(dedupeKey);
-            return { status: 'already_processed', eventId: body.eventId };
-          }
-          webhookDedupe.add(dedupeKey);
-        } catch (error) {
-          request.log.error({ err: error }, 'webhook_payment_update_failed');
-          throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Payment state unavailable');
         }
-      } else {
-        // InMemory path: update paymentStore directly if global paymentStore accessible
-        // For tests without DB, we can try to use the injected paymentStore (closure)
-        try {
-          // Search attempts for this tenant and update first pending
-          const attempts = await paymentStore.listPaymentAttempts({
-            tenantId,
-            requestId: request.id,
-          } as never);
-          const targetAttempt =
-            attempts.find((a) => a.providerRef === body.providerRef) ??
-            attempts.find(
-              (a) => a.status === 'pending' || a.status === 'unknown' || a.status === 'created',
-            );
-          if (targetAttempt) {
-            // Use InMemory mutator if available
-            const memStore = paymentStore as unknown as {
-              setAttemptStatus?: (id: string, s: string, ref?: string) => void;
-            };
-            if (memStore.setAttemptStatus) {
-              memStore.setAttemptStatus(targetAttempt.id, body.status, body.providerRef);
-            }
-          }
-          webhookDedupe.add(dedupeKey);
-        } catch {
-          // ignore
+        throw new RequestProblem(
+          409,
+          'CONFLICT',
+          `Payment ${outcome.reason} does not match the order`,
+          {
+            expectedAmountCents: outcome.expectedAmountCents,
+            expectedCurrency: outcome.expectedCurrency,
+          },
+        );
+      }
+      if (outcome.outcome === 'unresolved') {
+        metrics.recordAudit('payment.webhook_unresolved');
+        const actorUserId = outcome.actorUserId ?? (directDatabase ? null : SYSTEM_ACTOR_ID);
+        if (actorUserId) {
+          await store.addAudit(
+            auditBase(request, {
+              action: 'payment.webhook_unresolved',
+              actorUserId,
+              tenantId,
+              resourceId: outcome.attempt.id,
+              result: 'failure',
+              metadata: {
+                reason: outcome.reason,
+                eventId: body.eventId,
+                status: body.status,
+              },
+            }),
+          );
         }
+        return reply
+          .status(202)
+          .send({ status: 'unresolved', eventId: body.eventId, reason: outcome.reason });
       }
 
+      metrics.recordAudit(
+        outcome.compensating ? 'payment.paid_after_failure' : `payment.webhook_${body.status}`,
+      );
+      const actorUserId = outcome.actorUserId ?? (directDatabase ? null : SYSTEM_ACTOR_ID);
+      if (actorUserId) {
+        await store.addAudit(
+          auditBase(request, {
+            action: 'payment.webhook',
+            actorUserId,
+            tenantId,
+            resourceId: outcome.attempt.id,
+            metadata: {
+              eventId: body.eventId,
+              status: body.status,
+              providerRef: body.providerRef,
+              compensating: String(outcome.compensating),
+            },
+          }),
+        );
+      }
       return reply.status(200).send({ status: 'processed', eventId: body.eventId });
     },
   );
@@ -2672,34 +2753,57 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     '/v1/webhooks/inbound',
     { bodyLimit: SMALL_BODY_LIMIT, config: { rawBody: true } },
     async (request, reply) => {
-      // For inbound we trust x-tenant-id header or body.tenantId; HMAC verified against per-tenant secret or global
       const rawBody =
         rawBodyByRequest.get(request) ?? Buffer.from(JSON.stringify(request.body ?? {}), 'utf8');
-      const timestamp = (request.headers['x-webhook-timestamp'] as string) ?? '';
+      const timestamp =
+        (request.headers['x-webhook-timestamp'] as string) ??
+        (request.headers['x-timestamp'] as string) ??
+        '';
       const signatureHeader =
         (request.headers['x-webhook-signature'] as string) ??
         (request.headers['x-signature'] as string) ??
         '';
-      // Use global secret for demo, but tenant isolation via dedupe key
-      const configuredSecret =
-        process.env.WEBHOOK_INBOUND_SECRET ?? process.env.PAYMENT_WEBHOOK_SECRET;
-      if (!configuredSecret && productionLike) {
-        throw new RequestProblem(
-          503,
-          'WEBHOOK_NOT_CONFIGURED',
-          'Inbound webhook is not configured',
+      // The selector header/path only chooses the tenant key ring. The signed
+      // body must name the same tenant.
+      const query = request.query as { tenantId?: string } | undefined;
+      const selectorTenantId =
+        (request.headers['x-tenant-id'] as string | undefined) ?? query?.tenantId ?? null;
+      let candidates: Array<{ version: number; secret: string }> = [];
+      if (selectorTenantId && UUID_PATTERN.test(selectorTenantId) && providerSecretStore.enabled) {
+        candidates = await providerSecretStore.verificationSecrets(
+          { tenantId: selectorTenantId, requestId: request.id },
+          'inbound',
         );
       }
-      const secret = configuredSecret ?? 'test_webhook_secret';
-      const verify = verifyWebhookSignature({ secret, timestamp, rawBody, signatureHeader });
-      if (!verify.valid)
+      if (candidates.length === 0) {
+        if (productionLike) {
+          throw new RequestProblem(
+            503,
+            'WEBHOOK_NOT_CONFIGURED',
+            'Inbound webhook secret is not configured for this tenant',
+          );
+        }
+        const configuredSecret =
+          process.env.WEBHOOK_INBOUND_SECRET ?? process.env.PAYMENT_WEBHOOK_SECRET;
+        candidates = [{ version: 0, secret: configuredSecret ?? 'test_webhook_secret' }];
+      }
+      const verification = candidates.map((candidate) =>
+        verifyWebhookSignature({
+          secret: candidate.secret,
+          timestamp,
+          rawBody,
+          signatureHeader,
+        }),
+      );
+      if (!verification.some((result) => result.valid)) {
         throw new RequestProblem(
           401,
           'UNAUTHORIZED',
-          `Webhook signature invalid: ${verify.reason}`,
+          `Webhook signature invalid: ${verification[0]?.reason ?? 'signature_missing'}`,
         );
+      }
       const body = parseOrThrow(InboundWebhookSchema, request.body);
-      const headerTenantId = (request.headers['x-tenant-id'] as string) ?? null;
+      const headerTenantId = selectorTenantId;
       const bodyTenantId = body.tenantId ?? null;
       if (!bodyTenantId)
         throw new RequestProblem(400, 'BAD_REQUEST', 'Signed tenantId is required in webhook body');
@@ -3041,23 +3145,14 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           }
           throw e;
         }
-        // Never log full presigned URL / tokens — only key prefix is safe. We intentionally avoid logging url.
+        // Never log full presigned URL / tokens. The object key stays internal:
+        // the client only needs the URL and required headers.
         return reply.status(201).send({
-          file: {
-            id: file.id,
-            filename: file.filename,
-            contentType: file.contentType,
-            sizeExpected: file.sizeExpected,
-            status: file.status,
-            createdAt: file.createdAt,
-            expiresAt: file.expiresAt,
-          },
+          file: fileView(file),
           upload: {
             url: upload.url,
             expiresAt: upload.expiresAt,
             headers: upload.headers,
-            // expose key only internally if needed; not leaked as arbitrary path. Kept for debugging but tenant-prefixed.
-            key: file.key,
           },
         });
       } catch (error) {
@@ -3124,7 +3219,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
         throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Storage temporarily unavailable');
       throw e;
     }
-    return reply.status(201).send({ file, upload });
+    return reply.status(201).send({ file: fileView(file), upload });
   });
 
   app.post('/v1/files/:id/finalize', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
@@ -3134,45 +3229,48 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     const params = request.params as { id?: string };
     if (!params.id) throw new RequestProblem(400, 'BAD_REQUEST', 'File id required');
     const body = parseOrThrow(FileFinalizeSchema, request.body ?? {});
-    const fileBefore = await fileStore.getById(
-      { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
-      params.id,
-    );
+    const contextRef = {
+      tenantId: context.tenantId,
+      requestId: request.id,
+      userId: context.user.id,
+    };
+    const fileBefore = await fileStore.getById(contextRef, params.id);
     if (!fileBefore) throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
+    await expirePendingFile(contextRef, fileBefore);
     if (fileBefore.status === 'expired') throw new RequestProblem(410, 'GONE', 'Upload expired');
     if (fileBefore.status !== 'pending' && fileBefore.status !== 'ready')
       throw new RequestProblem(409, 'CONFLICT', 'File not in pending state');
-    // Verify via S3 HEAD if available; if head returns data, validate size
+
+    // HEAD is authoritative. `content-length` supplied by the caller and any
+    // presigned PUT headers are untrusted; only object storage knows what was
+    // actually written.
+    let head: { contentLength: number; contentType?: string | undefined } | null;
     try {
-      const s3 = getDefaultS3Service();
-      const head = await s3.headObject(fileBefore.key);
-      if (head) {
-        if (head.contentLength !== fileBefore.sizeExpected && body.sizeActual === undefined) {
-          // If S3 reports different size than expected, we treat as mismatch unless caller explicitly passes sizeActual
-          // Allow proceeding but record actual
-          // If strict, reject when mismatch >0
-        }
-        if (body.sizeActual !== undefined && head.contentLength !== body.sizeActual) {
-          throw new RequestProblem(400, 'BAD_REQUEST', 'Size mismatch with uploaded object');
-        }
-        if (head.contentType && head.contentType !== fileBefore.contentType) {
-          // Allow but warn; content-type is validated at presign time
-        }
-      }
+      head = await s3Breaker.execute(() => getDefaultS3Service().headObject(fileBefore.key));
     } catch (error) {
-      if (error instanceof RequestProblem) throw error;
-      // If S3 is unavailable (null head), we proceed without strict check — finalize is tenant-scoped and pending.
+      if (error instanceof Error && (error as unknown as { code?: string }).code === 'CIRCUIT_OPEN')
+        throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Storage temporarily unavailable');
+      throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Could not verify upload');
+    }
+    if (!head) {
+      throw new RequestProblem(409, 'CONFLICT', 'Uploaded object not found');
+    }
+    if (head.contentLength !== fileBefore.sizeExpected) {
+      throw new RequestProblem(400, 'BAD_REQUEST', 'Uploaded object size does not match presign');
+    }
+    if (body.sizeActual !== undefined && body.sizeActual !== head.contentLength) {
+      throw new RequestProblem(400, 'BAD_REQUEST', 'Size mismatch with uploaded object');
+    }
+    if (head.contentType && head.contentType !== fileBefore.contentType) {
+      throw new RequestProblem(400, 'BAD_REQUEST', 'Uploaded object content-type does not match');
     }
 
     try {
-      const finalized = await fileStore.finalize(
-        { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
-        params.id,
-        body.sizeActual !== undefined || body.checksum !== undefined
-          ? { sizeActual: body.sizeActual, checksum: body.checksum }
-          : {},
-      );
-      return { file: finalized };
+      const finalized = await fileStore.finalize(contextRef, params.id, {
+        sizeActual: head.contentLength,
+        ...(body.checksum !== undefined ? { checksum: body.checksum } : {}),
+      });
+      return { file: fileView(finalized) };
     } catch (error) {
       if (error instanceof Error) {
         if (error.message === 'file_not_found')
@@ -3181,7 +3279,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           throw new RequestProblem(410, 'GONE', 'Upload expired');
         if (error.message === 'file_not_pending')
           throw new RequestProblem(409, 'CONFLICT', 'File not pending');
-        if (error.message === 'size_invalid')
+        if (error.message === 'size_invalid' || error.message === 'size_mismatch')
           throw new RequestProblem(400, 'BAD_REQUEST', 'Invalid size');
       }
       throw error;
@@ -3198,20 +3296,12 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       params.id,
     );
     if (!file) throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
+    await expirePendingFile(
+      { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
+      file,
+    );
     if (file.status === 'expired') throw new RequestProblem(410, 'GONE', 'Upload expired');
-    return {
-      file: {
-        id: file.id,
-        filename: file.filename,
-        contentType: file.contentType,
-        sizeExpected: file.sizeExpected,
-        sizeActual: file.sizeActual,
-        status: file.status,
-        createdAt: file.createdAt,
-        updatedAt: file.updatedAt,
-        expiresAt: file.expiresAt,
-      },
-    };
+    return { file: fileView(file) };
   });
 
   app.get('/v1/files', async (request, reply) => {
@@ -3251,11 +3341,17 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     requirePermission(context, 'files:read');
     const params = request.params as { id?: string };
     if (!params.id) throw new RequestProblem(400, 'BAD_REQUEST', 'File id required');
+    const contextRef = {
+      tenantId: context.tenantId,
+      requestId: request.id,
+      userId: context.user.id,
+    };
+    const before = await fileStore.getById(contextRef, params.id);
+    if (!before) throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
+    await expirePendingFile(contextRef, before);
+    if (before.status === 'expired') throw new RequestProblem(410, 'GONE', 'Upload expired');
     try {
-      const { file, key } = await fileStore.getDownloadKey(
-        { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
-        params.id,
-      );
+      const { file, key } = await fileStore.getDownloadKey(contextRef, params.id);
       const s3 = getDefaultS3Service();
       let download: { url: string; expiresAt: number };
       try {
@@ -3278,7 +3374,11 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           filename: file.filename,
           contentType: file.contentType,
           sizeExpected: file.sizeExpected,
+          sizeActual: file.sizeActual,
           status: file.status,
+          createdAt: file.createdAt,
+          updatedAt: file.updatedAt,
+          expiresAt: file.expiresAt,
         },
         download: { url: download.url, expiresAt: download.expiresAt },
       };
@@ -3356,6 +3456,8 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     } catch (error) {
       if (error instanceof Error && error.message === 'dlq_not_found')
         throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
+      if (error instanceof Error && error.message === 'dlq_state_conflict')
+        throw new RequestProblem(409, 'CONFLICT', 'DLQ job is not pending');
       throw error;
     }
   }
@@ -3375,10 +3477,18 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       params.id,
     );
     if (!rec) throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
-    await dlqStore.discard(
-      { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
-      params.id,
-    );
+    try {
+      await dlqStore.discard(
+        { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
+        params.id,
+      );
+    } catch (error) {
+      if (error instanceof Error && error.message === 'dlq_not_found')
+        throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
+      if (error instanceof Error && error.message === 'dlq_state_conflict')
+        throw new RequestProblem(409, 'CONFLICT', 'DLQ job is not pending');
+      throw error;
+    }
     await store.addAudit(
       auditBase(request, {
         action: 'dlq.discarded',

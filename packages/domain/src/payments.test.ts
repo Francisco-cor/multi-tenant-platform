@@ -16,15 +16,18 @@ describe('payments state machine', () => {
   it('allows valid transitions and blocks invalid', () => {
     expect(canTransition('created', 'pending')).toBe(true);
     expect(canTransition('created', 'failed')).toBe(true);
-    expect(canTransition('created', 'paid')).toBe(false);
+    // Provider may have charged before the local pending write landed.
+    expect(canTransition('created', 'paid')).toBe(true);
     expect(canTransition('pending', 'paid')).toBe(true);
     expect(canTransition('pending', 'failed')).toBe(true);
     expect(canTransition('pending', 'unknown')).toBe(true);
     expect(canTransition('unknown', 'paid')).toBe(true);
     expect(canTransition('unknown', 'failed')).toBe(true);
     expect(canTransition('paid', 'failed')).toBe(false);
-    expect(canTransition('failed', 'paid')).toBe(false);
+    // Compensating late payment: money already left the customer.
+    expect(canTransition('failed', 'paid')).toBe(true);
     expect(() => assertTransition('paid', 'failed')).toThrow(/payment_transition_invalid/);
+    expect(() => assertTransition('failed', 'paid')).not.toThrow();
     expect(() => assertTransition('created', 'pending')).not.toThrow();
   });
 
@@ -53,6 +56,23 @@ describe('payments state machine', () => {
     expect(k1.length).toBe(32);
     expect(k1).not.toBe(k3);
     expect(k1).not.toBe(k4);
+
+    // Client Idempotency-Key is the provider identity: a retry with a new
+    // (or not-yet-created) order id must still hit the same provider charge.
+    const byClientKey = providerIdempotencyKey({
+      tenantId: '11111111-1111-4111-8111-111111111111',
+      orderId: '33333333-3333-4333-8333-333333333333',
+      amount: 1999,
+      clientKey: 'client-key-abc',
+    });
+    const byClientKeyRetry = providerIdempotencyKey({
+      tenantId: '11111111-1111-4111-8111-111111111111',
+      orderId: '44444444-4444-4444-8444-444444444444',
+      amount: 1999,
+      clientKey: 'client-key-abc',
+    });
+    expect(byClientKey).toBe(byClientKeyRetry);
+    expect(byClientKey).not.toBe(k1);
   });
 
   it('shouldReconcile >5m for pending/unknown, shouldAlert >30m for unknown', () => {
