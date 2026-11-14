@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { sql, createDatabase, type DatabaseHandle } from '@platform/db';
+import { sql, createAdminDatabase, createDatabase, type DatabaseHandle } from '@platform/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createBullMqFactory, type QueueFactory } from './queues.js';
 import { workerTenantTransaction } from './tenant-db.js';
@@ -21,7 +21,8 @@ suite('worker production dependencies', () => {
     const databaseUrl = process.env.DATABASE_URL;
     const redisUrl = process.env.REDIS_URL;
     if (!databaseUrl || !redisUrl) throw new Error('worker_integration_environment_required');
-    admin = createDatabase(databaseUrl, { maxConnections: 1 });
+    // Fixture seeding runs as the connection owner; tenant work is scoped.
+    admin = createAdminDatabase(databaseUrl, { maxConnections: 1 });
     appDb = createDatabase(databaseUrl, { role: 'platform_app', maxConnections: 2 });
     await admin.db.execute(sql`
       insert into organizations (id, slug, name)

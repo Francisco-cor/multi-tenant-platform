@@ -61,6 +61,53 @@ function reconcileDatabase(attempt: Record<string, unknown>) {
   });
 }
 
+describe('targeted reconciliation (reconciliation_required)', () => {
+  it('compensates a failed attempt the provider now reports as paid', async () => {
+    const provider = new StrictProvider();
+    let outboxId = 0;
+    const fake = createFakeDatabase(({ text }) => {
+      if (text.includes('select status, last_error from payment_attempts')) {
+        return [{ status: 'failed', last_error: 'card_declined' }];
+      }
+      if (text.includes('from payment_attempts') && text.includes('select id,')) {
+        return [
+          {
+            id: attemptId,
+            tenant_id: tenantId,
+            order_id: orderId,
+            provider_key: providerKey,
+            status: 'failed',
+            provider_ref: 'pi_late',
+            payment_method_id: null,
+            amount_cents: 1000,
+            currency: 'USD',
+            updated_at: new Date().toISOString(),
+            last_error: 'card_declined',
+          },
+        ];
+      }
+      if (text.includes('update payment_attempts') && text.includes('reconciling:')) {
+        return [{ id: attemptId }];
+      }
+      if (text.includes('insert into outbox_events')) return [{ id: `evt-${++outboxId}` }];
+      return [];
+    });
+
+    const result = await reconcilePayments(fake.handle, provider, {
+      attemptId,
+      tenantId,
+      staleMs: 0,
+    });
+
+    expect(result).toMatchObject({ reconciled: 1, paid: 1, failed: 0 });
+    expect(provider.getStatusRefs).toEqual(['pi_late']);
+    const sqlText = fake.queries.join('\n');
+    expect(sqlText).toContain('payment.paid_after_failure');
+    expect(sqlText).toContain('order.paid_after_failure');
+    expect(sqlText).toContain('paid_after_failure');
+  });
+});
+
 describe('payment unknown recovery (P1-4)', () => {
   it('resolves an attempt without provider_ref through the idempotency key', async () => {
     const provider = new StrictProvider();
