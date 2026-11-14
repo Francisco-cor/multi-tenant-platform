@@ -630,7 +630,7 @@ Crear estos documentos a medida que se implementan las fases:
 - [x] `docs/runbooks/database-restore.md`.
 - [x] `docs/runbooks/rollback.md`.
 - [x] `docs/failure-scenarios/*.md` con evidencia de los laboratorios. _(Varios son procedimientos reproducibles; no todos tienen evidencia reciente.)_
-- [x] `docs/api/` con OpenAPI y ejemplos seguros. _(El contrato tiene drift conocido; el pase de OpenAPI lo corrige.)_
+- [x] `docs/api/` con OpenAPI 3.1 verificado contra la tabla real de rutas Fastify y ejemplos seguros.
 
 ## 7. Definition of Done global
 
@@ -710,18 +710,18 @@ Este anexo sustituye a los hashes, conteos de tests y afirmaciones de cierre de 
 
 ### Evidencia reproducible
 
-| Comprobación              | Comando                                                 | Resultado 2026-11-13                                                  |
-| ------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------- |
-| Formato                   | `pnpm format:check`                                     | Gate de CI; ejecutado en el pase de docs sobre los archivos cambiados |
-| Lint                      | `pnpm lint`                                             | Gate de CI (`quality`)                                                |
-| Tipos                     | `pnpm typecheck`                                        | Gate de CI (`quality`)                                                |
-| Build                     | `pnpm build`                                            | Gate de CI (`quality`)                                                |
-| Unitarios                 | `pnpm test:unit`                                        | 274 passed, 43 skipped, 0 failed (Node 26 local; CI fija Node 24)     |
-| Contrato                  | `pnpm openapi:check`                                    | Verde: conteo de paths omitido, 44 schemas, hash `2742853210f7`       |
-| Migraciones               | `pnpm migrate:check`                                    | Gate de CI (`quality`)                                                |
-| Integración DB/API/worker | `node scripts/assert-tests.mjs --suite integration ...` | Gate de CI (`integration`) con PostgreSQL, Redis y MinIO              |
-| Docker                    | matriz `docker` en CI                                   | Build, dependencias runtime, non-root y ausencia de `tsx`             |
-| E2E navegador             | `pnpm test:e2e`                                         | **No gate por defecto**; job `e2e` solo con `ENABLE_E2E=true`         |
+| Comprobación              | Comando                                                 | Resultado 2026-11-13                                                                              |
+| ------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Formato                   | `pnpm format:check`                                     | Gate de CI; ejecutado en el pase de docs sobre los archivos cambiados                             |
+| Lint                      | `pnpm lint`                                             | Gate de CI (`quality`)                                                                            |
+| Tipos                     | `pnpm typecheck`                                        | Gate de CI (`quality`)                                                                            |
+| Build                     | `pnpm build`                                            | Gate de CI (`quality`)                                                                            |
+| Unitarios                 | `pnpm test:unit`                                        | 274 passed, 43 skipped, 0 failed (Node 26 local; CI fija Node 24)                                 |
+| Contrato                  | `pnpm openapi:check`                                    | Verde: 65 operaciones/56 paths comparadas con Fastify, 3.1 sin `nullable`; hash solo recordatorio |
+| Migraciones               | `pnpm migrate:check`                                    | Gate de CI (`quality`)                                                                            |
+| Integración DB/API/worker | `node scripts/assert-tests.mjs --suite integration ...` | Gate de CI (`integration`) con PostgreSQL, Redis y MinIO                                          |
+| Docker                    | matriz `docker` en CI                                   | Build, dependencias runtime, non-root y ausencia de `tsx`                                         |
+| E2E navegador             | `pnpm test:e2e`                                         | **No gate por defecto**; job `e2e` solo con `ENABLE_E2E=true`                                     |
 
 ### Gates y límites reales
 
@@ -729,21 +729,24 @@ Este anexo sustituye a los hashes, conteos de tests y afirmaciones de cierre de 
 - **Auditoría:** los eventos globales van a `platform_audit_log`; los tenant-scoped permanecen en `audit_log` con `tenant_id NOT NULL`. La retention sigue siendo un helper de DB, no un cron desplegado.
 - **Web:** el BFF de Next.js guarda el token de API en una cookie `platform_session` HttpOnly, SameSite=Lax, host-only por defecto y 8 h; el cliente no ve el token. El API también acepta `Authorization: Bearer` y cookie.
 - **Worker:** readiness incluye DB, consumidores, relay, scheduler, heartbeat, lag de outbox, DLQ y workers BullMQ; `/metrics` del worker acepta `WORKER_METRICS_TOKEN`.
-- **Métricas del API:** `/metrics` **no** tiene autenticación en el código actual. Debe exponerse solo en una red privada o detrás de un proxy con allowlist; no se debe documentar como autenticado.
+- **Métricas del API:** `/metrics` exige `Authorization: Bearer $METRICS_TOKEN` cuando la variable está configurada; en production-like sin token responde 503. Aun así debe exponerse solo en red privada.
+
+### Contrato OpenAPI reconciliado
+
+`docs/api/openapi.yaml` documenta las 65 operaciones (56 paths) del runtime, incluidos `productId` en inventario, `/v1/auth/me`, `GET /v1/members`, `GET /v1/inventory/reservations`, `POST /v1/webhooks/deliveries/{id}/replay`, DLQ admin y el alias `presign`. `pnpm openapi:check` construye la app y falla ante cualquier divergencia de ruta/método, seguridad incompleta o falta de `Idempotency-Key`. Los conteos y el hash cambian con el contrato; no se copian a README ni ADRs.
+
 - **Pagos:** `StripePaymentProvider` existe y tiene tests unitarios; no se ha probado contra Stripe sandbox/live. `FakePaymentProvider` sigue siendo el camino de demo/CI.
 - **Egress:** los webhooks outbound resuelven DNS y fijan la IP pública, rechazan rangos privados/link-local/metadata, solo permiten HTTPS:443 y no siguen redirects. **No hay egress proxy con allowlist**; queda como gap de producción.
 - **Secretos:** el cifrado de secretos de webhook usa AES-GCM con `WEBHOOK_SECRET_ENCRYPTION_KEY` y ventana de rotación de 24 h. **No hay KMS/Vault**; la clave vive en el entorno y su rotación es manual (ver `docs/runbooks/key-rotation.md`).
 
-### Drift de contrato que debe resolver el pase de OpenAPI
+### Drift de contrato
 
-1. `POST /v1/inventory/reserve` acepta `productId`; el YAML documenta `sku`.
-2. El YAML publica rutas no implementadas (`/v1/me`, `GET/POST /v1/organizations/{id}/members`, `POST /v1/inventory/reservations`, `POST /v1/webhooks/{id}/replay`) y usa métodos distintos en otras. `presigned-upload` y `presign` sí existen ambas.
-3. Los conteos de paths/schemas y el hash cambian con el contrato; no se deben copiar a README ni ADRs.
+El contrato está reconciliado; `pnpm openapi:check` es el gate y falla si reaparece drift. El hash de `docs/api/.openapi.hash` solo recuerda revisar cambios intencionales.
 
 ### Fases que no se deben presentar como cerradas
 
-- **Fase 4:** órdenes sin líneas, precios, idempotencia HTTP ni transiciones de orden completas.
+- **Fase 4:** órdenes sin líneas, precios ni transiciones completas; la idempotencia HTTP sí está cableada.
 - **Fase 8:** adapter Stripe sin prueba real; sin reembolsos.
-- **Fase 11:** KMS/Vault y egress proxy pendientes; API metrics sin token.
+- **Fase 11:** KMS/Vault y egress proxy pendientes; `/metrics` del API usa `METRICS_TOKEN` cuando está configurado.
 - **Fase 13:** E2E opt-in y `k6` fuera de CI; varios escenarios son procedimientos.
 - **Fases 14–16:** no hay clúster, manifests K8s, Terraform ni pipeline de release; solo scripts, imágenes y gates de CI.

@@ -34,4 +34,4 @@ Usuario
 - DB protege datos tenant-scoped con filtro de repository y RLS.
 - Worker ejecuta efectos asíncronos, pero no inventa un tenant: todo job tenant-scoped transporta tenant ID y correlation ID.
 - Storage guarda bytes; metadata, autorización y auditoría viven en la plataforma.
-- El contrato OpenAPI describe la intención, no prueba que la ruta exista. Hay drift conocido; ver el addendum de `IMPLEMENTATION_PLAN.md`.
+- El contrato OpenAPI se verifica contra la tabla real de rutas Fastify; `pnpm openapi:check` falla ante drift de rutas, métodos o seguridad.

@@ -87,7 +87,7 @@ Esperado: bloqueo de `127.0.0.1`, `169.254.169.254`, rangos privados, DNS con me
 
 ## 9. Cierre (1 min)
 
-Mostrar `pnpm openapi:check` y `node scripts/check-docs-links.mjs`. Explicar el drift de contrato (`sku` vs `productId`, rutas del YAML no implementadas) y que el pase de OpenAPI lo corrige.
+Mostrar `pnpm openapi:check` y `node scripts/check-docs-links.mjs`. Explicar que el gate construye la app y compara la tabla real de rutas con OpenAPI 3.1; el hash es solo recordatorio de cambio intencional.
 
 ## Claims que NO se hacen
 
@@ -98,7 +98,7 @@ Mostrar `pnpm openapi:check` y `node scripts/check-docs-links.mjs`. Explicar el 
 - “Kubernetes/Terraform”: no hay manifests ni módulos en el árbol.
 - “Backup automático”: hay comando y drill manual; no hay cron desplegado.
 - “Métricas autenticadas en el API”: `/metrics` del API no tiene token; debe ir en red privada. El worker sí soporta `WORKER_METRICS_TOKEN`.
-- “OpenAPI como verdad ejecutable”: `openapi:check` valida sintaxis/hash, no rutas runtime.
+- “OpenAPI como verdad ejecutable”: `openapi:check` construye la app y falla si la tabla real de rutas, la seguridad o `Idempotency-Key` divergen del YAML; el hash solo recuerda cambios intencionales.
 
 ## Frases seguras
 

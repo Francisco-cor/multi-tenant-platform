@@ -6,25 +6,25 @@ Operations Hub B2B para organizaciones con múltiples sucursales. El proyecto pr
 
 Estado verificado el **2026-11-13** sobre `main` fusionado. Una fase solo se marca **Completa** si el código existe, sus pruebas pasan en CI y la documentación operativa está enlazada. Las fases con implementación real pero evidencia incompleta se marcan **Parcial**; no se presentan como cerradas.
 
-| Fase                               | Código   | Pruebas  | Docs     | Evidencia                                                                                           | Gaps conocidos                                                                                                                   |
-| ---------------------------------- | -------- | -------- | -------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| 0 Bootstrap                        | Completa | Completa | Completa | `pnpm install`, `pnpm build`, Compose de infraestructura                                            | Nada bloqueante para local                                                                                                       |
-| 1 Contratos y dominio              | Completa | Parcial  | Completa | `pnpm openapi:check`; esquemas Zod y dominio                                                        | El contrato OpenAPI tiene rutas no implementadas y `sku` vs `productId`; lo corrige el pase posterior de OpenAPI                 |
-| 2 Identidad, tenants y RBAC        | Completa | Parcial  | Completa | API + BFF web, sesiones y RBAC; tests unitarios                                                     | E2E opt-in; `dev-login` contra el store persistente no está validado (gap de sesión user-bound); no se usa como evidencia        |
-| 3 PostgreSQL, migraciones y RLS    | Completa | Completa | Completa | Migraciones 0001–0028, roles `platform_app`/`platform_auth`, RLS `FORCE`; integración en CI         | RLS depende de un login gestionado que asuma el rol sin `BYPASSRLS`                                                              |
-| 4 Órdenes                          | Parcial  | Parcial  | Parcial  | `orders`, creación/listado/consulta y saga de pago                                                  | Sin líneas de orden, precios capturados, export ni idempotencia HTTP cableada; `order_idempotency` existe pero la ruta no la usa |
-| 5 Inventario concurrente           | Completa | Completa | Completa | Reserva 15 min, `UPDATE ... WHERE available >= qty`, expiración `SKIP LOCKED`, test stock 1         | Los escenarios `k6` no se ejecutan en CI                                                                                         |
-| 6 Archivos S3                      | Completa | Completa | Completa | Presign → finalize → download, RLS, GC; integración MinIO en CI                                     | `presigned-upload` y el alias `presign` existen; no hay CDN ni antivirus                                                         |
-| 7 Outbox, BullMQ y workers         | Completa | Completa | Completa | Outbox transaccional, relay `SKIP LOCKED`, dedupe, leases, DLQ, readiness de worker                 | Retención existe como helper de DB; no hay scheduler de retención cableado                                                       |
-| 8 Pagos                            | Parcial  | Parcial  | Completa | `FakePaymentProvider`, saga, webhook HMAC y reconciler; `StripePaymentProvider` con tests unitarios | Stripe no está probado contra la API real ni en sandbox; no hay reembolsos                                                       |
-| 9 Webhooks y automatizaciones      | Completa | Parcial  | Completa | Endpoints, deliveries, replay, inbound dedupe, automatizaciones versionadas, egress con DNS pinning | Sin receptor real en CI ni prueba de entrega contra internet                                                                     |
-| 10 Cache, rate limit y resiliencia | Completa | Parcial  | Completa | Cache tenant-scoped, rate limit por IP/tenant/usuario/endpoint, breakers                            | Pruebas usan Redis/InMemory simulados; no hay Redis real en CI para cache                                                        |
-| 11 Auditoría y seguridad           | Parcial  | Completa | Completa | `audit_log` + `platform_audit_log`, roles separados, headers, SSRF, CI de seguridad                 | KMS/Vault pendiente; egress proxy pendiente; API `/metrics` sin token                                                            |
-| 12 Observabilidad                  | Completa | Completa | Completa | Trazas, logs redactados, RED metrics, alertas y dashboards                                          | Métricas del API deben restringirse por red; no hay autenticación en `/metrics`                                                  |
-| 13 Testing y fallos                | Parcial  | Parcial  | Completa | Vitest, integración CI, escenarios documentados                                                     | E2E opt-in, `k6` fuera de CI y varios escenarios son procedimientos, no evidencia reciente                                       |
-| 14 Migraciones y despliegues       | Parcial  | Parcial  | Completa | Expand-contract, migraciones por clase, runbook de rollback                                         | Sin rollout real de dos versiones ni clúster; contract diferido                                                                  |
-| 15 Docker, K8s y Terraform         | Parcial  | Parcial  | Parcial  | Imágenes no-root de API/web/worker y Compose; matriz Docker en CI                                   | No hay manifests Kubernetes ni Terraform en el árbol                                                                             |
-| 16 CI/CD y release                 | Parcial  | Completa | Parcial  | CI con calidad, unit, integración y seguridad                                                       | No hay pipeline de staging/producción, canary, ni release inmutable                                                              |
+| Fase                               | Código   | Pruebas  | Docs     | Evidencia                                                                                           | Gaps conocidos                                                                                                                                   |
+| ---------------------------------- | -------- | -------- | -------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 0 Bootstrap                        | Completa | Completa | Completa | `pnpm install`, `pnpm build`, Compose de infraestructura                                            | Nada bloqueante para local                                                                                                                       |
+| 1 Contratos y dominio              | Completa | Parcial  | Completa | `pnpm openapi:check`; esquemas Zod y dominio                                                        | Contrato OpenAPI 3.1 reconciliado y verificado contra la tabla real de rutas; quedan pruebas de contrato de todos los payloads fuera del alcance |
+| 2 Identidad, tenants y RBAC        | Completa | Parcial  | Completa | API + BFF web, sesiones y RBAC; tests unitarios                                                     | E2E opt-in; `dev-login` contra el store persistente no está validado (gap de sesión user-bound); no se usa como evidencia                        |
+| 3 PostgreSQL, migraciones y RLS    | Completa | Completa | Completa | Migraciones 0001–0028, roles `platform_app`/`platform_auth`, RLS `FORCE`; integración en CI         | RLS depende de un login gestionado que asuma el rol sin `BYPASSRLS`                                                                              |
+| 4 Órdenes                          | Parcial  | Parcial  | Parcial  | `orders`, creación/listado/consulta y saga de pago; `Idempotency-Key` cableada                      | Sin líneas de orden, precios capturados ni export                                                                                                |
+| 5 Inventario concurrente           | Completa | Completa | Completa | Reserva 15 min, `UPDATE ... WHERE available >= qty`, expiración `SKIP LOCKED`, test stock 1         | Los escenarios `k6` no se ejecutan en CI                                                                                                         |
+| 6 Archivos S3                      | Completa | Completa | Completa | Presign → finalize → download, RLS, GC; integración MinIO en CI                                     | `presigned-upload` y el alias `presign` existen; no hay CDN ni antivirus                                                                         |
+| 7 Outbox, BullMQ y workers         | Completa | Completa | Completa | Outbox transaccional, relay `SKIP LOCKED`, dedupe, leases, DLQ, readiness de worker                 | Retención existe como helper de DB; no hay scheduler de retención cableado                                                                       |
+| 8 Pagos                            | Parcial  | Parcial  | Completa | `FakePaymentProvider`, saga, webhook HMAC y reconciler; `StripePaymentProvider` con tests unitarios | Stripe no está probado contra la API real ni en sandbox; no hay reembolsos                                                                       |
+| 9 Webhooks y automatizaciones      | Completa | Parcial  | Completa | Endpoints, deliveries, replay, inbound dedupe, automatizaciones versionadas, egress con DNS pinning | Sin receptor real en CI ni prueba de entrega contra internet                                                                                     |
+| 10 Cache, rate limit y resiliencia | Completa | Parcial  | Completa | Cache tenant-scoped, rate limit por IP/tenant/usuario/endpoint, breakers                            | Pruebas usan Redis/InMemory simulados; no hay Redis real en CI para cache                                                                        |
+| 11 Auditoría y seguridad           | Parcial  | Completa | Completa | `audit_log` + `platform_audit_log`, roles separados, headers, SSRF, CI de seguridad                 | KMS/Vault pendiente; egress proxy pendiente; API `/metrics` sin token                                                                            |
+| 12 Observabilidad                  | Completa | Completa | Completa | Trazas, logs redactados, RED metrics, alertas y dashboards                                          | Métricas del API deben restringirse por red; no hay autenticación en `/metrics`                                                                  |
+| 13 Testing y fallos                | Parcial  | Parcial  | Completa | Vitest, integración CI, escenarios documentados                                                     | E2E opt-in, `k6` fuera de CI y varios escenarios son procedimientos, no evidencia reciente                                                       |
+| 14 Migraciones y despliegues       | Parcial  | Parcial  | Completa | Expand-contract, migraciones por clase, runbook de rollback                                         | Sin rollout real de dos versiones ni clúster; contract diferido                                                                                  |
+| 15 Docker, K8s y Terraform         | Parcial  | Parcial  | Parcial  | Imágenes no-root de API/web/worker y Compose; matriz Docker en CI                                   | No hay manifests Kubernetes ni Terraform en el árbol                                                                                             |
+| 16 CI/CD y release                 | Parcial  | Completa | Parcial  | CI con calidad, unit, integración y seguridad                                                       | No hay pipeline de staging/producción, canary, ni release inmutable                                                                              |
 
 Evidencia local reproducible:
 
@@ -82,7 +82,7 @@ pnpm test:unit           # Vitest unitario; falla si no se ejecuta ningún test
 pnpm test:integration    # integración por workspace (requiere servicios)
 pnpm test:e2e            # Playwright (opt-in; instala navegador)
 pnpm format:check        # formato reproducible
-pnpm openapi:check       # valida docs/api/openapi.yaml y hash drift (.openapi.hash)
+pnpm openapi:check       # valida OpenAPI 3.1 contra la tabla real de rutas Fastify; el hash es solo recordatorio
 node scripts/check-docs-links.mjs  # enlaces y rutas citadas en la documentación
 ```
 
@@ -112,11 +112,15 @@ La aplicación usa `DATABASE_ROLE=platform_app`; autenticación/credenciales usa
 
 ### Contrato OpenAPI
 
-`pnpm openapi:check` valida sintaxis, rutas mínimas y hash. No demuestra que cada ruta del YAML exista en el runtime. Diferencias conocidas al 2026-11-13:
+`pnpm openapi:check` es un gate de conformidad real:
 
-- `POST /v1/inventory/reserve` usa `productId` en la API; OpenAPI documenta `sku`.
-- OpenAPI publica `GET/POST /v1/organizations/{id}/members`, `POST /v1/inventory/reservations`, `/v1/me` y `/v1/webhooks/{id}/replay`; el runtime usa otras rutas o métodos.
-- El pase posterior de OpenAPI debe reconciliar el contrato; este documento no lo modifica.
+- construye la app Fastify con adaptadores en memoria (sin red) y compara cada método/ruta con `docs/api/openapi.yaml`; falla ante cualquier ruta documentada que no exista o cualquier ruta implementada sin documentar;
+- valida OpenAPI 3.1, `operationId` únicos, tags/descripciones, referencias internas y ausencia de `nullable`;
+- exige los esquemas `cookieAuth` (`platform_session`), `bearerAuth`, `apiKeyAuth` (`X-Api-Key`) y `webhookHmac`, y que toda operación protegida documente 401/403;
+- exige `Idempotency-Key` en `POST /v1/orders` y documenta el 202/400/401/404/409/503 del webhook de pagos;
+- imprime el hash de `docs/api/.openapi.hash` cuando cambia, solo como recordatorio de cambio intencional (no bloquea por sí mismo).
+
+La tabla de rutas se verifica también desde `apps/api/src/contract.test.ts`, que falla si la especificación y el runtime divergen y valida formas representativas de respuesta contra los esquemas. Los casos del propio gate viven en `scripts/check-openapi.test.mjs`.
 
 ## Estructura
 

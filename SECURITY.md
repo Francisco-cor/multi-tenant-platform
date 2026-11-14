@@ -31,7 +31,7 @@ No reportes vulnerabilidades mediante issues públicos ni incluyas secretos, tok
 - `helmet`: CSP `default-src 'self' object-src 'none' frame-ancestors 'none'`, COOP `same-origin`, CORP `same-origin`, `Referrer-Policy no-referrer`, `X-Content-Type-Options nosniff`, HSTS 1 año `includeSubDomains preload` solo en producción.
 - `cors` tenant-aware para `*.${TENANT_BASE_DOMAIN}`, `localhost` en dev y `WEB_PUBLIC_URL`; allowlist de headers `X-Webhook-*`, `X-Trace-Id`, `Traceparent`; expone `X-RateLimit-*`, `Retry-After`, `X-Cache`.
 - `bodyLimit` 1 MB global + 256 KB en auth/members; Zod `.strict()` en las entradas → `400 VALIDATION_ERROR` si hay claves extra.
-- `CSRF_STRICT=1` (o `NODE_ENV=production`) exige `Origin` o `X-Requested-With` para mutaciones con cookie. En local el default es `0` para tests.
+- `CSRF_STRICT=1` (o `NODE_ENV=production`) exige `Origin` o `Sec-Fetch-Site` para mutaciones con cookie; el token debe coincidir con la cookie `platform_csrf` y viajar en `X-CSRF-Token`. En local el default es `0` para tests.
 - Rate limit por IP 100/min, tenant 1000/min, usuario 200/min y límites por endpoint; breakers S3/OIDC/pagos.
 
 ## Validación CI
@@ -39,6 +39,7 @@ No reportes vulnerabilidades mediante issues públicos ni incluyas secretos, tok
 `.github/workflows/ci.yml`:
 
 - `quality`: `format:check`, `lint`, `typecheck`, `build`, `test:scripts`, `openapi:check`, `migrate:check`, `docker compose config`.
+- `openapi:check` construye la app con adaptadores en memoria y falla si el YAML y la tabla real de rutas Fastify divergen, si una operación protegida no documenta 401/403, si falta `Idempotency-Key` en `POST /v1/orders` o si falta un esquema de seguridad. El hash de `docs/api/.openapi.hash` es solo un recordatorio de cambio intencional.
 - `unit`: `pnpm test:coverage`; falla si no se ejecuta ningún test.
 - `integration`: PostgreSQL, Redis y MinIO con imágenes pinneadas; migraciones, RLS y suites de API/worker.
 - `security`: `pnpm audit --prod --audit-level=high`, gitleaks, Semgrep (`p/security-audit`, `p/secrets`, `p/owasp-top-ten`) y Trivy `CRITICAL,HIGH`.

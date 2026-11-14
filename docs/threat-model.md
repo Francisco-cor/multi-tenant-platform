@@ -119,7 +119,7 @@ La matriz completa está en `docs/permissions-matrix.md` y su fuente es `ROLE_PE
 | Stripe no probado en vivo               | Media | Alto    | Adapter con tests unitarios y timeout                                                                           | Sin sandbox/live; no hay reembolsos                                                  |
 | Audit tampering por superusuario        | Baja  | Alto    | Trigger + `REVOKE`; `platform_auditor` separado                                                                 | Un superusuario puede `DISABLE TRIGGER`; requiere control de acceso a DB             |
 | Hot tenant                              | Media | Medio   | Rate limits + cache + breakers                                                                                  | Fixed window; no hay aislamiento de pool por tenant                                  |
-| Contrato OpenAPI drift                  | Alta  | Medio   | `openapi:check` valida sintaxis/hash                                                                            | No valida rutas runtime; lo corrige el pase de OpenAPI                               |
+| Contrato OpenAPI drift                  | Alta  | Bajo    | `openapi:check` compara la tabla real de rutas Fastify, seguridad y `Idempotency-Key`                           | Requiere construir la app en el gate; el hash es solo recordatorio                   |
 
 ## 5. Checklist de controles verificables
 
