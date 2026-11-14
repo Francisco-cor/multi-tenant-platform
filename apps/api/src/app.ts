@@ -102,6 +102,8 @@ import {
   PersistentFeatureFlagStore,
   type FeatureFlagStore,
 } from './feature-flag-store.js';
+import { redactRequestUrl } from './request-log.js';
+import { createApiLoggerOptions } from './logging.js';
 
 const SESSION_COOKIE = 'platform_session';
 const CSRF_COOKIE = 'platform_csrf';
@@ -774,26 +776,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   });
 
   const app = Fastify({
-    logger: {
-      level: (process.env.LOG_LEVEL as string) ?? 'info',
-      redact: {
-        paths: [
-          'req.headers.cookie',
-          'req.headers.authorization',
-          'req.headers["x-api-key"]',
-          'req.headers["x-webhook-signature"]',
-          '*.secret',
-          '*.password',
-          '*.token',
-          '*.authorization',
-          '*.cookie',
-          'headers.cookie',
-          'headers.authorization',
-        ],
-        censor: '[REDACTED]',
-        remove: false,
-      },
-    },
+    logger: createApiLoggerOptions((process.env.LOG_LEVEL as string) ?? 'info'),
     bodyLimit: GLOBAL_BODY_LIMIT,
     // Only trust forwarded client IP/host headers when the process is behind
     // an explicitly configured reverse proxy. Boolean `true` is rejected in
@@ -913,7 +896,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
           traceId: corr?.traceId,
           tenantHash: corr?.tenantHash,
           method: request.method,
-          url: request.url,
+          url: redactRequestUrl(request.url),
           route,
           statusCode: reply.statusCode,
           durationMs: duration,

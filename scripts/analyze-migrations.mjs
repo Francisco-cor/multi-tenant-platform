@@ -248,9 +248,7 @@ export function analyzeMigration({ kind, name, raw }) {
 
   // `CREATE UNIQUE INDEX` is still a CREATE INDEX; the old pattern missed the
   // UNIQUE keyword and reported a non-concurrent index that did not exist.
-  const createIndex = maskedStatements.filter((s) =>
-    /create\s+(?:unique\s+)?index/i.test(s.sql),
-  );
+  const createIndex = maskedStatements.filter((s) => /create\s+(?:unique\s+)?index/i.test(s.sql));
   const createTable = maskedStatements.filter((s) => /create\s+table/i.test(s.sql));
   const addColumn = maskedStatements.filter((s) => /\badd\s+column\b/i.test(s.sql));
   const updates = maskedStatements.filter((s) => /\bupdate\s+[a-z0-9_."]+\s+set\b/i.test(s.sql));
