@@ -66,15 +66,13 @@ En tests unitarios existe un store en memoria; no es el camino de producción y 
 
 ## 5. Demostración local
 
-`dev-login` solo conoce los usuarios del store en memoria (`user-alice`, `user-acme-only`, `user-contoso-only`). Si la API arranca con `DATABASE_URL` (el default de `.env`), usa `PersistentIdentityStore` y esos IDs no existen: hay que usar los UUID del seed o un login OIDC.
+`dev-login` está pensado para el store en memoria (`user-alice`, `user-acme-only`, `user-contoso-only`) y para tests unitarios. **No se ha validado contra `PersistentIdentityStore`**: el camino persistente usa `platform_app` para crear sesiones y la policy `sessions_user_bound` exige `app.user_id`; el cableado a `platform_auth`/`withAuthTransaction` es un gap conocido. No usar `dev-login` contra una API con `DATABASE_URL` como evidencia.
 
-Con seed (`pnpm --filter @platform/db seed` en una base vacía):
+Para una demo verificable:
 
 1. Arrancar la infraestructura: `docker compose up -d postgres redis`.
-2. Arrancar desde la raíz para cargar `.env`: `pnpm dev`.
-3. `POST /v1/auth/dev-login {"userId":"00000000-0000-4000-a000-000000000001"}` (Alice, owner de `acme`).
-4. Consultar `GET /v1/context` con `Host: acme.app.localhost:4000`: responde `200`.
-5. Repetir con el usuario de Contoso (`...0002`) y `Host: contoso.app.localhost:4000`: responde `200`; con la sesión de Alice responde `403`.
-6. Para el flujo de varios tenants, usar un usuario con dos membresías o crear la segunda membership; el primer contexto responde `409 ORGANIZATION_SELECTION_REQUIRED` y hay que llamar a `POST /v1/auth/switch-organization`.
+2. Aplicar migraciones: `pnpm --filter @platform/db migrate`.
+3. Ejecutar `pnpm --filter @platform/api test src/fase13.isolation.test.ts` (store en memoria) y `pnpm --filter @platform/db test:integration` con `RUN_DB_INTEGRATION=1` (RLS real, requiere PostgreSQL).
+4. Para el flujo de navegador, usar OIDC o el store en memoria en una API aislada; no presentar `dev-login` persistente como funcional.
 
-Sin `DATABASE_URL` (tests unitarios) el store en memoria permite `user-alice`, `user-acme-only` y `user-contoso-only`. No se deben usar datos seed ni `dev-login` fuera de desarrollo/test. Para el flujo de navegador, usar `acme.app.localhost:3000` y el BFF.
+No se deben usar datos seed ni `dev-login` fuera de desarrollo/test. La topología de cookie y BFF se describe en las secciones 1–3.

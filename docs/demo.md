@@ -34,21 +34,15 @@ Abrir `README.md` → tabla de fases. Mostrar:
 
 ## 3. Aislamiento A/B (3 min)
 
-Usar los UUID del seed (`00000000-0000-4000-a000-000000000001` Alice/acme, `...0002` Bob/contoso):
+Ejecutar la suite que crea datos espejo en dos tenants y verifica que A no ve B:
 
 ```bash
-ALICE=$(curl -s -c /tmp/alice -X POST http://localhost:4000/v1/auth/dev-login \
-  -H 'content-type: application/json' \
-  -d '{"userId":"00000000-0000-4000-a000-000000000001"}' | jq -r .user.id)
-
-curl -s http://localhost:4000/v1/context -H 'host: acme.app.localhost:4000' -b /tmp/alice | jq '.organization.slug'
-# -> "acme"
-
-curl -s http://localhost:4000/v1/branches -H 'host: acme.app.localhost:4000' -b /tmp/alice | jq '.data | length'
-# -> >=1
+pnpm --filter @platform/api test src/fase13.isolation.test.ts
 ```
 
-Crear una sesión de Bob y pedir un recurso de Acme: debe ser `403/404` sin revelar existencia. Mostrar que `x-tenant-id` no cambia el tenant.
+Esperado: PASS; incluye contexto de dos tenants, `x-tenant-id` rechazado y recursos tenant-scoped. Para RLS real de PostgreSQL, mostrar el job `integration` de CI o ejecutar `RUN_DB_INTEGRATION=1 pnpm --filter @platform/db test:integration` con PostgreSQL.
+
+No usar `dev-login` contra la API persistente como demo: el `PersistentIdentityStore` no está cableado al camino de sesión user-bound (`platform_auth`/`withAuthTransaction`) y no se ha validado. El `dev-login` del store en memoria sigue siendo válido para tests unitarios.
 
 ## 4. RBAC (2 min)
 
