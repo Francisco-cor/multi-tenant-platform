@@ -55,9 +55,7 @@ export function registerSecurity(app: FastifyInstance, options: SecurityOptions)
     referrerPolicy: { policy: 'no-referrer' },
     noSniff: true,
     xssFilter: true,
-    hsts: requireHttps
-      ? { maxAge: 31_536_000, includeSubDomains: true, preload: true }
-      : false,
+    hsts: requireHttps ? { maxAge: 31_536_000, includeSubDomains: true, preload: true } : false,
   });
 
   void app.register(cors, {

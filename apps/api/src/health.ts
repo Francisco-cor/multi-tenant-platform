@@ -185,7 +185,8 @@ async function checkRls(): Promise<HealthCheckResult> {
   const sql = getSharedSql();
   if (!sql) return { name: 'rls', status: 'skip' };
   const role = process.env.DATABASE_ROLE ?? 'platform_app';
-  if (!/^[a-z_][a-z0-9_]*$/i.test(role)) return { name: 'rls', status: 'fail', error: 'role_invalid' };
+  if (!/^[a-z_][a-z0-9_]*$/i.test(role))
+    return { name: 'rls', status: 'fail', error: 'role_invalid' };
   const start = Date.now();
   try {
     const rows = await withTimeout(

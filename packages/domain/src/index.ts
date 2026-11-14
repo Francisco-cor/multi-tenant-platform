@@ -156,7 +156,6 @@ export function requiresOwnerApproval(currentRole: Role, nextRole: Role): boolea
   return currentRole === 'owner' || nextRole === 'owner';
 }
 
-
 export * from './payments.js';
 export * from './automations.js';
 export * from './feature-flags.js';

@@ -295,7 +295,8 @@ export async function createCache(redisUrl?: string): Promise<Cache> {
   if (!redisUrl) return new InMemoryCache();
   const mod = await import('ioredis').catch(() => null);
   if (!mod) throw new Error('redis_client_unavailable');
-  const Redis = (mod as unknown as { default: new (url: string, opts: unknown) => unknown }).default;
+  const Redis = (mod as unknown as { default: new (url: string, opts: unknown) => unknown })
+    .default;
   const client = new Redis(redisUrl, {
     lazyConnect: false,
     connectTimeout: 2000,

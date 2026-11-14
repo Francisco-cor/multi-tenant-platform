@@ -252,7 +252,6 @@ export async function withAuthBootstrapTransaction<T>(
   });
 }
 
-
 /**
  * Auth-scoped transaction for `sessions`/`users`/login flows. Runs as
  * `platform_auth`, which is the only role with DML on the credential tables,
