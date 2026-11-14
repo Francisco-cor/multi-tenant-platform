@@ -246,7 +246,9 @@ export function analyzeMigration({ kind, name, raw }) {
     sql: maskSql(statement),
   }));
 
-  const createIndex = maskedStatements.filter((s) => /create\s+index/i.test(s.sql));
+  // `CREATE UNIQUE INDEX` is still a CREATE INDEX; the old pattern missed the
+  // UNIQUE keyword and reported a non-concurrent index that did not exist.
+  const createIndex = maskedStatements.filter((s) => /create\s+(?:unique\s+)?index/i.test(s.sql));
   const createTable = maskedStatements.filter((s) => /create\s+table/i.test(s.sql));
   const addColumn = maskedStatements.filter((s) => /\badd\s+column\b/i.test(s.sql));
   const updates = maskedStatements.filter((s) => /\bupdate\s+[a-z0-9_."]+\s+set\b/i.test(s.sql));
@@ -264,7 +266,7 @@ export function analyzeMigration({ kind, name, raw }) {
       );
     }
     for (const statement of createIndex) {
-      if (!/create\s+index\s+concurrently/i.test(statement.sql)) {
+      if (!/create\s+(?:unique\s+)?index\s+concurrently/i.test(statement.sql)) {
         errors.push(
           `CREATE INDEX without CONCURRENTLY: "${statement.raw.trim().slice(0, 120)}" blocks writes`,
         );
@@ -277,7 +279,7 @@ export function analyzeMigration({ kind, name, raw }) {
     }
   } else {
     for (const statement of createIndex) {
-      if (!/create\s+index\s+concurrently/i.test(statement.sql)) {
+      if (!/create\s+(?:unique\s+)?index\s+concurrently/i.test(statement.sql)) {
         if (!/if\s+not\s+exists/i.test(statement.sql)) {
           warnings.push(
             `creates index without IF NOT EXISTS — add for idempotence: "${statement.raw.trim().slice(0, 100)}"`,

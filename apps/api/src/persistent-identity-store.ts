@@ -21,6 +21,7 @@ import type {
   IdentityStore,
   InvitationRecord,
   MembershipRecord,
+  MembershipUserView,
   OrganizationRecord,
   SessionRecord,
   StoreTenantContext,
@@ -432,6 +433,55 @@ export class PersistentIdentityStore implements IdentityStore {
         order by created_at, id
       `);
       return rows.map(mapMembership);
+    });
+  }
+
+  public async listMembershipsWithUsers(
+    context: StoreTenantContext,
+  ): Promise<MembershipUserView[]> {
+    // tenant_users is the tenant-scoped projection of the global users table
+    // (the tenant role cannot read oidc columns). One join replaces the
+    // per-member getUser round trips.
+    return this.withTenant(context, async (transaction) => {
+      const rows = await transaction.execute<
+        MembershipRow & {
+          user_ref: string;
+          email: string;
+          display_name: string;
+          user_active: boolean;
+        }
+      >(sql`
+        select
+          m.id,
+          m.tenant_id,
+          m.user_id,
+          m.role,
+          m.active,
+          u.id as user_ref,
+          u.email,
+          u.display_name,
+          u.active as user_active
+        from memberships m
+        left join tenant_users u on u.membership_id = m.id and u.id = m.user_id
+        where m.tenant_id = ${context.tenantId}::uuid
+          and m.active = true
+        order by m.created_at, m.id
+      `);
+      return rows.map((row) => {
+        const membership = mapMembership(row);
+        // A membership whose user row disappeared is still returned (the
+        // in-memory adapter behaves the same) but without a user projection.
+        if (!row.user_ref) return { membership, user: null };
+        return {
+          membership,
+          user: {
+            id: row.user_ref,
+            email: row.email,
+            displayName: row.display_name,
+            status: row.user_active ? 'active' : 'suspended',
+          },
+        };
+      });
     });
   }
 

@@ -98,10 +98,9 @@ export const tenantFeatureFlags = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (table) => [
-    // primary key is composite tenant_id+flag via SQL CHECK in migration; drizzle uses explicit pk in DDL via migration file
-    index('tenant_feature_flags_tenant_idx').on(table.tenantId),
-  ],
+  // Primary key is composite (tenant_id, flag) in the migration; this model
+  // intentionally declares no index because the PK already covers tenant_id.
+  () => [],
 );
 
 export const products = pgTable(

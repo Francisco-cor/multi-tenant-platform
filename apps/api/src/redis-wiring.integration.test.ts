@@ -37,6 +37,41 @@ suite('F-07/F-16 Redis wiring across replicas', () => {
     await (limiterB as unknown as { close?: () => Promise<void> }).close?.();
   });
 
+  it('sets a TTL atomically and repairs an immortal rate-limit key', async () => {
+    const redisUrl = process.env.REDIS_URL;
+    if (!redisUrl) throw new Error('REDIS_URL required');
+    const { default: Redis } = await import('ioredis');
+    const client = new Redis(redisUrl, { maxRetriesPerRequest: 1 });
+    const limiter = await createRateLimiter(redisUrl);
+    const key = `ip:ttl-${randomUUID()}`;
+    const bucket = Math.floor(Date.now() / 60_000);
+    const redisKey = `rl:${key}:${bucket}`;
+
+    expect((await limiter.check(key, { windowMs: 60_000, max: 100 })).allowed).toBe(true);
+    expect(await client.pttl(redisKey)).toBeGreaterThan(0);
+
+    // A key left behind by the old INCR-then-EXPIRE code path has no TTL.
+    await client.set(redisKey, '7');
+    const repaired = await limiter.check(key, { windowMs: 60_000, max: 100 });
+    expect(repaired.allowed).toBe(true);
+    expect(repaired.remaining).toBe(92);
+    expect(await client.pttl(redisKey)).toBeGreaterThan(0);
+
+    // Concurrent requests must all be counted and the key must never be
+    // left without an expiry, even under a burst.
+    await client.del(redisKey);
+    const results = await Promise.all(
+      Array.from({ length: 25 }, () => limiter.check(key, { windowMs: 60_000, max: 100 })),
+    );
+    expect(results.every((result) => result.allowed)).toBe(true);
+    expect(Number(await client.get(redisKey))).toBe(25);
+    expect(await client.pttl(redisKey)).toBeGreaterThan(0);
+
+    await client.del(redisKey);
+    await client.quit();
+    await limiter.close();
+  });
+
   it('invalidates a warm tenant cache on another app replica', async () => {
     const redisUrl = process.env.REDIS_URL;
     if (!redisUrl) throw new Error('REDIS_URL required');

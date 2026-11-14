@@ -1,5 +1,5 @@
 import postgres from 'postgres';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createDatabase, type DatabaseHandle } from '@platform/db';
 import { buildApp } from './app.js';
 import { PersistentIdentityStore } from './persistent-identity-store.js';
@@ -24,6 +24,7 @@ suite('persistent API tenant isolation', () => {
   let identityStore: PersistentIdentityStore;
   const userA = crypto.randomUUID();
   const userB = crypto.randomUUID();
+  const userC = crypto.randomUUID();
   const tenantA = crypto.randomUUID();
   const tenantB = crypto.randomUUID();
 
@@ -36,7 +37,8 @@ suite('persistent API tenant isolation', () => {
       insert into users (id, oidc_issuer, oidc_subject, email, display_name)
       values
         (${userA}, 'http://integration.test/issuer', ${`subject-${userA}`}, ${`a-${userA}@example.test`}, 'User A'),
-        (${userB}, 'http://integration.test/issuer', ${`subject-${userB}`}, ${`b-${userB}@example.test`}, 'User B')
+        (${userB}, 'http://integration.test/issuer', ${`subject-${userB}`}, ${`b-${userB}@example.test`}, 'User B'),
+        (${userC}, 'http://integration.test/issuer', ${`subject-${userC}`}, ${`c-${userC}@example.test`}, 'User C')
     `;
     await admin`
       insert into organizations (id, slug, name)
@@ -44,7 +46,7 @@ suite('persistent API tenant isolation', () => {
     `;
     await admin`
       insert into memberships (tenant_id, user_id, role)
-      values (${tenantA}, ${userA}, 'owner'), (${tenantB}, ${userB}, 'owner')
+      values (${tenantA}, ${userA}, 'owner'), (${tenantB}, ${userB}, 'owner'), (${tenantB}, ${userC}, 'operator')
     `;
     await admin`
       insert into branches (tenant_id, slug, name)
@@ -62,11 +64,11 @@ suite('persistent API tenant isolation', () => {
       // audit_log is append-only; integration cleanup runs as owner and
       // re-enables the guard immediately.
       await admin`alter table audit_log disable trigger audit_log_no_delete`;
-      await admin`delete from audit_log where actor_user_id in (${userA}, ${userB})`;
+      await admin`delete from audit_log where actor_user_id in (${userA}, ${userB}, ${userC})`;
       await admin`alter table audit_log enable trigger audit_log_no_delete`;
-      await admin`delete from platform_audit_log where actor_user_id in (${userA}, ${userB})`;
+      await admin`delete from platform_audit_log where actor_user_id in (${userA}, ${userB}, ${userC})`;
       await admin`delete from organizations where id in (${tenantA}, ${tenantB})`;
-      await admin`delete from users where id in (${userA}, ${userB})`;
+      await admin`delete from users where id in (${userA}, ${userB}, ${userC})`;
       await admin.end({ timeout: 5 });
     }
   });
@@ -137,6 +139,48 @@ suite('persistent API tenant isolation', () => {
 
     expect(tenantBBranches.statusCode).toBe(200);
     expect(tenantBBranches.json().data).toEqual([expect.objectContaining({ name: 'B branch' })]);
+  });
+
+  it('resolves the member page with one joined query and no cross-tenant rows', async () => {
+    const loginA = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/dev-login',
+      payload: { userId: userA },
+    });
+    const cookieA = sessionCookie(loginA);
+    const loginB = await app.inject({
+      method: 'POST',
+      url: '/v1/auth/dev-login',
+      payload: { userId: userB },
+    });
+    const cookieB = sessionCookie(loginB);
+
+    const getUserSpy = vi.spyOn(PersistentIdentityStore.prototype, 'getUser');
+    getUserSpy.mockClear();
+    const membersA = await app.inject({
+      method: 'GET',
+      url: '/v1/members',
+      headers: { host: `api-a-${tenantA}.app.localhost`, cookie: cookieA },
+    });
+    expect(membersA.statusCode).toBe(200);
+    const rowsA = membersA.json().data as Array<{ userId: string; email: string }>;
+    expect(rowsA.map((row) => row.userId)).toEqual([userA]);
+    expect(rowsA[0]?.email).toBe(`a-${userA}@example.test`);
+    // Session auth re-reads one user; the two tenant-B members would add two
+    // more lookups under the old N+1 code path.
+    expect(getUserSpy).toHaveBeenCalledTimes(1);
+
+    const membersB = await app.inject({
+      method: 'GET',
+      url: '/v1/members',
+      headers: { host: `api-b-${tenantB}.app.localhost`, cookie: cookieB },
+    });
+    expect(membersB.statusCode).toBe(200);
+    expect(
+      (membersB.json().data as Array<{ userId: string }>).map((row) => row.userId).sort(),
+    ).toEqual([userB, userC].sort());
+    expect(getUserSpy).toHaveBeenCalledTimes(2);
+    getUserSpy.mockRestore();
   });
 
   it('enforces absolute session expiry and rotates the refresh token', async () => {

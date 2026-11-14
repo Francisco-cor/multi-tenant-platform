@@ -122,6 +122,25 @@ export class InMemoryInventoryStore implements InventoryStore {
   }
 
   async upsertProduct(product: ProductRecord): Promise<void> {
+    // Mirror the SQL upsert target `(tenant_id, sku)`: an existing SKU keeps
+    // its original id, so callers cannot create a second product for the same
+    // SKU by passing a fresh id. A conflicting primary key is an error in
+    // Postgres and is rejected here too.
+    const bySku = [...this.products.values()].find(
+      (candidate) => candidate.tenantId === product.tenantId && candidate.sku === product.sku,
+    );
+    if (bySku) {
+      this.products.set(bySku.id, {
+        ...bySku,
+        name: product.name,
+        active: product.active,
+      });
+      return;
+    }
+    const byId = this.products.get(product.id);
+    if (byId && (byId.tenantId !== product.tenantId || byId.sku !== product.sku)) {
+      throw new Error('product_id_conflict');
+    }
     this.products.set(product.id, product);
   }
 

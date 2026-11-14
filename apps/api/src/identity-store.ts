@@ -74,8 +74,17 @@ export type AuditAction =
   | 'invitation.accepted'
   | 'organization.created'
   | 'organization.switched'
+  | 'branch.created'
+  | 'branch.updated'
+  | 'branch.deleted'
   | 'membership.role_changed'
   | 'membership.removed'
+  | 'inventory.reserved'
+  | 'inventory.adjust'
+  | 'inventory.released'
+  | 'file.finalized'
+  | 'file.expired'
+  | 'file.deleted'
   | 'order.created'
   | 'order.paid'
   | 'payment.created'
@@ -140,6 +149,16 @@ export interface CreateInvitationResult {
   rawToken: string;
 }
 
+export interface MembershipUserView {
+  membership: MembershipRecord;
+  user: {
+    id: string;
+    email: string;
+    displayName: string;
+    status: UserStatus;
+  } | null;
+}
+
 export interface IdentityStore {
   getUser(userId: string): UserRecord | PromiseLike<UserRecord | null> | null;
   upsertOidcUser(identity: OidcIdentity): UserRecord | PromiseLike<UserRecord>;
@@ -168,6 +187,14 @@ export interface IdentityStore {
   listMembershipsForOrganization(
     context: StoreTenantContext,
   ): MembershipRecord[] | PromiseLike<MembershipRecord[]>;
+  /**
+   * Memberships plus the member's display projection in one shot. Persistent
+   * adapters must resolve all users with a single tenant-scoped query instead
+   * of one lookup per member (N+1).
+   */
+  listMembershipsWithUsers(
+    context: StoreTenantContext,
+  ): MembershipUserView[] | PromiseLike<MembershipUserView[]>;
   listBranches(context: StoreTenantContext): BranchRecord[] | PromiseLike<BranchRecord[]>;
   createBranch?(
     context: StoreTenantContext,
@@ -455,6 +482,25 @@ export class InMemoryIdentityStore {
       (membership) =>
         membership.organizationId === organizationId && membership.status !== 'removed',
     );
+  }
+
+  listMembershipsWithUsers(
+    contextOrOrganizationId: StoreTenantContext | string,
+  ): MembershipUserView[] {
+    return this.listMembershipsForOrganization(contextOrOrganizationId).map((membership) => {
+      const user = this.users.get(membership.userId) ?? null;
+      return {
+        membership,
+        user: user
+          ? {
+              id: user.id,
+              email: user.email,
+              displayName: user.displayName,
+              status: user.status,
+            }
+          : null,
+      };
+    });
   }
 
   listBranches(contextOrOrganizationId: StoreTenantContext | string): BranchRecord[] {

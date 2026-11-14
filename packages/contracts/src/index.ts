@@ -14,11 +14,19 @@ export const ErrorCodeSchema = z.enum([
   'FORBIDDEN',
   'NOT_FOUND',
   'CONFLICT',
+  'GONE',
   'VALIDATION_ERROR',
   'RATE_LIMITED',
+  'PAYLOAD_TOO_LARGE',
   'DEPENDENCY_UNAVAILABLE',
   'TENANT_REQUIRED',
   'ORGANIZATION_SELECTION_REQUIRED',
+  'CSRF_REQUIRED',
+  'CSRF_ORIGIN_DENIED',
+  'CSRF_TOKEN_INVALID',
+  'KILL_SWITCH',
+  'WEBHOOK_NOT_CONFIGURED',
+  'METRICS_NOT_CONFIGURED',
   'INTERNAL_ERROR',
 ]);
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
@@ -32,6 +40,26 @@ export const ApiErrorSchema = z.object({
   }),
 });
 export type ApiError = z.infer<typeof ApiErrorSchema>;
+
+/**
+ * Acknowledgement body for `POST /v1/webhooks/payments`.
+ *
+ * `unresolved` is a retryable 202: the event was stored but the current local
+ * state machine cannot apply it (for example a `paid` after `refunded`). The
+ * provider must retry; the row stays unprocessed so a later retry re-evaluates
+ * it instead of being deduplicated as a no-op.
+ */
+export const PaymentWebhookResponseSchema = z.discriminatedUnion('status', [
+  z.object({ status: z.literal('processed'), eventId: z.string().min(1) }),
+  z.object({ status: z.literal('already_processed'), eventId: z.string().min(1) }),
+  z.object({ status: z.literal('ignored'), eventId: z.string().min(1) }),
+  z.object({
+    status: z.literal('unresolved'),
+    eventId: z.string().min(1),
+    reason: z.string().min(1),
+  }),
+]);
+export type PaymentWebhookResponse = z.infer<typeof PaymentWebhookResponseSchema>;
 
 export const CursorPageQuerySchema = z.object({
   cursor: z.string().min(1).optional(),

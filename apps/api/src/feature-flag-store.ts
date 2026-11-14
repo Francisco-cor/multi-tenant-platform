@@ -8,6 +8,7 @@ export interface FlagRecord extends Record<string, unknown> {
   payload: Record<string, unknown>;
   updatedAt: string;
   createdAt: string;
+  updatedBy?: string | null;
 }
 
 export interface FeatureFlagStore {
@@ -42,18 +43,22 @@ export class InMemoryFeatureFlagStore implements FeatureFlagStore {
     flag: string,
     enabled: boolean,
     payload: Record<string, unknown> = {},
-    _updatedBy?: string,
+    updatedBy?: string,
   ): Promise<FlagRecord> {
-    void _updatedBy;
     if (!/^[a-z0-9_]{3,64}$/.test(flag)) throw new Error('flag_name_invalid');
     if (!this.store.has(context.tenantId)) this.store.set(context.tenantId, new Map());
+    const existing = this.store.get(context.tenantId)!.get(flag);
+    const now = new Date().toISOString();
     const rec: FlagRecord = {
       tenantId: context.tenantId,
       flag,
       enabled,
       payload,
-      updatedAt: new Date().toISOString(),
-      createdAt: new Date().toISOString(),
+      // A flag's creation time is immutable; the previous implementation reset
+      // it on every update, so `createdAt === updatedAt` told operators nothing.
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now,
+      updatedBy: updatedBy ?? context.userId ?? existing?.updatedBy ?? null,
     };
     this.store.get(context.tenantId)!.set(flag, rec);
     return rec;
@@ -97,6 +102,7 @@ export class PersistentFeatureFlagStore implements FeatureFlagStore {
       payload,
       updatedAt: row.updatedAt,
       createdAt: row.createdAt,
+      updatedBy: row.updatedBy ?? null,
     };
   }
 
@@ -107,7 +113,7 @@ export class PersistentFeatureFlagStore implements FeatureFlagStore {
   async list(context: TenantRepositoryContext): Promise<FlagRecord[]> {
     const rows = await withTenantTransaction(this.db, context, async (tx) =>
       tx.execute<FlagRecord & { payload_raw?: string }>(
-        sql`select tenant_id as "tenantId", flag, enabled, payload::text as payload_raw, updated_at as "updatedAt", created_at as "createdAt" from tenant_feature_flags where tenant_id = ${context.tenantId}::uuid order by flag`,
+        sql`select tenant_id as "tenantId", flag, enabled, payload::text as payload_raw, updated_at as "updatedAt", created_at as "createdAt", updated_by as "updatedBy" from tenant_feature_flags where tenant_id = ${context.tenantId}::uuid order by flag`,
       ),
     );
     return rows.map((row) => this.mapRow(row));
@@ -116,7 +122,7 @@ export class PersistentFeatureFlagStore implements FeatureFlagStore {
   async get(context: TenantRepositoryContext, flag: string): Promise<FlagRecord | null> {
     const rows = await withTenantTransaction(this.db, context, async (tx) =>
       tx.execute<FlagRecord & { payload_raw?: string }>(
-        sql`select tenant_id as "tenantId", flag, enabled, payload::text as payload_raw, updated_at as "updatedAt", created_at as "createdAt" from tenant_feature_flags where tenant_id = ${context.tenantId}::uuid and flag = ${flag} limit 1`,
+        sql`select tenant_id as "tenantId", flag, enabled, payload::text as payload_raw, updated_at as "updatedAt", created_at as "createdAt", updated_by as "updatedBy" from tenant_feature_flags where tenant_id = ${context.tenantId}::uuid and flag = ${flag} limit 1`,
       ),
     );
     return rows[0] ? this.mapRow(rows[0]) : null;
@@ -127,16 +133,15 @@ export class PersistentFeatureFlagStore implements FeatureFlagStore {
     flag: string,
     enabled: boolean,
     payload: Record<string, unknown> = {},
-    _updatedBy?: string,
+    updatedBy?: string,
   ): Promise<FlagRecord> {
-    void _updatedBy;
     if (!/^[a-z0-9_]{3,64}$/.test(flag)) throw new Error('flag_name_invalid');
     const rows = await withTenantTransaction(this.db, context, async (tx) =>
       tx.execute<FlagRecord & { payload_raw?: string }>(sql`
         insert into tenant_feature_flags (tenant_id, flag, enabled, payload, updated_by)
-        values (${context.tenantId}::uuid, ${flag}, ${enabled}, ${JSON.stringify(payload)}::jsonb, ${context.userId ?? null}::uuid)
+        values (${context.tenantId}::uuid, ${flag}, ${enabled}, ${JSON.stringify(payload)}::jsonb, ${updatedBy ?? context.userId ?? null}::uuid)
         on conflict (tenant_id, flag) do update set enabled = excluded.enabled, payload = excluded.payload, updated_at = now(), updated_by = excluded.updated_by
-        returning tenant_id as "tenantId", flag, enabled, payload::text as payload_raw, updated_at as "updatedAt", created_at as "createdAt"
+        returning tenant_id as "tenantId", flag, enabled, payload::text as payload_raw, updated_at as "updatedAt", created_at as "createdAt", updated_by as "updatedBy"
       `),
     );
     const row = rows[0];

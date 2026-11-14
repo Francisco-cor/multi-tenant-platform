@@ -5,6 +5,7 @@ import {
   EventEnvelopeSchema,
   getEventContract,
   OrganizationSchema,
+  PaymentWebhookResponseSchema,
   supportsEventPayloadVersion,
   validateEventEnvelope,
 } from './index.js';
@@ -27,6 +28,26 @@ describe('HTTP contracts', () => {
         error: { code: 'NOT_FOUND', message: 'Not found', requestId: 'req-123' },
       }).error.requestId,
     ).toBe('req-123');
+  });
+
+  it('documents every payment webhook acknowledgement including unresolved 202', () => {
+    expect(PaymentWebhookResponseSchema.parse({ status: 'processed', eventId: 'evt_1' })).toEqual({
+      status: 'processed',
+      eventId: 'evt_1',
+    });
+    expect(
+      PaymentWebhookResponseSchema.parse({
+        status: 'unresolved',
+        eventId: 'evt_1',
+        reason: 'invalid_transition',
+      }).status,
+    ).toBe('unresolved');
+    expect(() =>
+      PaymentWebhookResponseSchema.parse({ status: 'unresolved', eventId: 'evt_1' }),
+    ).toThrow();
+    expect(() =>
+      PaymentWebhookResponseSchema.parse({ status: 'already_processed', eventId: 'evt_1' }),
+    ).not.toThrow();
   });
 
   it('keeps event versions explicit across API, relay and worker', () => {
