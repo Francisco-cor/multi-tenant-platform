@@ -163,6 +163,21 @@ suite('financial correctness under RLS (orders, webhooks, DLQ, owner race)', () 
       where tenant_id = ${tenantId} and key = ${key}
     `;
     expect(idem[0]?.count).toBe('1');
+
+    // Concurrent duplicates: the unique (tenant, key) index serializes them.
+    const concurrentKey = `fin-idem-concurrent-${randomUUID()}`;
+    const [c1, c2] = await Promise.all([
+      createOrder(concurrentKey, 9000),
+      createOrder(concurrentKey, 9000),
+    ]);
+    expect(c1.statusCode).toBe(201);
+    expect(c2.statusCode).toBe(201);
+    expect(c1.json().order.id).toBe(c2.json().order.id);
+    const concurrentRows = await admin<{ count: string }[]>`
+      select count(*)::text as count from orders
+      where tenant_id = ${tenantId} and amount_cents = 9000
+    `;
+    expect(concurrentRows[0]?.count).toBe('1');
   });
 
   it('webhook targets only (tenant, provider_ref/key), validates amount and compensates late payment', async () => {
@@ -181,14 +196,20 @@ suite('financial correctness under RLS (orders, webhooks, DLQ, owner race)', () 
       where id = ${attemptB} and tenant_id = ${tenantId}
     `;
 
+    const unknownEvent = `evt-unknown-${randomUUID()}`;
     const unknown = await webhook({
-      eventId: `evt-unknown-${randomUUID()}`,
+      eventId: unknownEvent,
       providerRef: 'prov_missing',
       status: 'paid',
       tenantId,
       amountCents: 100000,
     });
     expect(unknown.statusCode).toBe(404);
+    const noDedupe = await admin<{ count: string }[]>`
+      select count(*)::text as count from inbound_payment_events
+      where tenant_id = ${tenantId} and event_id = ${unknownEvent}
+    `;
+    expect(noDedupe[0]?.count).toBe('0');
 
     const mismatch = await webhook({
       eventId: `evt-mismatch-${randomUUID()}`,
