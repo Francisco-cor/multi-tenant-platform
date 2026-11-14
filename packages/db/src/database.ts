@@ -209,12 +209,49 @@ export async function withTenantTransaction<T>(
   });
 }
 
+export interface AuthBootstrapContext {
+  requestId: string;
+}
+
 export interface AuthTransactionContext {
   userId: string;
   /** Optional tenant binding for the pre-login / session-selection path. */
   tenantId?: string;
   requestId: string;
 }
+
+/**
+ * Narrow pre-identity auth transaction (`platform_auth`, no `app.user_id`).
+ *
+ * Session lookup happens after the browser presents a bearer token but before
+ * the API knows which user owns it. `sessions` has a full-access policy for
+ * `platform_auth` and a user-bound one for `platform_app`, so using the
+ * tenant role here would silently match zero rows. This helper exposes only
+ * that lookup window: every write after the token has been resolved must use
+ * `withAuthTransaction`, which binds `app.user_id`.
+ */
+export async function withAuthBootstrapTransaction<T>(
+  database: Database | DatabaseHandle,
+  context: AuthBootstrapContext,
+  callback: (transaction: DatabaseExecutor) => Promise<T>,
+): Promise<T> {
+  if (!context.requestId.trim()) throw new Error('request_id_required');
+  const db = 'db' in database ? database.db : database;
+  const role = 'platform_auth';
+  await assertScopedRoleAllowed(database, role);
+
+  return db.transaction(async (transaction) => {
+    await transaction.execute(sql.raw(`set local role "${role}"`));
+    await transaction.execute(
+      sql`select set_config('app.user_id', '', true) as user_id, set_config('app.tenant_id', '', true) as tenant_id`,
+    );
+    await applySessionSettings(transaction, {
+      applicationName: `${context.requestId.slice(0, 16)}:auth-bootstrap`,
+    });
+    return callback(transaction);
+  });
+}
+
 
 /**
  * Auth-scoped transaction for `sessions`/`users`/login flows. Runs as

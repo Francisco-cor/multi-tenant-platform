@@ -55,6 +55,25 @@ export interface Cache {
 class InMemoryCache implements Cache {
   private readonly map = new Map<string, { value: unknown; expiresAt: number }>();
   private readonly locks = new Map<string, number>();
+  private readonly maxEntries: number;
+
+  constructor(maxEntries = 5000) {
+    this.maxEntries = maxEntries;
+  }
+
+  private sweep(now = Date.now()): void {
+    for (const [key, entry] of this.map) {
+      if (entry.expiresAt <= now) this.map.delete(key);
+    }
+    for (const [key, expiresAt] of this.locks) {
+      if (expiresAt <= now) this.locks.delete(key);
+    }
+    while (this.map.size >= this.maxEntries) {
+      const oldest = this.map.keys().next().value;
+      if (oldest === undefined) break;
+      this.map.delete(oldest);
+    }
+  }
 
   async get<T>(key: string): Promise<T | null> {
     const entry = this.map.get(key);
@@ -72,6 +91,7 @@ class InMemoryCache implements Cache {
   }
 
   async set<T>(key: string, value: T, ttlMs: number): Promise<void> {
+    if (this.map.size >= this.maxEntries) this.sweep();
     this.map.set(key, { value, expiresAt: Date.now() + ttlMs });
   }
 
@@ -273,41 +293,36 @@ class RedisCache implements Cache {
 
 export async function createCache(redisUrl?: string): Promise<Cache> {
   if (!redisUrl) return new InMemoryCache();
+  const mod = await import('ioredis').catch(() => null);
+  if (!mod) throw new Error('redis_client_unavailable');
+  const Redis = (mod as unknown as { default: new (url: string, opts: unknown) => unknown }).default;
+  const client = new Redis(redisUrl, {
+    lazyConnect: false,
+    connectTimeout: 2000,
+    maxRetriesPerRequest: 1,
+    enableReadyCheck: false,
+    retryStrategy: () => null,
+  }) as unknown as {
+    get(k: string): Promise<string | null>;
+    set(k: string, v: string, mode: string, ttlSec: number): Promise<string | null>;
+    del(...keys: string[]): Promise<number>;
+    scan(cursor: string, ...args: unknown[]): Promise<[string, string[]]>;
+    ping(): Promise<string>;
+    quit(): Promise<void>;
+    on(e: string, fn: (err: Error) => void): void;
+  };
   try {
-    const mod = await import('ioredis').catch(() => null);
-    if (!mod) return new InMemoryCache();
-    const Redis = (mod as unknown as { default: new (url: string, opts: unknown) => unknown })
-      .default;
-    const client = new Redis(redisUrl, {
-      lazyConnect: false,
-      connectTimeout: 2000,
-      maxRetriesPerRequest: 1,
-      enableReadyCheck: false,
-      retryStrategy: () => null,
-    }) as unknown as {
-      get(k: string): Promise<string | null>;
-      set(k: string, v: string, mode: string, ttlSec: number): Promise<string | null>;
-      del(...keys: string[]): Promise<number>;
-      scan(cursor: string, ...args: unknown[]): Promise<[string, string[]]>;
-      quit(): Promise<void>;
-      on(e: string, fn: (err: Error) => void): void;
-    };
-    // try ping with timeout 1s; if fails fallback to memory
-    const ping = (client as unknown as { ping(): Promise<string> }).ping?.();
-    if (ping) {
-      await Promise.race([
-        ping,
-        new Promise((_, rej) => setTimeout(() => rej(new Error('redis ping timeout')), 1000)),
-      ]).catch(() => {
-        throw new Error('redis unreachable');
-      });
-    }
-    return new RedisCache(client as unknown as RedisCache['client'], async () => {
-      await client.quit().catch(() => undefined);
-    });
-  } catch {
-    return new InMemoryCache();
+    await Promise.race([
+      client.ping(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('redis ping timeout')), 1000)),
+    ]);
+  } catch (error) {
+    await client.quit().catch(() => undefined);
+    throw new Error('redis_unreachable', { cause: error });
   }
+  return new RedisCache(client as unknown as RedisCache['client'], async () => {
+    await client.quit().catch(() => undefined);
+  });
 }
 
 export function createInMemoryCache(): Cache {

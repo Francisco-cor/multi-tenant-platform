@@ -3,45 +3,42 @@ import helmet from '@fastify/helmet';
 import type { FastifyInstance } from 'fastify';
 
 interface SecurityOptions {
-  baseDomain: string;
+  baseDomain?: string;
   webPublicUrl?: string;
-  allowDevOrigins?: boolean;
+  /** Exact browser origins allowed to call the API with credentials. */
+  allowedOrigins: string[];
+  /** Production-like deployments must not accept plaintext browser origins. */
+  requireHttps?: boolean;
 }
 
-function isAllowedOrigin(origin: string | undefined, options: SecurityOptions): boolean {
-  if (!origin) return true; // curl, same-origin, server-to-server
-  let url: URL;
+function normalizeOrigin(origin: string): string | null {
   try {
-    url = new URL(origin);
+    return new URL(origin).origin;
   } catch {
-    return false;
+    return null;
   }
-  const hostname = url.hostname.toLowerCase();
-  const base = options.baseDomain
-    .trim()
-    .toLowerCase()
-    .replace(/^\.+|\.+$/g, '');
-  // Exact base domain treated as tenant? e.g. app.localhost is not tenant slug but allow for api.localhost
-  // Allow: *.baseDomain and baseDomain itself and localhost variants
-  if (hostname === base) return true;
-  if (hostname.endsWith(`.${base}`)) return true;
-  if (options.allowDevOrigins) {
-    if (hostname === 'localhost' || hostname === '127.0.0.1') return true;
-    // Allow ports on localhost
-  }
-  if (options.webPublicUrl) {
-    try {
-      const webHost = new URL(options.webPublicUrl).hostname.toLowerCase();
-      if (hostname === webHost) return true;
-      if (webHost.endsWith(`.${base}`) && hostname.endsWith(`.${base}`)) return true;
-    } catch {
-      // ignore
-    }
-  }
-  return false;
+}
+
+function isAllowedOrigin(
+  origin: string | undefined,
+  allowedOrigins: ReadonlySet<string>,
+  requireHttps: boolean,
+): boolean {
+  if (!origin) return true; // curl, same-origin server calls and health probes
+  const normalized = normalizeOrigin(origin);
+  if (!normalized) return false;
+  if (requireHttps && new URL(normalized).protocol !== 'https:') return false;
+  return allowedOrigins.has(normalized);
 }
 
 export function registerSecurity(app: FastifyInstance, options: SecurityOptions): void {
+  const requireHttps = options.requireHttps === true;
+  const allowedOrigins = new Set(
+    options.allowedOrigins
+      .map((origin) => normalizeOrigin(origin))
+      .filter((origin): origin is string => origin !== null),
+  );
+
   void app.register(helmet, {
     contentSecurityPolicy: {
       directives: {
@@ -58,18 +55,17 @@ export function registerSecurity(app: FastifyInstance, options: SecurityOptions)
     referrerPolicy: { policy: 'no-referrer' },
     noSniff: true,
     xssFilter: true,
-    hsts:
-      process.env.NODE_ENV === 'production'
-        ? { maxAge: 31_536_000, includeSubDomains: true, preload: true }
-        : false,
+    hsts: requireHttps
+      ? { maxAge: 31_536_000, includeSubDomains: true, preload: true }
+      : false,
   });
 
   void app.register(cors, {
     origin: (origin, callback) => {
-      if (isAllowedOrigin(origin, options)) {
+      if (isAllowedOrigin(origin, allowedOrigins, requireHttps)) {
         callback(null, true);
       } else {
-        callback(new Error('CORS origin not allowed'), false);
+        callback(null, false);
       }
     },
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
@@ -78,6 +74,7 @@ export function registerSecurity(app: FastifyInstance, options: SecurityOptions)
       'Authorization',
       'X-Api-Key',
       'Idempotency-Key',
+      'X-Csrf-Token',
       'X-Request-Id',
       'X-Correlation-Id',
       'X-Trace-Id',
@@ -105,8 +102,20 @@ export function registerSecurity(app: FastifyInstance, options: SecurityOptions)
     maxAge: 600,
   });
 
-  // Add request start time for latency metrics (observability helper can read)
+  // CORS only controls response headers. Reject a disallowed Origin before the
+  // route handler runs so a credentialed mutation can never execute even if a
+  // proxy strips CORS headers.
   app.addHook('onRequest', async (request) => {
+    const origin = request.headers.origin;
+    if (!isAllowedOrigin(origin, allowedOrigins, requireHttps)) {
+      const error = new Error('Origin is not allowed') as Error & {
+        statusCode: number;
+        code: string;
+      };
+      error.statusCode = 403;
+      error.code = 'CORS_ORIGIN_DENIED';
+      throw error;
+    }
     (request as unknown as Record<string, unknown>).__requestStart = Date.now();
   });
 }

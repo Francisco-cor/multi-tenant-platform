@@ -57,7 +57,12 @@ suite('persistent API tenant isolation', () => {
   afterAll(async () => {
     if (app) await app.close();
     if (admin) {
+      // audit_log is append-only; integration cleanup runs as owner and
+      // re-enables the guard immediately.
+      await admin`alter table audit_log disable trigger audit_log_no_delete`;
       await admin`delete from audit_log where actor_user_id in (${userA}, ${userB})`;
+      await admin`alter table audit_log enable trigger audit_log_no_delete`;
+      await admin`delete from platform_audit_log where actor_user_id in (${userA}, ${userB})`;
       await admin`delete from organizations where id in (${tenantA}, ${tenantB})`;
       await admin`delete from users where id in (${userA}, ${userB})`;
       await admin.end({ timeout: 5 });

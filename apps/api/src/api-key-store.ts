@@ -12,6 +12,7 @@ export interface ApiKeyRecord {
   name: string;
   expiresAt: number | null;
   revokedAt: number | null;
+  lastUsedAt: number | null;
   createdBy: string;
   createdAt: number;
 }
@@ -89,6 +90,7 @@ export class InMemoryApiKeyStore implements ApiKeyStore {
       name: input.name,
       expiresAt: input.expiresInMs ? now + input.expiresInMs : null,
       revokedAt: null,
+      lastUsedAt: null,
       createdBy: input.createdBy,
       createdAt: now,
     };
@@ -132,6 +134,7 @@ export class InMemoryApiKeyStore implements ApiKeyStore {
       name: existing.name,
       expiresAt: existing.expiresAt,
       revokedAt: null,
+      lastUsedAt: null,
       createdBy: context.userId ?? existing.createdBy,
       createdAt: now,
     };
@@ -150,8 +153,11 @@ export class InMemoryApiKeyStore implements ApiKeyStore {
         hashesMatch(k.hash, hash) &&
         !k.revokedAt &&
         (!k.expiresAt || k.expiresAt > Date.now())
-      )
+      ) {
+        k.lastUsedAt = Date.now();
+        this.keys.set(k.id, k);
         return k;
+      }
     }
     return null;
   }
@@ -159,6 +165,38 @@ export class InMemoryApiKeyStore implements ApiKeyStore {
   getRaw(id: string): string | undefined {
     return this.rawById.get(id);
   }
+}
+
+interface ApiKeyRow extends Record<string, unknown> {
+  id: string;
+  tenant_id: string;
+  prefix: string;
+  hash: string;
+  scopes: string;
+  name: string;
+  expires_at: string | null;
+  revoked_at: string | null;
+  last_used_at: string | null;
+  created_by: string;
+  created_at: string;
+}
+
+const API_KEY_COLUMNS = `id, tenant_id, prefix, hash, scopes::text as scopes, name, expires_at, revoked_at, last_used_at, created_by, created_at`;
+
+function mapApiKeyRow(row: ApiKeyRow): ApiKeyRecord {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    prefix: row.prefix,
+    hash: row.hash,
+    scopes: JSON.parse(row.scopes) as string[],
+    name: row.name,
+    expiresAt: row.expires_at ? new Date(row.expires_at).getTime() : null,
+    revokedAt: row.revoked_at ? new Date(row.revoked_at).getTime() : null,
+    lastUsedAt: row.last_used_at ? new Date(row.last_used_at).getTime() : null,
+    createdBy: row.created_by,
+    createdAt: new Date(row.created_at).getTime(),
+  };
 }
 
 export class PersistentApiKeyStore implements ApiKeyStore {
@@ -169,9 +207,11 @@ export class PersistentApiKeyStore implements ApiKeyStore {
   async close(): Promise<void> {
     await this.db.close();
   }
+
   static fromConnectionString(cs: string, role = 'platform_app'): PersistentApiKeyStore {
     return new PersistentApiKeyStore(createDatabase(cs, { role }));
   }
+
   async create(
     context: StoreTenantContext,
     input: CreateApiKeyInput,
@@ -183,69 +223,29 @@ export class PersistentApiKeyStore implements ApiKeyStore {
       ? new Date(Date.now() + input.expiresInMs).toISOString()
       : null;
     return withTenantTransaction(this.db, context, async (tx) => {
-      const rows = await tx.execute<{
-        id: string;
-        tenant_id: string;
-        prefix: string;
-        hash: string;
-        scopes: string;
-        name: string;
-        expires_at: string | null;
-        revoked_at: string | null;
-        created_by: string;
-        created_at: string;
-      }>(sql`
+      const rows = await tx.execute<ApiKeyRow>(sql`
         insert into api_keys (tenant_id, prefix, hash, scopes, name, expires_at, created_by)
         values (${context.tenantId}::uuid, ${prefix}, ${hash}, ${scopesJson}::jsonb, ${input.name}, ${expiresAt}::timestamptz, ${input.createdBy}::uuid)
-        returning id, tenant_id, prefix, hash, scopes::text as scopes, name, expires_at, revoked_at, created_by, created_at
+        returning ${sql.raw(API_KEY_COLUMNS)}
       `);
-      const r = rows[0];
-      if (!r) throw new Error('api_key_create_failed');
-      const rec: ApiKeyRecord = {
-        id: r.id,
-        tenantId: r.tenant_id,
-        prefix: r.prefix,
-        hash: r.hash,
-        scopes: JSON.parse(r.scopes),
-        name: r.name,
-        expiresAt: r.expires_at ? new Date(r.expires_at).getTime() : null,
-        revokedAt: r.revoked_at ? new Date(r.revoked_at).getTime() : null,
-        createdBy: r.created_by,
-        createdAt: new Date(r.created_at).getTime(),
-      };
-      return { record: rec, raw };
+      const row = rows[0];
+      if (!row) throw new Error('api_key_create_failed');
+      return { record: mapApiKeyRow(row), raw };
     });
   }
+
   async list(context: StoreTenantContext): Promise<ApiKeyRecord[]> {
     return withTenantTransaction(this.db, context, async (tx) => {
-      const rows = await tx.execute<{
-        id: string;
-        tenant_id: string;
-        prefix: string;
-        hash: string;
-        scopes: string;
-        name: string;
-        expires_at: string | null;
-        revoked_at: string | null;
-        created_by: string;
-        created_at: string;
-      }>(sql`
-        select id, tenant_id, prefix, hash, scopes::text as scopes, name, expires_at, revoked_at, created_by, created_at from api_keys where tenant_id=${context.tenantId}::uuid and revoked_at is null order by created_at desc
+      const rows = await tx.execute<ApiKeyRow>(sql`
+        select ${sql.raw(API_KEY_COLUMNS)}
+        from api_keys
+        where tenant_id=${context.tenantId}::uuid and revoked_at is null
+        order by created_at desc
       `);
-      return rows.map((r) => ({
-        id: r.id,
-        tenantId: r.tenant_id,
-        prefix: r.prefix,
-        hash: r.hash,
-        scopes: JSON.parse(r.scopes),
-        name: r.name,
-        expiresAt: r.expires_at ? new Date(r.expires_at).getTime() : null,
-        revokedAt: r.revoked_at ? new Date(r.revoked_at).getTime() : null,
-        createdBy: r.created_by,
-        createdAt: new Date(r.created_at).getTime(),
-      }));
+      return rows.map(mapApiKeyRow);
     });
   }
+
   async revoke(context: StoreTenantContext, id: string): Promise<void> {
     await withTenantTransaction(this.db, context, async (tx) => {
       const rows = await tx.execute<{ id: string }>(
@@ -254,42 +254,26 @@ export class PersistentApiKeyStore implements ApiKeyStore {
       if (rows.length === 0) throw new Error('api_key_not_found');
     });
   }
+
   async verify(prefix: string, raw: string, tenantId?: string): Promise<ApiKeyRecord | null> {
     if (!tenantId) return null;
     const hash = createHash('sha256').update(raw).digest('hex');
     return withTenantTransaction(this.db, { tenantId, requestId: 'api-key-verify' }, async (tx) => {
-      const rows = await tx.execute<{
-        id: string;
-        tenant_id: string;
-        prefix: string;
-        hash: string;
-        scopes: string;
-        name: string;
-        expires_at: string | null;
-        revoked_at: string | null;
-        created_by: string;
-        created_at: string;
-      }>(sql`
-          select id, tenant_id, prefix, hash, scopes::text as scopes, name, expires_at, revoked_at, created_by, created_at
-          from api_keys
-          where tenant_id=${tenantId}::uuid and prefix=${prefix} and revoked_at is null
-          limit 1
-        `);
-      const r = rows[0];
-      if (!r || !hashesMatch(r.hash, hash)) return null;
-      if (r.expires_at && new Date(r.expires_at).getTime() <= Date.now()) return null;
-      return {
-        id: r.id,
-        tenantId: r.tenant_id,
-        prefix: r.prefix,
-        hash: r.hash,
-        scopes: JSON.parse(r.scopes),
-        name: r.name,
-        expiresAt: r.expires_at ? new Date(r.expires_at).getTime() : null,
-        revokedAt: r.revoked_at ? new Date(r.revoked_at).getTime() : null,
-        createdBy: r.created_by,
-        createdAt: new Date(r.created_at).getTime(),
-      };
+      const rows = await tx.execute<ApiKeyRow>(sql`
+        select ${sql.raw(API_KEY_COLUMNS)}
+        from api_keys
+        where tenant_id=${tenantId}::uuid and prefix=${prefix} and revoked_at is null
+        limit 1
+      `);
+      const row = rows[0];
+      if (!row || !hashesMatch(row.hash, hash)) return null;
+      if (row.expires_at && new Date(row.expires_at).getTime() <= Date.now()) return null;
+      const used = await tx.execute<{ last_used_at: string }>(sql`
+        update api_keys set last_used_at = now(), updated_at = now()
+        where id = ${row.id}::uuid and tenant_id = ${tenantId}::uuid
+        returning last_used_at
+      `);
+      return mapApiKeyRow({ ...row, last_used_at: used[0]?.last_used_at ?? null });
     });
   }
 
@@ -298,62 +282,26 @@ export class PersistentApiKeyStore implements ApiKeyStore {
     id: string,
   ): Promise<{ record: ApiKeyRecord; raw: string }> {
     return withTenantTransaction(this.db, context, async (tx) => {
-      const rows = await tx.execute<{
-        id: string;
-        tenant_id: string;
-        prefix: string;
-        hash: string;
-        scopes: string;
-        name: string;
-        expires_at: string | null;
-        revoked_at: string | null;
-        created_by: string;
-        created_at: string;
-      }>(sql`
-        select id, tenant_id, prefix, hash, scopes::text as scopes, name, expires_at, revoked_at, created_by, created_at from api_keys
+      const rows = await tx.execute<ApiKeyRow>(sql`
+        select ${sql.raw(API_KEY_COLUMNS)}
+        from api_keys
         where id=${id}::uuid and tenant_id=${context.tenantId}::uuid for update
       `);
       const existing = rows[0];
       if (!existing || existing.revoked_at) throw new Error('api_key_not_found');
       const { raw, prefix, hash } = generateApiKey();
-      // revoke old
       await tx.execute(
         sql`update api_keys set revoked_at=now(), updated_at=now() where id=${id}::uuid`,
       );
       const newId = randomUUID();
-      const newRows = await tx.execute<{
-        id: string;
-        tenant_id: string;
-        prefix: string;
-        hash: string;
-        scopes: string;
-        name: string;
-        expires_at: string | null;
-        revoked_at: string | null;
-        created_by: string;
-        created_at: string;
-      }>(sql`
+      const newRows = await tx.execute<ApiKeyRow>(sql`
         insert into api_keys (id, tenant_id, prefix, hash, scopes, name, expires_at, created_by)
         values (${newId}::uuid, ${context.tenantId}::uuid, ${prefix}, ${hash}, ${existing.scopes}::jsonb, ${existing.name}, ${existing.expires_at}::timestamptz, ${context.userId ?? existing.created_by}::uuid)
-        returning id, tenant_id, prefix, hash, scopes::text as scopes, name, expires_at, revoked_at, created_by, created_at
+        returning ${sql.raw(API_KEY_COLUMNS)}
       `);
-      const r = newRows[0];
-      if (!r) throw new Error('api_key_rotate_failed');
-      return {
-        record: {
-          id: r.id,
-          tenantId: r.tenant_id,
-          prefix: r.prefix,
-          hash: r.hash,
-          scopes: JSON.parse(r.scopes),
-          name: r.name,
-          expiresAt: r.expires_at ? new Date(r.expires_at).getTime() : null,
-          revokedAt: null,
-          createdBy: r.created_by,
-          createdAt: new Date(r.created_at).getTime(),
-        },
-        raw,
-      };
+      const row = newRows[0];
+      if (!row) throw new Error('api_key_rotate_failed');
+      return { record: mapApiKeyRow(row), raw };
     });
   }
 }

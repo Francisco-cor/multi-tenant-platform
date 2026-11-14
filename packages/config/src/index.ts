@@ -18,6 +18,24 @@ const environmentSchemaBase = z.object({
     .default('app.localhost'),
   WEB_PUBLIC_URL: z.string().url().default('http://app.localhost:3000'),
   API_PUBLIC_URL: z.string().url().default('http://api.localhost:4000'),
+  WEB_ALLOWED_ORIGINS: z
+    .string()
+    .optional()
+    .transform((value) =>
+      value
+        ? value
+            .split(',')
+            .map((origin) => origin.trim())
+            .filter(Boolean)
+        : [],
+    ),
+  SESSION_COOKIE_DOMAIN: z
+    .string()
+    .min(1)
+    .max(253)
+    .regex(/^[a-z0-9]+([.-][a-z0-9]+)*$/i, 'session_cookie_domain_invalid')
+    .optional(),
+  METRICS_TOKEN: z.string().min(16).optional(),
   DATABASE_URL: z.string().url().optional(),
   DATABASE_ROLE: z
     .string()
@@ -53,6 +71,20 @@ const environmentSchemaBase = z.object({
   CSRF_STRICT: z.enum(['0', '1']).default('0'),
   RATE_LIMIT_ENABLED: z.enum(['0', '1']).default('1'),
   TRUST_PROXY: z.enum(['0', '1']).default('0'),
+  TRUST_PROXY_HOPS: z.coerce.number().int().min(1).max(10).optional(),
+  TRUST_PROXY_CIDRS: z
+    .string()
+    .optional()
+    .transform((value) =>
+      value
+        ? value
+            .split(',')
+            .map((cidr) => cidr.trim())
+            .filter(Boolean)
+        : [],
+    ),
+  ALLOW_IN_MEMORY: z.enum(['0', '1']).optional(),
+  OIDC_EMAIL_VERIFIED: z.enum(['ignore', 'require']).default('ignore'),
 });
 
 /**
@@ -62,8 +94,44 @@ const environmentSchemaBase = z.object({
  * process-specific configuration schema before its bootstrap is promoted to
  * production.
  */
+/**
+ * Environments that serve real users. "staging" is production-like: it must
+ * not enable developer login, in-memory adapters, insecure cookies or literal
+ * placeholder secrets even though it is not customer-facing.
+ */
+export const PRODUCTION_LIKE_ENVIRONMENTS = ['staging', 'production'] as const;
+
+export function isProductionLike(nodeEnv: string | undefined): boolean {
+  return nodeEnv === 'staging' || nodeEnv === 'production';
+}
+
+const PLACEHOLDER_SECRETS = new Set([
+  'test_webhook_secret',
+  'change-me',
+  'changeme',
+  'change-me-local-payment-secret',
+  'change-me-local-stripe-webhook-secret',
+  'change-me-local-inbound-secret',
+  'local-only-placeholder',
+]);
+
+function isLocalhostUrl(value: string): boolean {
+  try {
+    const hostname = new URL(value).hostname.toLowerCase();
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  } catch {
+    return true;
+  }
+}
+
+function isPlaceholderSecret(value: string | undefined): boolean {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return PLACEHOLDER_SECRETS.has(normalized) || normalized.includes('change-me');
+}
+
 export const environmentSchema = environmentSchemaBase.superRefine((value, ctx) => {
-  if (value.NODE_ENV !== 'production') return;
+  if (!isProductionLike(value.NODE_ENV)) return;
 
   const required: Array<keyof typeof value> = [
     'DATABASE_URL',
@@ -77,6 +145,7 @@ export const environmentSchema = environmentSchemaBase.superRefine((value, ctx) 
     'OIDC_CLIENT_ID',
     'OIDC_REDIRECT_URI',
     'WEBHOOK_INBOUND_SECRET',
+    'METRICS_TOKEN',
   ];
   for (const name of required) {
     const current = value[name];
@@ -100,6 +169,66 @@ export const environmentSchema = environmentSchemaBase.superRefine((value, ctx) 
       code: z.ZodIssueCode.custom,
       path: ['ALLOW_DEV_LOGIN'],
       message: 'dev_login_forbidden_in_production',
+    });
+  }
+  if (value.ALLOW_IN_MEMORY === '1') {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['ALLOW_IN_MEMORY'],
+      message: 'in_memory_adapters_forbidden_in_production',
+    });
+  }
+  if (isLocalhostUrl(value.WEB_PUBLIC_URL) || isLocalhostUrl(value.API_PUBLIC_URL)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['WEB_PUBLIC_URL'],
+      message: 'localhost_url_forbidden_in_production',
+    });
+  }
+  const origins = value.WEB_ALLOWED_ORIGINS.length > 0 ? value.WEB_ALLOWED_ORIGINS : [value.WEB_PUBLIC_URL];
+  for (const origin of origins) {
+    try {
+      const parsed = new URL(origin);
+      if (parsed.protocol !== 'https:') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['WEB_ALLOWED_ORIGINS'],
+          message: 'https_origin_required_in_production',
+        });
+      }
+      if (isLocalhostUrl(origin)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['WEB_ALLOWED_ORIGINS'],
+          message: 'localhost_origin_forbidden_in_production',
+        });
+      }
+    } catch {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['WEB_ALLOWED_ORIGINS'],
+        message: 'web_allowed_origins_invalid',
+      });
+    }
+  }
+  for (const [name, secret] of [
+    ['PAYMENT_WEBHOOK_SECRET', value.PAYMENT_WEBHOOK_SECRET],
+    ['PAYMENT_PROVIDER_WEBHOOK_SECRET', value.PAYMENT_PROVIDER_WEBHOOK_SECRET],
+    ['WEBHOOK_INBOUND_SECRET', value.WEBHOOK_INBOUND_SECRET],
+  ] as const) {
+    if (isPlaceholderSecret(secret)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [name],
+        message: 'placeholder_webhook_secret_forbidden_in_production',
+      });
+    }
+  }
+  if (value.TRUST_PROXY === '1' && !value.TRUST_PROXY_HOPS && value.TRUST_PROXY_CIDRS.length === 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ['TRUST_PROXY'],
+      message: 'trust_proxy_requires_hops_or_cidrs_in_production',
     });
   }
   if (value.PAYMENT_PROVIDER === 'stripe' && !value.PAYMENT_PROVIDER_WEBHOOK_SECRET) {

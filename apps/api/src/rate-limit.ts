@@ -46,9 +46,26 @@ export interface RateLimitStore {
 
 class InMemoryRateLimitStore implements RateLimitStore {
   private readonly map = new Map<string, { count: number; resetAt: number }>();
+  private readonly maxEntries: number;
+
+  constructor(maxEntries = 10_000) {
+    this.maxEntries = maxEntries;
+  }
+
+  private sweep(now: number): void {
+    for (const [key, entry] of this.map) {
+      if (now >= entry.resetAt) this.map.delete(key);
+    }
+    while (this.map.size >= this.maxEntries) {
+      const oldest = this.map.keys().next().value;
+      if (oldest === undefined) break;
+      this.map.delete(oldest);
+    }
+  }
 
   async increment(key: string, windowMs: number): Promise<{ count: number; resetMs: number }> {
     const now = Date.now();
+    if (this.map.size >= this.maxEntries) this.sweep(now);
     const entry = this.map.get(key);
     if (!entry || now >= entry.resetAt) {
       const resetAt = now + windowMs;
@@ -132,38 +149,34 @@ export class RateLimiter {
 
 export async function createRateLimiter(redisUrl?: string): Promise<RateLimiter> {
   if (!redisUrl) return new RateLimiter(new InMemoryRateLimitStore());
+  const mod = await import('ioredis').catch(() => null);
+  if (!mod) throw new Error('redis_client_unavailable');
+  const Redis = (mod as unknown as { default: new (url: string, opts: unknown) => unknown }).default;
+  const client = new Redis(redisUrl, {
+    lazyConnect: false,
+    connectTimeout: 1000,
+    maxRetriesPerRequest: 1,
+    enableReadyCheck: false,
+    retryStrategy: () => null,
+  }) as unknown as {
+    incr(k: string): Promise<number>;
+    pttl(k: string): Promise<number>;
+    expire(k: string, sec: number): Promise<number>;
+    ping(): Promise<string>;
+    quit(): Promise<void>;
+    on(e: string, fn: (err: Error) => void): void;
+  };
   try {
-    const mod = await import('ioredis').catch(() => null);
-    if (!mod) return new RateLimiter(new InMemoryRateLimitStore());
-    const Redis = (mod as unknown as { default: new (url: string, opts: unknown) => unknown })
-      .default;
-    const client = new Redis(redisUrl, {
-      lazyConnect: false,
-      connectTimeout: 1000,
-      maxRetriesPerRequest: 1,
-      enableReadyCheck: false,
-      retryStrategy: () => null,
-    }) as unknown as {
-      incr(k: string): Promise<number>;
-      pttl(k: string): Promise<number>;
-      expire(k: string, sec: number): Promise<number>;
-      ping(): Promise<string>;
-      quit(): Promise<void>;
-      on(e: string, fn: (err: Error) => void): void;
-    };
-    if (client.ping) {
-      await Promise.race([
-        client.ping(),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('redis ping timeout')), 1000)),
-      ]).catch(() => {
-        throw new Error('redis unreachable');
-      });
-    }
-    const store = new RedisRateLimitStore(client);
-    return new RateLimiter(store, new InMemoryRateLimitStore());
-  } catch {
-    return new RateLimiter(new InMemoryRateLimitStore());
+    await Promise.race([
+      client.ping(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('redis ping timeout')), 1000)),
+    ]);
+  } catch (error) {
+    await client.quit().catch(() => undefined);
+    throw new Error('redis_unreachable', { cause: error });
   }
+  const store = new RedisRateLimitStore(client);
+  return new RateLimiter(store, new InMemoryRateLimitStore());
 }
 
 export function createInMemoryRateLimiter(): RateLimiter {
