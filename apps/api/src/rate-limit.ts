@@ -44,7 +44,7 @@ export interface RateLimitStore {
   close?(): Promise<void>;
 }
 
-class InMemoryRateLimitStore implements RateLimitStore {
+export class InMemoryRateLimitStore implements RateLimitStore {
   private readonly map = new Map<string, { count: number; resetAt: number }>();
   private readonly maxEntries: number;
 
@@ -78,26 +78,42 @@ class InMemoryRateLimitStore implements RateLimitStore {
   }
 }
 
-class RedisRateLimitStore implements RateLimitStore {
-  constructor(
-    private readonly client: {
-      incr(k: string): Promise<number>;
-      pttl(k: string): Promise<number>;
-      expire(k: string, sec: number): Promise<number>;
-      quit(): Promise<void>;
-    },
-  ) {}
+/**
+ * INCR + PEXPIRE must be atomic: with two round trips a crash (or a failed
+ * EXPIRE) between them leaves a counter with no TTL — a permanently blocked
+ * IP/tenant. The script also repairs a legacy key whose TTL is missing, so an
+ * immortal key from an earlier deployment heals on the next request.
+ */
+export const RATE_LIMIT_INCREMENT_SCRIPT = `
+local current = redis.call('INCR', KEYS[1])
+local ttl = redis.call('PTTL', KEYS[1])
+if current == 1 or ttl < 0 then
+  redis.call('PEXPIRE', KEYS[1], ARGV[1])
+  ttl = tonumber(ARGV[1])
+end
+return {current, ttl}
+`.trim();
+
+interface RedisEvalClient {
+  eval(script: string, numKeys: number, key: string, arg: number): Promise<unknown>;
+  quit(): Promise<void>;
+}
+
+export class RedisRateLimitStore implements RateLimitStore {
+  constructor(private readonly client: RedisEvalClient) {}
 
   async increment(key: string, windowMs: number): Promise<{ count: number; resetMs: number }> {
-    const count = await this.client.incr(key);
-    if (count === 1) {
-      const ttlSec = Math.ceil(windowMs / 1000);
-      await this.client.expire(key, ttlSec).catch(() => undefined);
-      return { count, resetMs: windowMs };
+    const result = (await this.client.eval(RATE_LIMIT_INCREMENT_SCRIPT, 1, key, windowMs)) as
+      [number | string, number | string] | null;
+    if (!Array.isArray(result) || result.length < 2) {
+      throw new Error('rate_limit_script_failed');
     }
-    const pttl = await this.client.pttl(key).catch(() => windowMs);
-    const resetMs = pttl > 0 ? pttl : windowMs;
-    return { count, resetMs };
+    const count = Number(result[0]);
+    const ttl = Number(result[1]);
+    if (!Number.isFinite(count) || !Number.isFinite(ttl) || ttl <= 0) {
+      throw new Error('rate_limit_script_failed');
+    }
+    return { count, resetMs: Math.min(ttl, windowMs) };
   }
 
   async close(): Promise<void> {
@@ -145,13 +161,18 @@ export class RateLimiter {
   get inMemory(): InMemoryRateLimitStore {
     return this.inMemoryFallback;
   }
+
+  async close(): Promise<void> {
+    await this.primary.close?.();
+  }
 }
 
 export async function createRateLimiter(redisUrl?: string): Promise<RateLimiter> {
   if (!redisUrl) return new RateLimiter(new InMemoryRateLimitStore());
   const mod = await import('ioredis').catch(() => null);
   if (!mod) throw new Error('redis_client_unavailable');
-  const Redis = (mod as unknown as { default: new (url: string, opts: unknown) => unknown }).default;
+  const Redis = (mod as unknown as { default: new (url: string, opts: unknown) => unknown })
+    .default;
   const client = new Redis(redisUrl, {
     lazyConnect: false,
     connectTimeout: 1000,
@@ -159,9 +180,7 @@ export async function createRateLimiter(redisUrl?: string): Promise<RateLimiter>
     enableReadyCheck: false,
     retryStrategy: () => null,
   }) as unknown as {
-    incr(k: string): Promise<number>;
-    pttl(k: string): Promise<number>;
-    expire(k: string, sec: number): Promise<number>;
+    eval(script: string, numKeys: number, key: string, arg: number): Promise<unknown>;
     ping(): Promise<string>;
     quit(): Promise<void>;
     on(e: string, fn: (err: Error) => void): void;
