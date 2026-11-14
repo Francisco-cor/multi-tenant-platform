@@ -124,6 +124,33 @@ export function createWorkerProcessor(
           if (!paymentProvider) throw new Error('payment_provider_not_configured');
           return processPayment(db, jobPayload, paymentProvider, { signal: ctx.signal });
         }
+        if (jobPayload.eventType === 'payment.reconciliation_required') {
+          // The API emits this when a webhook event could not be applied (for
+          // example an invalid transition). Resolve the attempt right away with
+          // the provider instead of ACKing an event that had no effect.
+          if (!paymentProvider) throw new Error('payment_provider_not_configured');
+          const attemptId =
+            typeof inner.attemptId === 'string' ? inner.attemptId : jobPayload.aggregateId;
+          if (!attemptId) throw new Error('payment_attempt_id_required');
+          const reconciled = await reconcilePayments(globalDb, paymentProvider, {
+            attemptId,
+            tenantId: jobPayload.tenantId,
+            staleMs: 0,
+            signal: ctx.signal,
+          });
+          return {
+            eventType: jobPayload.eventType,
+            reconciled: reconciled.reconciled,
+            paid: reconciled.paid,
+            failed: reconciled.failed,
+            unknown: reconciled.unknown,
+          };
+        }
+        // A `process` contract without an explicit handler must not be silently
+        // discarded: fail so it is retried / dead-lettered and gets attention.
+        if (contract.effect === 'process') {
+          throw new Error(`event_handler_not_registered:${jobPayload.eventType}`);
+        }
         metrics.recordJobDuration(queue, 0);
         return {
           acknowledged: true,

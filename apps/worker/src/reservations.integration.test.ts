@@ -1,5 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { createDatabase, sql, writeOutboxEvent, type DatabaseHandle } from '@platform/db';
+import {
+  createAdminDatabase,
+  createDatabase,
+  sql,
+  writeOutboxEvent,
+  type DatabaseHandle,
+} from '@platform/db';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { consumeOrderReservations } from './jobs/expireReservations.js';
 import { workerTenantTransaction } from './tenant-db.js';
@@ -17,7 +23,7 @@ suite('paid reservation consumption against Postgres (P1-8)', () => {
   beforeAll(async () => {
     const connectionString = process.env.DATABASE_URL;
     if (!connectionString) throw new Error('DATABASE_URL is required');
-    admin = createDatabase(connectionString, { maxConnections: 2 });
+    admin = createAdminDatabase(connectionString, { maxConnections: 2 });
     appDb = createDatabase(connectionString, { role: 'platform_app', maxConnections: 2 });
 
     await admin.db.execute(sql`

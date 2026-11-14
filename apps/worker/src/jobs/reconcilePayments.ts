@@ -19,6 +19,14 @@ export interface ReconcileOptions {
   staleMs?: number;
   now?: (() => Date) | undefined;
   signal?: AbortSignal | undefined;
+  /**
+   * Resolve one attempt immediately. Used by the `payment.reconciliation_required`
+   * handler: a webhook event the API could not apply must not wait for the
+   * stale sweep, and a terminal `failed` attempt may still be a late capture.
+   */
+  attemptId?: string | undefined;
+  /** Required with `attemptId` so a single-attempt reconciliation stays tenant-scoped. */
+  tenantId?: string | undefined;
 }
 
 /** How often a permanently-unknown attempt is re-polled. */
@@ -49,6 +57,16 @@ export async function reconcilePayments(
   const start = Date.now();
   const staleIso = new Date(now.getTime() - staleMs).toISOString();
 
+  const attemptId = options.attemptId;
+  if (attemptId && !options.tenantId) throw new Error('reconcile_tenant_required');
+  // A targeted reconciliation is driven by an emitted event, not by staleness,
+  // and must include `failed` so a late capture can be compensated.
+  const targetScope = attemptId
+    ? sql`and id=${attemptId}::uuid and tenant_id=${options.tenantId}::uuid`
+    : sql``;
+  const statusScope = attemptId ? sql`('pending','unknown','failed')` : sql`('pending','unknown')`;
+  const staleScope = attemptId ? sql`` : sql`and updated_at < ${staleIso}::timestamptz`;
+
   const batch = await workerGlobalTransaction(db, async (tx) => {
     const rows = await tx.execute<{
       id: string;
@@ -66,8 +84,8 @@ export async function reconcilePayments(
       select id, tenant_id, order_id, provider_key, status, provider_ref, payment_method_id,
              amount_cents, currency, updated_at, last_error
       from payment_attempts
-      where status in ('pending','unknown') and updated_at < ${staleIso}::timestamptz
-        ${UNKNOWN_REPOLL_SQL}
+      where status in ${statusScope} ${staleScope} ${targetScope}
+        ${attemptId ? sql`` : UNKNOWN_REPOLL_SQL}
       order by updated_at
       limit ${batchSize}
       for update skip locked
@@ -98,7 +116,7 @@ export async function reconcilePayments(
         update payment_attempts
         set last_error='reconciling:' || now()::text, updated_at=now()
         where id=${attemptId}::uuid and tenant_id=${tenantId}::uuid
-          and status in ('pending','unknown')
+          and status in ${statusScope}
           and (last_error is null or last_error not like 'reconciling:%' or updated_at < now() - interval '2 minutes')
         returning id
       `),
@@ -151,18 +169,40 @@ export async function reconcilePayments(
       const current = currentRows[0];
       if (!current) return;
       const cur = current.status;
-      if (cur === 'paid' || cur === 'failed') return;
-      if (cur === target && target !== 'unknown') return; // already reconciled
-      if (cur !== target && !canTransition(cur as never, target as never)) {
-        if (target !== 'unknown') return;
+      // `paid` is final: a stale/conflicting provider answer never downgrades it.
+      if (cur === 'paid') return;
+      if (cur === target && target !== 'unknown') {
+        // The claim overwrote last_error with the lease marker; restore the
+        // audit value when the provider confirms the same terminal `failed`.
+        if (target === 'failed') {
+          await tx.execute(sql`
+            update payment_attempts set last_error=${previousError ?? 'reconciled:failed'}
+            where id=${attemptId}::uuid and tenant_id=${tenantId}::uuid
+          `);
+        }
+        return;
       }
+      if (cur !== target && !canTransition(cur as never, target as never)) {
+        // Do not leave the row wearing this pass's lease marker when the
+        // provider answer cannot be applied.
+        if (previousError !== null) {
+          await tx.execute(sql`
+            update payment_attempts set last_error=${previousError}
+            where id=${attemptId}::uuid and tenant_id=${tenantId}::uuid
+          `);
+        }
+        return;
+      }
+      const compensating = cur === 'failed' && target === 'paid';
 
       const newError =
         target === 'unknown'
           ? previousError && previousError.startsWith('reconciled:unknown')
             ? previousError
             : 'reconciled:unknown'
-          : `reconciled:${providerStatus}`;
+          : compensating
+            ? 'paid_after_failure'
+            : `reconciled:${providerStatus}`;
 
       await tx.execute(sql`
         update payment_attempts
@@ -172,25 +212,40 @@ export async function reconcilePayments(
       `);
 
       if (target === 'paid') {
+        // A compensating capture must also rescue an order already marked failed.
         await tx.execute(sql`
           update orders set status='paid', updated_at=now()
-          where id=${orderId}::uuid and tenant_id=${tenantId}::uuid and status='pending_payment'
+          where id=${orderId}::uuid and tenant_id=${tenantId}::uuid
         `);
         await consumeOrderReservations(tx, { tenantId, orderId });
         await writeOutboxEvent(tx, {
           tenantId,
           aggregateType: 'payment',
           aggregateId: attemptId,
-          eventType: 'payment.reconciled_paid',
-          payload: { attemptId, orderId, providerKey, providerRef: resolvedRef, status: target },
+          eventType: compensating ? 'payment.paid_after_failure' : 'payment.reconciled_paid',
+          payload: {
+            attemptId,
+            orderId,
+            providerKey,
+            providerRef: resolvedRef,
+            status: target,
+            compensating,
+          },
         });
         await writeOutboxEvent(tx, {
           tenantId,
           aggregateType: 'order',
           aggregateId: orderId,
-          eventType: 'order.paid',
-          payload: { orderId, attemptId, providerRef: resolvedRef, reconciled: true },
+          eventType: compensating ? 'order.paid_after_failure' : 'order.paid',
+          payload: {
+            orderId,
+            attemptId,
+            providerRef: resolvedRef,
+            reconciled: true,
+            compensating,
+          },
         });
+        if (compensating) metrics.recordAudit('payment.paid_after_failure');
       } else if (target === 'failed') {
         await tx.execute(sql`
           update orders set status='failed', updated_at=now()

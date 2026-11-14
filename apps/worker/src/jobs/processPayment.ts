@@ -67,8 +67,11 @@ export async function processPayment(
     if (expectedProviderKey && row.provider_key !== expectedProviderKey) {
       throw new Error('provider_key_mismatch');
     }
-    // If already terminal, return without transition
-    if (row.status === 'paid' || row.status === 'failed') {
+    // `paid` is the only state that needs no provider check: the money is
+    // already captured. `failed` is not final at the provider: a late capture
+    // or a retry can still settle it, so the idempotent charge is repeated and
+    // the attempt is compensated (failed -> paid) when the provider agrees.
+    if (row.status === 'paid') {
       return { row, needTransition: false, wasTerminal: true };
     }
     // If created -> pending
@@ -188,6 +191,9 @@ export async function processPayment(
     if (!current) throw new Error('payment_attempt_not_found_second');
     const curStatus = current.status;
     const targetStatus = providerResult.status; // paid|failed|unknown
+    // A terminal `failed` that the provider now reports as `paid` is a
+    // compensating late capture: money moved, so the attempt must follow.
+    const compensating = curStatus === 'failed' && targetStatus === 'paid';
     // If already same target, idempotent
     if (curStatus === targetStatus) {
       if (targetStatus === 'paid') await consumeOrderReservations(tx, { tenantId, orderId });
@@ -196,36 +202,57 @@ export async function processPayment(
         providerRef: current.provider_ref ?? providerResult.providerRef,
       };
     }
-    // If current is already terminal, keep terminal
-    if (curStatus === 'paid' || curStatus === 'failed') {
-      if (curStatus === 'paid') await consumeOrderReservations(tx, { tenantId, orderId });
+    // A captured payment always wins: never downgrade `paid` to failed/unknown.
+    if (curStatus === 'paid') {
+      await consumeOrderReservations(tx, { tenantId, orderId });
       return {
         status: curStatus,
         providerRef: current.provider_ref ?? providerResult.providerRef,
       };
     }
-    // Validate transition
+    // Validate transition (created->paid and failed->paid are both valid now).
     if (!canTransition(curStatus as never, targetStatus as never)) {
-      // For example, created->paid is invalid, should go via pending.
-      // Force unknown if transition invalid so the reconciler can act.
-      await tx.execute(sql`
-        update payment_attempts set status='unknown', provider_ref=${providerResult.providerRef}, last_error=${`invalid_transition:${curStatus}->${targetStatus}`}, updated_at=now()
-        where id=${attemptId}::uuid and tenant_id=${tenantId}::uuid
-      `);
-      metrics.recordPaymentUnknown(1);
-      return { status: 'unknown', providerRef: providerResult.providerRef };
+      // Never ACK a conflicting event as if it had an effect: hand it to the
+      // reconciler, which queries the provider and resolves the attempt.
+      await writeOutboxEvent(tx, {
+        tenantId,
+        aggregateType: 'payment',
+        aggregateId: attemptId,
+        eventType: 'payment.reconciliation_required',
+        payload: {
+          attemptId,
+          orderId,
+          providerKey,
+          ...(providerResult.providerRef ? { providerRef: providerResult.providerRef } : {}),
+          from: curStatus,
+          target: targetStatus,
+          reason: `invalid_transition:${curStatus}->${targetStatus}`,
+        },
+        correlationId,
+      });
+      metrics.recordAudit('payment.reconciliation_required');
+      return {
+        status: curStatus,
+        providerRef: current.provider_ref ?? providerResult.providerRef,
+      };
     }
 
     await tx.execute(sql`
-      update payment_attempts set status=${targetStatus}, provider_ref=${providerResult.providerRef}, last_error=null, updated_at=now()
+      update payment_attempts
+      set status=${targetStatus},
+          provider_ref=coalesce(${providerResult.providerRef ?? null}, provider_ref),
+          last_error=${compensating ? 'paid_after_failure' : null},
+          updated_at=now()
       where id=${attemptId}::uuid and tenant_id=${tenantId}::uuid
     `);
 
     // Update order status if payment terminal
     if (targetStatus === 'paid') {
+      // No `pending_payment` filter: a compensating capture must also rescue an
+      // order the earlier failure already marked `failed`.
       await tx.execute(sql`
         update orders set status='paid', updated_at=now()
-        where id=${orderId}::uuid and tenant_id=${tenantId}::uuid and status='pending_payment'
+        where id=${orderId}::uuid and tenant_id=${tenantId}::uuid
       `);
       await consumeOrderReservations(tx, { tenantId, orderId });
       metrics.recordPaymentPending(0);
@@ -236,18 +263,24 @@ export async function processPayment(
       `);
     }
 
-    // Outbox for payment status change
+    // Outbox for payment status change. A late capture must never look like a
+    // first-time payment: downstream consumers subscribe to the compensating
+    // event and the audit trail keeps `paid_after_failure`.
+    const paymentEventType = compensating
+      ? 'payment.paid_after_failure'
+      : `payment.${targetStatus}`;
     await writeOutboxEvent(tx, {
       tenantId,
       aggregateType: 'payment',
       aggregateId: attemptId,
-      eventType: `payment.${targetStatus}`,
+      eventType: paymentEventType,
       payload: {
         attemptId,
         orderId,
         providerKey,
-        providerRef: providerResult.providerRef,
+        ...(providerResult.providerRef ? { providerRef: providerResult.providerRef } : {}),
         status: targetStatus,
+        compensating,
       },
       correlationId,
     });
@@ -256,14 +289,20 @@ export async function processPayment(
         tenantId,
         aggregateType: 'order',
         aggregateId: orderId,
-        eventType: 'order.paid',
-        payload: { orderId, attemptId, providerRef: providerResult.providerRef },
+        eventType: compensating ? 'order.paid_after_failure' : 'order.paid',
+        payload: {
+          orderId,
+          attemptId,
+          ...(providerResult.providerRef ? { providerRef: providerResult.providerRef } : {}),
+          compensating,
+        },
         correlationId,
       });
     }
 
     if (targetStatus === 'unknown') metrics.recordPaymentUnknown(1);
     if (targetStatus === 'pending') metrics.recordPaymentPending(1);
+    if (compensating) metrics.recordAudit('payment.paid_after_failure');
 
     return { status: targetStatus, providerRef: providerResult.providerRef };
   });

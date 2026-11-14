@@ -21,6 +21,11 @@ export interface FakeDatabase {
 function chunkText(chunk: unknown): string {
   if (typeof chunk === 'string') return chunk;
   if (!chunk || typeof chunk !== 'object') return '?';
+  // Nested `sql` fragments (e.g. an optional WHERE clause) carry their own
+  // queryChunks; flatten them so tests can assert on the full statement.
+  if (Array.isArray((chunk as { queryChunks?: unknown }).queryChunks)) {
+    return sqlText(chunk);
+  }
   const value = (chunk as { value?: unknown }).value;
   if (typeof value === 'string') return value;
   if (Array.isArray(value) && value.every((part) => typeof part === 'string')) {

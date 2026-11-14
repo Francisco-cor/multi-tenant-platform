@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { encryptWebhookSecret } from '@platform/config';
-import { createDatabase, sql, type DatabaseHandle } from '@platform/db';
+import { createAdminDatabase, createDatabase, sql, type DatabaseHandle } from '@platform/db';
 import { metrics } from '@platform/observability';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
@@ -30,7 +30,7 @@ suite('real HTTP webhook delivery with a renewable lease', () => {
   beforeAll(async () => {
     const connectionString = process.env.DATABASE_URL;
     if (!connectionString) throw new Error('DATABASE_URL is required');
-    admin = createDatabase(connectionString, { maxConnections: 1 });
+    admin = createAdminDatabase(connectionString, { maxConnections: 1 });
     database = createDatabase(connectionString, { role: 'platform_app', maxConnections: 2 });
     workerDatabase = createDatabase(connectionString, {
       role: 'platform_worker',
