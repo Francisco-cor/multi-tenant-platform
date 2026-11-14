@@ -17,11 +17,14 @@ describe('webhook egress SSRF guard', () => {
       'fe80::1',
       '::ffff:127.0.0.1',
       'ff02::1',
+      '64:ff9b::7f00:1',
+      '64:ff9b::a9fe:a9fe',
     ]) {
       expect(isForbiddenWebhookAddress(address), address).toBe(true);
     }
     expect(isForbiddenWebhookAddress('93.184.216.34')).toBe(false);
     expect(isForbiddenWebhookAddress('2001:4860:4860::8888')).toBe(false);
+    expect(isForbiddenWebhookAddress('64:ff9b::5db8:d822')).toBe(false);
   });
 
   it('rejects a DNS answer that resolves to a private address', async () => {
@@ -35,6 +38,14 @@ describe('webhook egress SSRF guard', () => {
     expect(metrics.toPrometheus()).toContain(
       'webhook_egress_denials_total{reason="private_blocked"} 1',
     );
+  });
+
+  it('rejects non-default HTTPS ports', async () => {
+    await expect(
+      resolvePublicWebhookTarget('https://hooks.example.test:8443/path', async () => [
+        { address: '93.184.216.34', family: 4 },
+      ]),
+    ).rejects.toThrow('webhook_url_invalid');
   });
 
   it('returns a fixed public target for a hostname with multiple public answers', async () => {

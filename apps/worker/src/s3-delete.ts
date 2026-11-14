@@ -45,6 +45,9 @@ function signingKey(secret: string, date: string, region: string): Buffer {
  * without importing an app package into the worker build.
  */
 export class AwsWorkerObjectStore implements WorkerObjectStore {
+  private readonly fetchFn: typeof fetch;
+  private readonly timeoutMs: number;
+
   constructor(
     private readonly options: {
       endpoint: string;
@@ -52,8 +55,14 @@ export class AwsWorkerObjectStore implements WorkerObjectStore {
       region: string;
       accessKey: string;
       secretKey: string;
+      timeoutMs?: number | undefined;
+      /** Injected for tests; defaults to the global fetch. */
+      fetchFn?: typeof fetch | undefined;
     },
-  ) {}
+  ) {
+    this.fetchFn = options.fetchFn ?? fetch;
+    this.timeoutMs = options.timeoutMs ?? 10_000;
+  }
 
   async deleteObject(key: string): Promise<void> {
     const endpoint = new URL(this.options.endpoint);
@@ -90,13 +99,38 @@ export class AwsWorkerObjectStore implements WorkerObjectStore {
       .digest('hex');
     const url = new URL(this.options.endpoint);
     url.pathname = path;
-    const response = await fetch(url, {
-      method: 'DELETE',
-      headers: {
-        ...headers,
-        authorization: `AWS4-HMAC-SHA256 Credential=${this.options.accessKey}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
-      },
+    // A hung S3 must not stall the maintenance job or shutdown. The abort
+    // signal plus a racing rejection bound both cooperative and non-cooperative
+    // fetch implementations; the explicit timer keeps it fake-timer testable.
+    const controller = new AbortController();
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        controller.abort(new Error('s3_delete_timeout'));
+        reject(new Error('s3_delete_timeout'));
+      }, this.timeoutMs);
+      timer.unref?.();
     });
+    let response: Response;
+    try {
+      response = await Promise.race([
+        this.fetchFn(url, {
+          method: 'DELETE',
+          headers: {
+            ...headers,
+            authorization: `AWS4-HMAC-SHA256 Credential=${this.options.accessKey}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
+          },
+          signal: controller.signal,
+        }).catch((error: unknown) => {
+          // An aborted fetch may settle first with its own error; normalize it.
+          if (controller.signal.aborted) throw new Error('s3_delete_timeout');
+          throw error;
+        }),
+        deadline,
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
     if (!response.ok && response.status !== 404) {
       throw new Error(`s3_delete_failed:${response.status}`);
     }
@@ -107,6 +141,17 @@ class NoopWorkerObjectStore implements WorkerObjectStore {
   async deleteObject(): Promise<void> {
     // Local fake storage has no durable object store to clean up.
   }
+}
+
+export const DEFAULT_S3_DELETE_TIMEOUT_MS = 10_000;
+
+/** Parse `S3_DELETE_TIMEOUT_MS`, falling back to the default on invalid input. */
+export function s3DeleteTimeoutMs(
+  raw: string | undefined = process.env.S3_DELETE_TIMEOUT_MS,
+): number {
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1 || value > 60_000) return DEFAULT_S3_DELETE_TIMEOUT_MS;
+  return value;
 }
 
 export function createWorkerObjectStore(): WorkerObjectStore {
@@ -124,5 +169,6 @@ export function createWorkerObjectStore(): WorkerObjectStore {
     region: process.env.S3_REGION ?? 'us-east-1',
     accessKey,
     secretKey,
+    timeoutMs: s3DeleteTimeoutMs(),
   });
 }

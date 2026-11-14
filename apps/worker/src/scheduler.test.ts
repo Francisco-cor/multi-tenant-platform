@@ -13,14 +13,40 @@ describe('maintenance scheduler', () => {
 
     await scheduler.runNow();
     const jobs = factory.getJobs('generic');
-    expect(jobs).toHaveLength(3);
+    expect(jobs).toHaveLength(4);
     expect(jobs.map((job) => job.payload.eventType).sort()).toEqual([
       'maintenance.deliver_pending_webhooks',
       'maintenance.expire_reservations',
       'maintenance.gc_files',
+      'maintenance.redrive_dead_letter',
     ]);
     expect(jobs.every((job) => job.payload.scope === 'global')).toBe(true);
-    expect(new Set(jobs.map((job) => job.jobId)).size).toBe(3);
+    expect(new Set(jobs.map((job) => job.jobId)).size).toBe(4);
     scheduler.stop();
+  });
+
+  it('only reports a scheduler heartbeat when the tick enqueued (P2-6)', async () => {
+    const ticks: boolean[] = [];
+    const broken = startMaintenanceScheduler(
+      {
+        getQueue() {
+          throw new Error('redis_down');
+        },
+        closeAll: async () => undefined,
+      },
+      { startImmediately: false, onTick: (ok) => ticks.push(ok) },
+    );
+    await broken.runNow();
+    broken.stop();
+    expect(ticks).toEqual([false]);
+
+    const healthy = startMaintenanceScheduler(new InMemoryQueueFactory(), {
+      startImmediately: false,
+      paymentProviderConfigured: false,
+      onTick: (ok) => ticks.push(ok),
+    });
+    await healthy.runNow();
+    healthy.stop();
+    expect(ticks).toEqual([false, true]);
   });
 });

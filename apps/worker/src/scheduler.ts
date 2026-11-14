@@ -8,6 +8,7 @@ export const MAINTENANCE_INTERVALS_MS = {
   deliver_pending_webhooks: 15_000,
   reconcile_payments: 60_000,
   gc_files: 5 * 60_000,
+  redrive_dead_letter: 60 * 60_000,
 } as const;
 
 export type MaintenanceTask = keyof typeof MAINTENANCE_INTERVALS_MS;
@@ -17,6 +18,8 @@ export interface MaintenanceSchedulerOptions {
   paymentProviderConfigured?: boolean;
   now?: () => number;
   startImmediately?: boolean;
+  /** Heartbeat for readiness; `ok` is false when enqueueing failed (P2-6). */
+  onTick?: ((ok: boolean) => void) | undefined;
 }
 
 export interface MaintenanceScheduler {
@@ -54,6 +57,7 @@ export function startMaintenanceScheduler(
   const runNow = async (): Promise<void> => {
     if (stopped || running) return;
     running = true;
+    let ok = false;
     try {
       const current = now();
       const tasks = (Object.keys(intervals) as MaintenanceTask[]).filter(
@@ -71,12 +75,14 @@ export function startMaintenanceScheduler(
           });
         }),
       );
+      ok = true;
     } catch (error) {
       logger.error(
         { error: error instanceof Error ? error.message : String(error) },
         'maintenance_schedule_failed',
       );
     } finally {
+      options.onTick?.(ok);
       running = false;
     }
   };

@@ -1,66 +1,75 @@
 import { sql } from '@platform/db';
 import type { DatabaseHandle } from '@platform/db';
 import { workerGlobalTransaction } from '../tenant-db.js';
+import { workerMetrics } from '../worker-metrics.js';
 
 export interface GcFilesResult {
   expiredCount: number;
   deletedCount: number;
+  failedCount: number;
   durationMs: number;
 }
 
 /**
  * GC for orphan / expired file uploads.
- * - Finds pending files where expires_at <= now()
- * - Marks them 'expired' with FOR UPDATE SKIP LOCKED (idempotent)
- * - Optionally deletes S3 object (best effort, never fails the transaction)
  *
- * Mirrors expireReservations logic for consistency.
+ * The object is deleted **before** the row is marked `expired`: a failed S3
+ * delete leaves the row `pending`, so the next tick retries it instead of
+ * leaking the object forever (P2-9). Failures are counted and returned.
  */
 export async function gcFiles(
   db: DatabaseHandle,
   s3: { deleteObject(key: string): Promise<void> },
-  options: { batchSize?: number; now?: Date } = {},
+  options: { batchSize?: number; now?: Date; signal?: AbortSignal } = {},
 ): Promise<GcFilesResult> {
   const batchSize = options.batchSize ?? 100;
   const now = options.now ?? new Date();
   const start = Date.now();
 
-  const result = await workerGlobalTransaction(db, async (tx) => {
-    const expired = await tx.execute<{ id: string; key: string; tenant_id: string }>(sql`
+  const expired = await workerGlobalTransaction(db, (tx) =>
+    tx.execute<{ id: string; key: string; tenant_id: string }>(sql`
       select id, key, tenant_id
       from files
       where status = 'pending' and expires_at <= ${now.toISOString()}::timestamptz
       order by expires_at
       limit ${batchSize}
       for update skip locked
-    `);
+    `),
+  );
 
-    if (expired.length === 0) return { expiredCount: 0, keys: [] as string[] };
+  if (expired.length === 0) {
+    return { expiredCount: 0, deletedCount: 0, failedCount: 0, durationMs: Date.now() - start };
+  }
 
-    const ids = expired.map((r) => r.id);
-
-    await tx.execute(sql`
-      update files
-      set status = 'expired', updated_at = now()
-      where id = any(${ids}::uuid[]) and status = 'pending'
-    `);
-
-    return { expiredCount: expired.length, keys: expired.map((r) => r.key) };
-  });
-
-  let deleted = 0;
-  for (const key of (result as { keys?: string[] }).keys ?? []) {
+  const deletedIds: string[] = [];
+  let failed = 0;
+  for (const file of expired) {
+    if (options.signal?.aborted) break;
     try {
-      await s3.deleteObject(key);
-      deleted++;
+      await s3.deleteObject(file.key);
+      deletedIds.push(file.id);
     } catch {
-      // best effort: log but don't fail GC
+      // Keep the row pending so the next tick retries the delete.
+      failed++;
+      workerMetrics.increment('gc_delete_failures_total');
     }
   }
 
+  const expiredCount = deletedIds.length;
+  if (deletedIds.length > 0) {
+    await workerGlobalTransaction(db, (tx) =>
+      tx.execute(sql`
+        update files
+        set status = 'expired', updated_at = now()
+        where id = any(${deletedIds}::uuid[]) and status = 'pending'
+      `),
+    );
+  }
+
   return {
-    expiredCount: result.expiredCount,
-    deletedCount: deleted,
+    expiredCount,
+    deletedCount: expiredCount,
+    failedCount: failed,
     durationMs: Date.now() - start,
   };
 }
@@ -73,6 +82,7 @@ export async function gcFilesUntilEmpty(
   const maxBatches = options.maxBatches ?? 10;
   let totalExpired = 0;
   let totalDeleted = 0;
+  let totalFailed = 0;
   const start = Date.now();
   for (let i = 0; i < maxBatches; i++) {
     const r = await gcFiles(
@@ -82,7 +92,13 @@ export async function gcFilesUntilEmpty(
     );
     totalExpired += r.expiredCount;
     totalDeleted += r.deletedCount;
+    totalFailed += r.failedCount;
     if (r.expiredCount === 0) break;
   }
-  return { expiredCount: totalExpired, deletedCount: totalDeleted, durationMs: Date.now() - start };
+  return {
+    expiredCount: totalExpired,
+    deletedCount: totalDeleted,
+    failedCount: totalFailed,
+    durationMs: Date.now() - start,
+  };
 }

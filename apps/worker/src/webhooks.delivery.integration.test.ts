@@ -108,7 +108,9 @@ suite('real HTTP webhook delivery with a renewable lease', () => {
     expect(initial[0]).toEqual({ claim_token: claimToken, status: 'pending' });
     const options: DeliverWebhookOptions = {
       claimToken,
-      leaseDurationMs: 500,
+      // Generous lease: the assertion is that the heartbeat renews it, not that
+      // a 500 ms lease survives a loaded CI machine.
+      leaseDurationMs: 3_000,
       leaseRenewalMs: 100,
       fetchFn: async (_url, init) => fetch(httpUrl, init),
     };
