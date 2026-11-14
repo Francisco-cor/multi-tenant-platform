@@ -2,10 +2,10 @@
 
 | Clasificacion      | Ejemplos                                                                      | Regla                                                                                                 |
 | ------------------ | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
-| Global             | `users`, proveedores OIDC, feature flags globales                             | No contiene datos operativos de un tenant. El acceso es explicito y restringido.                      |
-| Tenant root        | `organizations`                                                               | La organizacion es el tenant: `organizations.id` es el limite y se valida con RLS.                    |
-| Tenant-scoped      | `memberships`, `branches`, ordenes, inventario, archivos, webhooks, auditoria | `tenant_id NOT NULL`, FK al tenant, indices/unique compuestos, repository con contexto y RLS.         |
-| Cross-tenant admin | soporte y metricas agregadas futuras                                          | Superficie separada, permisos globales, auditoria reforzada y sin reutilizar endpoints tenant-scoped. |
+| Global             | `users`, `platform_audit_log`, proveedores OIDC, feature flags globales       | No contiene datos operativos de un tenant. El acceso es explícito y restringido.                      |
+| Tenant root        | `organizations`                                                               | La organización es el tenant: `organizations.id` es el límite y se valida con RLS.                    |
+| Tenant-scoped      | `memberships`, `branches`, órdenes, inventario, archivos, webhooks, auditoría | `tenant_id NOT NULL`, FK al tenant, índices/unique compuestos, repository con contexto y RLS.         |
+| Cross-tenant admin | soporte y métricas agregadas futuras                                          | Superficie separada, permisos globales, auditoría reforzada y sin reutilizar endpoints tenant-scoped. |
 
 Toda tabla nueva debe declarar su clasificacion en la migracion y en este documento. Los objetos S3 siguen la misma clasificacion aunque no sean filas de PostgreSQL.
 
@@ -20,3 +20,11 @@ Fase 8 añade `orders` y `payment_attempts(provider_key UNIQUE)` + `inbound_paym
 Fase 9 añade `webhook_endpoints`, `webhook_deliveries`, `inbound_webhook_events`, `api_keys`, `automations` `FORCE RLS`.
 
 Fase 14 expand: `branches.description text` nullable con `CHECK char_length 0..500` + `COALESCE` dual-read (`0012_expand_branch_description.sql`), backfill `data/0001_backfill_branch_description.sql` `LIMIT 1000 SKIP LOCKED`, `tenant_feature_flags (tenant_id, flag) PK` `FORCE RLS` para kill switches/canary (`0013_tenant_feature_flags.sql`), `indexes/0005_branch_description_search.sql` `CONCURRENTLY GIN pg_trgm`.
+
+## Auditoría y roles (endurecimiento 2026-11-13)
+
+- `audit_log` es tenant-scoped y exige `tenant_id NOT NULL`; su `actor_user_id` es `ON DELETE SET NULL` con `actor_user_ref` para conservar trazabilidad.
+- `platform_audit_log` guarda eventos globales (por ejemplo login sin tenant) y se lee con `platform_auditor`; no se mezcla con la auditoría del tenant.
+- `platform_app` sirve datos de negocio; `platform_auth` es el camino de credenciales; `platform_worker` es el relay global; `platform_auditor` solo lee auditoría global.
+- `platform_app` no puede borrar organizaciones ni membresías. El borrado de tenant es una operación de plataforma, no de la API tenant.
+- La retención de `outbox_events`, `webhook_deliveries`, `processed_jobs` y `dlq_jobs` existe como helpers en `packages/db/src/jobs/retention.ts`; no hay cron desplegado.

@@ -2,7 +2,8 @@
 
 - Estado: aceptado
 - Fecha: 2026-09-01
-- Relacionado: Fase 6 (PLAN_ELEVACION.md:266, IMPLEMENTATION_PLAN.md:294), `packages/db/migrations/schema/0007_files.sql`, `apps/api/src/file-store.ts`, `apps/api/src/s3.ts`
+- Relacionado: Fase 6, `packages/db/migrations/schema/0007_files.sql`, `apps/api/src/file-store.ts`, `apps/api/src/s3.ts`
+- Última verificación: 2026-11-13
 
 ## Contexto
 
@@ -31,7 +32,7 @@ Elegir **(2) presigned URLs + metadata tenant-scoped**, con:
 
 ### Flujo
 
-1. `POST /v1/files/presigned-upload` (`files:upload`):
+1. `POST /v1/files/presign` (`files:upload`; existe como alias legacy en la API):
    - Zod: `filename` 1..255 sin `/\..`, `contentType` en allowlist (`image/jpeg|png|webp|gif`, `application/pdf|zip|octet-stream`, `text/plain|csv`, `vnd.openxmlformats.*`) + regex fallback, `size` 1..52428800.
    - En `withTenantTransaction`: `INSERT files (pending, expires_at=now()+24h, key=tenants/{tenantId}/{uuid})` y `SELECT`.
    - Genera presigned PUT vía `S3Service.generateUploadUrl(key, contentType, sizeExpected, expires 300s)` → `{url, expiresAt, headers}`.
@@ -69,16 +70,16 @@ Elegir **(2) presigned URLs + metadata tenant-scoped**, con:
 
 ## Validación
 
-- `apps/api/src/files.test.ts` 5 suites: `presigned-upload` key prefix y TTL 300s, `invalid mime/size/path traversal →400`, `cross-tenant 404 + pending 409 + expired 410 + GC`, `finalize idempotente + cross-tenant 404`, `list tenant-scoped + alias presigned-download TTL 60s` — 17 tests API totales pasan.
+- `apps/api/src/files.test.ts` 5 suites: `presigned-upload` key prefix y TTL 300s, `invalid mime/size/path traversal →400`, `cross-tenant 404 + pending 409 + expired 410 + GC`, `finalize idempotente + cross-tenant 404`, `list tenant-scoped + alias presigned-download TTL 60s`.
 - `apps/api/src/file-store.ts` `InMemoryFileStore` + `PersistentFileStore` con `withTenantTransaction` + `FOR UPDATE` en finalize.
 - `apps/worker/src/jobs/gcFiles.ts` con `FOR UPDATE SKIP LOCKED` y `deleteObject` best-effort.
-- `docs/api/openapi.yaml` actualizado con 5 endpoints Files y `docs/runbooks/files.md` + `docs/failure-scenarios/files.md` (pendiente ampliar con evidencia k6/MinIO real en staging).
+- `docs/api/openapi.yaml` tiene drift conocido (`presigned-upload` vs `presign`); el pase de OpenAPI lo corrige. Ver `docs/runbooks/files.md` y `docs/failure-scenarios/s3-unavailable.md`.
 
 ## Referencias
 
-- `packages/db/migrations/schema/0007_files.sql:1`,
-- `apps/api/src/file-store.ts:1` (`MAX_FILE_SIZE 52428800`, `ALLOWED_MIME_TYPES`),
-- `apps/api/src/s3.ts:1` (`FakeS3Service`, `buildFakePresignedUrl`),
-- `apps/api/src/app.ts:885` (`POST /v1/files/presigned-upload`, `POST /v1/files/:id/finalize`, `GET /v1/files/:id/download`),
-- `apps/worker/src/jobs/gcFiles.ts:1`,
-- `docs/architecture/tenant-isolation.md:5` (S3 keys tenant-prefixed).
+- `packages/db/migrations/schema/0007_files.sql`,
+- `apps/api/src/file-store.ts` (`MAX_FILE_SIZE 52428800`, `ALLOWED_MIME_TYPES`),
+- `apps/api/src/s3.ts` (`FakeS3Service`, `buildFakePresignedUrl`),
+- `apps/api/src/app.ts` (`POST /v1/files/presign`, `POST /v1/files/:id/finalize`, `GET /v1/files/:id/download`),
+- `apps/worker/src/jobs/gcFiles.ts`,
+- `docs/architecture/tenant-isolation.md` (S3 keys tenant-prefixed).

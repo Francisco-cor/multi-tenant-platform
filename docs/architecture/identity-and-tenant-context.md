@@ -1,52 +1,77 @@
-# Identidad y contexto tenant
+# Identidad, sesión y contexto tenant
 
-## Alcance de la Fase 2
+- Estado: implementado y verificado el 2026-11-13
+- Alcance: `apps/api`, `apps/web`, `packages/auth`, `packages/db`
+- Autoridad: el host resuelve el tenant; la sesión y la membresía resuelven la autorización
 
-La API resuelve una request tenant-scoped con esta secuencia:
+## 1. Secuencia de una request tenant-scoped
 
-1. La sesión se obtiene de la cookie "platform_session" o de un bearer token.
-2. Se valida que la sesión no haya expirado y que el usuario esté activo.
-3. El host se toma únicamente de "Host"; "x-forwarded-host" no es una fuente de autorización.
-4. Se acepta exactamente un subdominio bajo "TENANT_BASE_DOMAIN".
-5. Se busca la organización por slug y se exige estado "active".
-6. Se exige una membresía activa del usuario en esa organización.
-7. Si hay más de una membresía, la sesión debe haber seleccionado explícitamente una organización.
-8. Las políticas RBAC se aplican en la API antes de cada acción.
+1. La API obtiene el token de la cookie `platform_session` o de `Authorization: Bearer`.
+2. La sesión se busca por hash de token y se valida que no haya expirado; el usuario debe estar `active`.
+3. El host se toma de `Host`. La API no consulta `x-forwarded-host`; el BFF web solo lo hace con `TRUST_PROXY=1`.
+4. Se acepta exactamente un subdominio bajo `TENANT_BASE_DOMAIN`.
+5. Se busca la organización por slug y se exige estado `active`.
+6. Se exige una membresía activa del usuario en esa organización. Sin ella, la respuesta es `403`.
+7. Si el usuario tiene más de una membresía, la sesión debe haber seleccionado una organización explícitamente; si no, `409 ORGANIZATION_SELECTION_REQUIRED`.
+8. Las policies RBAC se aplican en la API antes de cada acción. La UI puede ocultar acciones, pero no es autoridad.
+9. La transacción de base de datos fija `app.tenant_id` y `app.user_id`; RLS vuelve a filtrar.
 
-El store actual es deliberadamente en memoria. Es un adaptador de desarrollo para validar el contrato de la frontera; la Fase 3 lo reemplazará por PostgreSQL, migraciones, transacciones y RLS sin cambiar las rutas ni las políticas.
+`x-api-key` es un camino M2M separado: resuelve el tenant por host, verifica `prefix + hash` y aplica scopes. No crea una sesión humana.
 
-## OIDC
+## 2. Cookies y topología de sesión
 
-- "GET /v1/auth/login" crea "state" y "nonce" aleatorios, los guarda con TTL de 10 minutos y devuelve una cookie HttpOnly SameSite=Lax.
-- El issuer se descubre mediante ".well-known/openid-configuration".
-- "GET /v1/auth/callback" exige que el state de query coincida con la cookie y que el state sea de un solo uso.
-- El code se intercambia en el token endpoint.
-- El ID token valida firma RS256 mediante JWKS, issuer, audience, expiración, iat, nonce, subject y email.
-- La cookie de sesión es HttpOnly; en producción añade "Secure".
-- "POST /v1/auth/dev-login" existe solo fuera de producción para demos y pruebas reproducibles.
+| Cookie             | Dónde vive    | Atributos                                                         | Propósito                                                     |
+| ------------------ | ------------- | ----------------------------------------------------------------- | ------------------------------------------------------------- |
+| `platform_session` | API y BFF web | `HttpOnly`, `SameSite=Lax`, `Path=/`, 8 h, `Secure` en producción | Token de sesión de la API; el BFF lo guarda para el navegador |
+| `oidc_state`       | API           | `HttpOnly`, `SameSite=Lax`, `Path=/v1/auth`, 10 min               | State/nonce del login OIDC directo                            |
+| `oidc_state`       | BFF web       | `HttpOnly`, `SameSite=Lax`, 10 min                                | State del callback OIDC que termina en el BFF                 |
 
-## Operaciones principales
+- La cookie del BFF es **host-only** por defecto (`SESSION_COOKIE_DOMAIN` vacío). No hay SSO entre subdominios de tenant; cada tenant tiene su propia sesión de navegador.
+- El token de la API nunca se expone a JavaScript del cliente ni en HTML. Las rutas `/api/v1/*` del BFF leen la cookie server-side y reenvían `Authorization: Bearer`.
+- El callback OIDC del web (`/api/auth/callback`) canjea `code + state` contra la API y aplica la cookie de sesión en el origen del tenant. La API directa usa `/v1/auth/callback`.
+- `POST /v1/auth/refresh` extiende la sesión deslizante; existe un límite absoluto (`absolute_expires_at`) además de la expiración deslizante.
+
+## 3. Rutas de identidad
 
 | Ruta                                         | Control                                                                      |
 | -------------------------------------------- | ---------------------------------------------------------------------------- |
-| "GET /v1/auth/me"                            | sesión activa; devuelve organizaciones disponibles                           |
-| "POST /v1/auth/switch-organization"          | membresía activa y selección explícita                                       |
-| "POST /v1/organizations"                     | sesión; crea organización y owner; audita                                    |
-| "GET /v1/context"                            | host, organización activa, membresía y permisos efectivos                    |
-| "GET /v1/members"                            | "members:read"                                                               |
-| "POST /v1/members/invitations"               | "members:invite"; token hasheado, TTL y uso único                            |
-| "POST /v1/members/invitations/:token/accept" | sesión, host objetivo, email coincidente y tenant validado antes del consumo |
-| "PATCH /v1/members/:membershipId"            | "members:update_role"; mantiene un owner                                     |
-| "DELETE /v1/members/:membershipId"           | "members:remove"; mantiene un owner                                          |
-| "GET /v1/audit"                              | "audit:read"; eventos append-only del tenant                                 |
+| `GET /v1/auth/login`                         | Inicia OIDC con `state`, `nonce` y cookie de state                           |
+| `GET /v1/auth/callback`                      | State de un solo uso, canje de code, validación de ID token y sesión         |
+| `POST /v1/auth/dev-login`                    | Solo fuera de producción; usuario demo                                       |
+| `GET /v1/auth/me`                            | Sesión activa; devuelve identidad y organizaciones disponibles               |
+| `POST /v1/auth/logout`                       | Revoca la sesión actual                                                      |
+| `POST /v1/auth/refresh`                      | Extiende la sesión si sigue vigente                                          |
+| `POST /v1/auth/switch-organization`          | Membresía activa y selección explícita                                       |
+| `POST /v1/organizations`                     | Sesión; crea organización y owner; audita                                    |
+| `GET /v1/context`                            | Host, organización activa, membresía y permisos efectivos                    |
+| `GET /v1/members`                            | `members:read`                                                               |
+| `POST /v1/members/invitations`               | `members:invite`; token hasheado, TTL y uso único                            |
+| `POST /v1/members/invitations/:token/accept` | Sesión, host objetivo, email coincidente y tenant validado antes del consumo |
+| `PATCH /v1/members/:membershipId`            | `members:update_role`; mantiene un owner                                     |
+| `DELETE /v1/members/:membershipId`           | `members:remove`; mantiene un owner                                          |
+| `GET /v1/audit`                              | `audit:read`; eventos tenant-scoped append-only                              |
 
-## Demostración local
+## 4. Persistencia y RLS
 
-1. Iniciar la API con "pnpm --filter @platform/api dev".
-2. Crear sesión demo para "user-acme-only" mediante "POST /v1/auth/dev-login".
-3. Consultar "GET /v1/context" con "Host: acme.app.localhost": responde 200.
-4. Repetir con "Host: contoso.app.localhost": responde 403.
-5. Crear sesión demo para "user-alice": el primer contexto responde 409 y enumera organizaciones seguras.
-6. Cambiar a "contoso" y usar "Host: contoso.app.localhost".
+El adaptador persistente es el camino normal cuando existe `DATABASE_URL`:
 
-No se deben usar datos seed ni "dev-login" fuera de desarrollo/test.
+- `platform_app` sirve requests tenant-scoped y solo ve filas con `app.tenant_id`.
+- `platform_auth` es el camino estrecho de credenciales (`users`, `sessions`, `invitations`, organizaciones).
+- `platform_worker` es el relay global y no sirve requests de usuario.
+- `platform_app` no puede borrar organizaciones ni membresías; eso queda en `platform_auth`.
+- Las sesiones ya no son legibles por tenant sin `app.user_id`: la policy `sessions_user_bound` las ata al usuario.
+- Los eventos globales de auditoría se guardan en `platform_audit_log`; `audit_log` exige `tenant_id NOT NULL`.
+
+En tests unitarios existe un store en memoria; no es el camino de producción y no debe citarse como evidencia de aislamiento real.
+
+## 5. Demostración local
+
+1. Arrancar la infraestructura: `docker compose up -d postgres redis`.
+2. Arrancar desde la raíz para cargar `.env`: `pnpm dev`.
+3. Crear sesión demo para `user-acme-only` con `POST /v1/auth/dev-login`.
+4. Consultar `GET /v1/context` con `Host: acme.app.localhost:4000`: responde `200`.
+5. Repetir con `Host: contoso.app.localhost:4000`: responde `403`.
+6. Crear sesión demo para `user-alice`: el primer contexto responde `409` y enumera organizaciones seguras.
+7. Cambiar a `contoso` y usar `Host: contoso.app.localhost:4000`.
+
+No se deben usar datos seed ni `dev-login` fuera de desarrollo/test. Para el flujo de navegador, usar `acme.app.localhost:3000` y el BFF.

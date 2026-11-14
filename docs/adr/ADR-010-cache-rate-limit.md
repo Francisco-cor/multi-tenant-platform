@@ -2,7 +2,8 @@
 
 - Estado: aceptado
 - Fecha: 2026-09-01
-- Relacionado: Fase 10 (IMPLEMENTATION_PLAN.md:405, PLAN_ELEVACION.md:350), `apps/api/src/cache.ts`, `apps/api/src/rate-limit.ts`, `apps/api/src/circuit-breaker.ts`, `packages/observability/src/metrics.ts`
+- Relacionado: Fase 10, `apps/api/src/cache.ts`, `apps/api/src/rate-limit.ts`, `apps/api/src/circuit-breaker.ts`, `packages/observability/src/metrics.ts`
+- Última verificación: 2026-11-13
 
 ## Contexto
 
@@ -78,7 +79,7 @@ RATE_LIMITS = {
   endpoints: {
     'POST /v1/orders': { max: 20, key: 'tenant' },
     'POST /v1/inventory/reserve': { max: 30, key: 'tenant' },
-    'POST /v1/files/presigned-upload': { max: 20, key: 'tenant' },
+    'POST /v1/files/presign': { max: 20, key: 'tenant' },
     'POST /v1/webhooks/endpoints': { max: 20, key: 'tenant' },
     'POST /v1/auth/dev-login': { max: 10, key: 'ip' },
   },
@@ -116,11 +117,11 @@ RATE_LIMITS = {
 
 ## Validación
 
-- `apps/api/src/cache-rate-limit.test.ts:1` 8 tests: key tenant isolation + params hash normalization, cache hit→miss tenant A≠B, invalidation solo tenant, stampede 10 concurrent → 1 loader, rate limit 5→429 con headers, tenant isolation `acme` limit not affect `contoso`, Redis degraded fail-open (mock `get` throw → loader), circuit OPEN after 5 fails → `CIRCUIT_OPEN`.
-- `apps/api/src/app.test.ts` + `inventory.test.ts` siguen 26 PASS con headers `x-cache`/`x-ratelimit-*` opcionales.
+- `apps/api/src/cache-rate-limit.test.ts`: key tenant isolation + normalización de params, cache hit/miss A≠B, invalidación solo del tenant, stampede concurrente, rate limit con headers, aislamiento `acme`/`contoso`, Redis degradado fail-open y circuit OPEN.
+- `apps/api/src/app.test.ts` y `apps/api/src/inventory.concurrent.test.ts` cubren headers `x-cache`/`x-ratelimit-*` opcionales y concurrencia.
 - `worker` no cambia; `health.ts` `checkRedis` sigue `degraded` si Redis fail pero API sigue 200 en reads via fallback.
-- `openapi.yaml` 37 paths 47 schemas `hash ee...` actualizado (`429` + `x-ratelimit` headers documentados).
-- Métricas `cache_hits_total`, `rate_limit_hits_total`, `circuit_state` visibles en `GET /metrics` y dashboard `infra/grafana/worker.json`.
+- `docs/api/openapi.yaml` documenta `429` y headers `x-ratelimit-*`; el conteo/hash no se cita porque cambia con el contrato.
+- Métricas `cache_hits_total`, `rate_limit_hits_total`, `circuit_state` visibles en `GET /metrics` y dashboard `infra/grafana/provisioning/dashboards/worker.json`.
 
 ## Referencias
 
