@@ -11,6 +11,7 @@ import {
   reserveInventory,
 } from '@/lib/api';
 import { getPageContext } from '@/lib/context';
+import { orderIdempotencyKey } from '@/lib/idempotency';
 import { hasPermission, type Permission } from '@/lib/permissions';
 
 function fail(path: string, error: unknown): never {
@@ -75,20 +76,29 @@ export async function createOrderAction(formData: FormData): Promise<never> {
     .toUpperCase();
   const amount = Number(formData.get('amount'));
   const amountCents = Math.round(amount * 100);
-  const idempotencyKey = String(formData.get('idempotencyKey') ?? '').trim();
+  const idempotencyNonce = String(formData.get('idempotencyKey') ?? '').trim();
 
   if (!branchId || !Number.isFinite(amount) || amountCents <= 0 || amountCents > 100_000_000) {
     redirect('/orders?error=invalid_amount');
   }
   if (!/^[A-Z]{3}$/u.test(currency)) redirect('/orders?error=invalid_currency');
 
+  const idempotencyKey = orderIdempotencyKey({
+    nonce: idempotencyNonce,
+    branchId,
+    amountCents,
+    currency,
+  });
+  // A missing nonce means the form was tampered with or rendered before this
+  // control existed: never fall back to a per-submit random key.
+  if (!idempotencyKey) redirect('/orders?error=invalid_request');
+
   try {
     await createOrder(context.token, context.host, {
       branchId,
       amountCents,
       currency,
-      idempotencyKey:
-        idempotencyKey.length >= 8 ? idempotencyKey : crypto.randomUUID().replace(/-/gu, ''),
+      idempotencyKey,
     });
   } catch (error) {
     fail('/orders', error);

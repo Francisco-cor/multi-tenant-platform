@@ -4,15 +4,19 @@ const CI = Boolean(process.env.CI);
 const API_URL = process.env.API_URL || 'http://127.0.0.1:4000';
 const WEB_URL = process.env.WEB_URL || 'http://localhost:3000';
 const BASE_DOMAIN = process.env.TENANT_BASE_DOMAIN || 'app.localhost';
+const DB_MODE = process.env.PLAYWRIGHT_DB === '1';
 
 const inheritedEnv = Object.fromEntries(
   Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
 );
 
 /**
- * API is deliberately started with no DATABASE_URL: the E2E suite runs against
- * the in-memory stores and the local fake S3 provider. The web BFF talks to the
- * API over API_INTERNAL_URL and forwards the browser's tenant Host per request.
+ * The API runs in in-memory mode with the local fake S3 provider. `tests/e2e/api-server.mts`
+ * starts the real API and a fake S3 endpoint in the same process so the presigned
+ * upload/finalize flow can be exercised without MinIO.
+ *
+ * Set PLAYWRIGHT_DB=1 plus DATABASE_URL (migrated + seeded) to run the same suite
+ * against the Postgres-backed adapters; see tests/e2e/README.md.
  */
 const apiEnv: Record<string, string> = {
   ...inheritedEnv,
@@ -23,11 +27,17 @@ const apiEnv: Record<string, string> = {
   ALLOW_DEV_LOGIN: '1',
   TRUST_PROXY: '0',
   S3_PROVIDER: 'fake',
-  // Dev-login is rate limited per IP; the suite creates a fresh session per test.
+  S3_ENDPOINT: process.env.S3_ENDPOINT || 'http://127.0.0.1:9000',
+  S3_BUCKET: process.env.S3_BUCKET || 'platform-local',
   RATE_LIMIT_ENABLED: '0',
 };
-delete apiEnv.DATABASE_URL;
-delete apiEnv.REDIS_URL;
+if (DB_MODE) {
+  apiEnv.PLAYWRIGHT_DB = '1';
+  apiEnv.DATABASE_ROLE = process.env.DATABASE_ROLE || 'platform_app';
+} else {
+  delete apiEnv.DATABASE_URL;
+  delete apiEnv.REDIS_URL;
+}
 
 const webEnv: Record<string, string> = {
   ...inheritedEnv,
@@ -40,6 +50,7 @@ const webEnv: Record<string, string> = {
 
 export default defineConfig({
   testDir: 'tests/e2e',
+  testIgnore: /prod-headers\.spec\.ts/u,
   timeout: 45_000,
   expect: { timeout: 7_500 },
   fullyParallel: true,
@@ -54,7 +65,7 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: 'pnpm --filter @platform/api exec tsx src/server.ts',
+      command: 'pnpm exec tsx tests/e2e/api-server.mts',
       url: `${API_URL}/health/live`,
       timeout: 120_000,
       reuseExistingServer: !CI,

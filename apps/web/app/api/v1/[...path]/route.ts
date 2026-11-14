@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { apiBaseUrl } from '@/lib/config';
+import { apiTransport } from '@/lib/api-transport';
 import { isSameOriginRequest } from '@/lib/request';
 import { readSessionToken } from '@/lib/session';
 
@@ -59,12 +60,12 @@ async function proxy(
   const hasBody = method !== 'GET' && method !== 'HEAD';
   let upstream: Response;
   try {
-    upstream = await fetch(target, {
+    // apiTransport forwards over node:http because undici ignores a custom Host,
+    // and tenant resolution depends on the original browser Host.
+    upstream = await apiTransport(target, {
       method,
       headers,
-      ...(hasBody ? { body: await request.arrayBuffer() } : {}),
-      cache: 'no-store',
-      redirect: 'manual',
+      ...(hasBody ? { body: new Uint8Array(await request.arrayBuffer()) } : {}),
     });
   } catch {
     return NextResponse.json(
