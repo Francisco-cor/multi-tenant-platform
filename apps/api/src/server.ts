@@ -1,9 +1,5 @@
 import { initTracing } from '@platform/observability';
-import {
-  isProductionLike,
-  loadEnvironment,
-  type Environment,
-} from '@platform/config';
+import { isProductionLike, loadEnvironment, type Environment } from '@platform/config';
 import { createOidcStateStore, type OidcStateStore } from '@platform/auth';
 import {
   createAdminDatabase,
@@ -89,8 +85,9 @@ const app = buildApp({
   trustProxy,
   cache,
   rateLimiter,
+  persistentAdapters: Boolean(databaseUrl),
   oidcStateStore,
-  oidcEmailVerified: environment.OIDC_EMAIL_VERIFIED,
+  oidcEmailVerified: productionLike ? 'require' : environment.OIDC_EMAIL_VERIFIED,
   oidc: {
     issuer: environment.OIDC_ISSUER_URL ?? '',
     clientId: environment.OIDC_CLIENT_ID ?? '',

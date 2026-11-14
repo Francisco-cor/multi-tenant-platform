@@ -100,9 +100,14 @@ const environmentSchemaBase = z.object({
  * placeholder secrets even though it is not customer-facing.
  */
 export const PRODUCTION_LIKE_ENVIRONMENTS = ['staging', 'production'] as const;
+export const DEPLOYED_ENVIRONMENTS = PRODUCTION_LIKE_ENVIRONMENTS;
 
 export function isProductionLike(nodeEnv: string | undefined): boolean {
   return nodeEnv === 'staging' || nodeEnv === 'production';
+}
+
+export function isDeployed(nodeEnv: string | undefined): boolean {
+  return isProductionLike(nodeEnv);
 }
 
 const PLACEHOLDER_SECRETS = new Set([
@@ -118,7 +123,12 @@ const PLACEHOLDER_SECRETS = new Set([
 function isLocalhostUrl(value: string): boolean {
   try {
     const hostname = new URL(value).hostname.toLowerCase();
-    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+    return (
+      hostname === 'localhost' ||
+      hostname.endsWith('.localhost') ||
+      hostname === '127.0.0.1' ||
+      hostname === '::1'
+    );
   } catch {
     return true;
   }
@@ -185,7 +195,8 @@ export const environmentSchema = environmentSchemaBase.superRefine((value, ctx) 
       message: 'localhost_url_forbidden_in_production',
     });
   }
-  const origins = value.WEB_ALLOWED_ORIGINS.length > 0 ? value.WEB_ALLOWED_ORIGINS : [value.WEB_PUBLIC_URL];
+  const origins =
+    value.WEB_ALLOWED_ORIGINS.length > 0 ? value.WEB_ALLOWED_ORIGINS : [value.WEB_PUBLIC_URL];
   for (const origin of origins) {
     try {
       const parsed = new URL(origin);
@@ -224,7 +235,11 @@ export const environmentSchema = environmentSchemaBase.superRefine((value, ctx) 
       });
     }
   }
-  if (value.TRUST_PROXY === '1' && !value.TRUST_PROXY_HOPS && value.TRUST_PROXY_CIDRS.length === 0) {
+  if (
+    value.TRUST_PROXY === '1' &&
+    !value.TRUST_PROXY_HOPS &&
+    value.TRUST_PROXY_CIDRS.length === 0
+  ) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       path: ['TRUST_PROXY'],

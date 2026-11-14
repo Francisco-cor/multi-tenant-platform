@@ -1,7 +1,6 @@
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import {
   createOidcAuthorizationRequest,
-  createOidcStateStore,
   discoverOidcProvider,
   exchangeOidcCode,
   InMemoryOidcStateStore,
@@ -380,6 +379,7 @@ interface AppOptions {
   cache?: Cache;
   rateLimiter?: RateLimiter;
   health?: HealthProbe;
+  persistentAdapters?: boolean;
   circuitBreakers?: {
     s3?: CircuitBreaker;
     payment?: CircuitBreaker;
@@ -550,7 +550,8 @@ function mapDomainError(message: string): { status: number; code: string; messag
   return null;
 }
 
-function parseOrThrow<S extends z.ZodTypeAny>(schema: S, input: unknown): z.infer<S> {  const result = schema.safeParse(input);
+function parseOrThrow<S extends z.ZodTypeAny>(schema: S, input: unknown): z.infer<S> {
+  const result = schema.safeParse(input);
   if (!result.success) {
     throw new RequestProblem(400, 'VALIDATION_ERROR', 'Request validation failed', {
       issues: result.error.issues.map((issue) => ({ path: issue.path, code: issue.code })),
@@ -602,7 +603,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   const store: IdentityStore = options.store ?? new InMemoryIdentityStore(true);
   const inventoryStore: InventoryStore =
     options.inventoryStore ??
-    (options.store && process.env.DATABASE_URL
+    (options.persistentAdapters && process.env.DATABASE_URL
       ? PersistentInventoryStore.fromConnectionString(
           process.env.DATABASE_URL,
           process.env.DATABASE_ROLE ?? 'platform_app',
@@ -610,7 +611,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       : new InMemoryInventoryStore(true));
   const fileStore: FileStore =
     options.fileStore ??
-    (options.store && process.env.DATABASE_URL
+    (options.persistentAdapters && process.env.DATABASE_URL
       ? PersistentFileStore.fromConnectionString(
           process.env.DATABASE_URL,
           process.env.DATABASE_ROLE ?? 'platform_app',
@@ -618,7 +619,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       : new InMemoryFileStore());
   const dlqStore: DlqStore =
     options.dlqStore ??
-    (options.store && process.env.DATABASE_URL
+    (options.persistentAdapters && process.env.DATABASE_URL
       ? PersistentDlqStore.fromConnectionString(
           process.env.DATABASE_URL,
           process.env.DATABASE_ROLE ?? 'platform_app',
@@ -626,7 +627,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       : new InMemoryDlqStore());
   const paymentStore: PaymentStore =
     options.paymentStore ??
-    (options.store && process.env.DATABASE_URL
+    (options.persistentAdapters && process.env.DATABASE_URL
       ? PersistentPaymentStore.fromConnectionString(
           process.env.DATABASE_URL,
           process.env.DATABASE_ROLE ?? 'platform_app',
@@ -634,7 +635,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       : new InMemoryPaymentStore());
   const webhookStore: WebhookStore =
     options.webhookStore ??
-    (options.store && process.env.DATABASE_URL
+    (options.persistentAdapters && process.env.DATABASE_URL
       ? PersistentWebhookStore.fromConnectionString(
           process.env.DATABASE_URL,
           process.env.DATABASE_ROLE ?? 'platform_app',
@@ -642,7 +643,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       : new InMemoryWebhookStore());
   const apiKeyStore: ApiKeyStore =
     options.apiKeyStore ??
-    (options.store && process.env.DATABASE_URL
+    (options.persistentAdapters && process.env.DATABASE_URL
       ? PersistentApiKeyStore.fromConnectionString(
           process.env.DATABASE_URL,
           process.env.DATABASE_ROLE ?? 'platform_app',
@@ -650,7 +651,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       : new InMemoryApiKeyStore());
   const featureFlagStore: FeatureFlagStore =
     options.featureFlagStore ??
-    (options.store && process.env.DATABASE_URL
+    (options.persistentAdapters && process.env.DATABASE_URL
       ? PersistentFeatureFlagStore.fromConnectionString(
           process.env.DATABASE_URL,
           process.env.DATABASE_ROLE ?? 'platform_app',
@@ -670,12 +671,13 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
         ? 'require'
         : 'ignore');
   const allowedOrigins = (
-    options.allowedOrigins ??
-    (process.env.WEB_ALLOWED_ORIGINS
-      ? process.env.WEB_ALLOWED_ORIGINS.split(',')
-          .map((origin) => origin.trim())
-          .filter(Boolean)
-      : [process.env.WEB_PUBLIC_URL ?? 'http://app.localhost:3000'])
+    options.allowedOrigins && options.allowedOrigins.length > 0
+      ? options.allowedOrigins
+      : process.env.WEB_ALLOWED_ORIGINS
+        ? process.env.WEB_ALLOWED_ORIGINS.split(',')
+            .map((origin) => origin.trim())
+            .filter(Boolean)
+        : [process.env.WEB_PUBLIC_URL ?? 'http://app.localhost:3000']
   ).map((origin) => {
     try {
       return new URL(origin).origin;
@@ -700,12 +702,12 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
   // Direct-SQL paths (payment webhook, automations) must reuse one pool instead
   // of opening a connection pool per request.
   const directDatabase: DatabaseHandle | undefined =
-    options.store && process.env.DATABASE_URL
-    ? createDatabase(process.env.DATABASE_URL, {
-        role: process.env.DATABASE_ROLE ?? 'platform_app',
-        maxConnections: 4,
-      })
-    : undefined;
+    options.persistentAdapters && process.env.DATABASE_URL
+      ? createDatabase(process.env.DATABASE_URL, {
+          role: process.env.DATABASE_ROLE ?? 'platform_app',
+          maxConnections: 4,
+        })
+      : undefined;
   const s3Breaker: CircuitBreaker =
     options.circuitBreakers?.s3 ??
     createCircuitBreaker('s3', { failureThreshold: 5, timeoutMs: 30_000, requestTimeoutMs: 2000 });
@@ -1095,6 +1097,22 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     }
   };
 
+  const revokeMemberApiKeys = async (
+    context: StoreTenantContext,
+    userId: string,
+  ): Promise<void> => {
+    try {
+      const keys = await apiKeyStore.list(context);
+      await Promise.all(
+        keys
+          .filter((key) => key.createdBy === userId && !key.revokedAt)
+          .map((key) => revokeApiKeyQuietly(key.id, context.tenantId, context.userId ?? null)),
+      );
+    } catch {
+      // Persistent removal already revokes keys inside the membership transaction.
+    }
+  };
+
   const requireTenantContext = async (request: FastifyRequest): Promise<TenantContext> => {
     const rawApiKey = requestApiKey(request);
     if (rawApiKey) {
@@ -1298,9 +1316,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
         : '';
       if (!presented || !safeEqual(presented, metricsToken)) {
         metrics.recordMetricsScrapeDenied();
-        return reply
-          .status(403)
-          .send(errorBody(request.id, 'FORBIDDEN', 'Metrics token required'));
+        return reply.status(403).send(errorBody(request.id, 'FORBIDDEN', 'Metrics token required'));
       }
     } else if (productionLike) {
       metrics.recordMetricsScrapeDenied();
@@ -1395,8 +1411,12 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     };
   });
 
-  app.get('/v1/auth/me', async (request) => {
+  app.get('/v1/auth/me', async (request, reply) => {
     const auth = await requireSession(request);
+    const cookies = parseCookieHeader(request.headers.cookie);
+    if (!cookies[CSRF_COOKIE]) {
+      reply.header('set-cookie', csrfCookie(newCsrfToken(), secureCookies, sessionCookieDomain));
+    }
     const memberships = await store.listMembershipsForUser(auth.user.id);
     const organizations = (
       await Promise.all(
@@ -1917,6 +1937,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
         }),
       );
       await invalidateCache(context.tenantId, 'members');
+      await revokeMemberApiKeys(context, removed.userId);
       return { membership: await membershipView(removed, store) };
     } catch (error) {
       if (error instanceof Error && error.message === 'last_owner') {
@@ -2116,231 +2137,252 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     '/v1/webhooks/payments',
     { bodyLimit: SMALL_BODY_LIMIT, config: { rawBody: true } },
     async (request, reply) => {
-    const rawBody =
-      rawBodyByRequest.get(request) ?? Buffer.from(JSON.stringify(request.body ?? {}), 'utf8');
-    const providerIsStripe = process.env.PAYMENT_PROVIDER === 'stripe';
-    const stripeSignature = request.headers['stripe-signature'] as string | undefined;
-    const timestamp =
-      (request.headers['x-webhook-timestamp'] as string) ??
-      (request.headers['x-timestamp'] as string) ??
-      '';
-    const signatureHeader =
-      (request.headers['x-webhook-signature'] as string) ??
-      (request.headers['x-signature'] as string) ??
-      '';
-    const configuredSecret = providerIsStripe
-      ? process.env.PAYMENT_PROVIDER_WEBHOOK_SECRET
-      : process.env.PAYMENT_WEBHOOK_SECRET;
-    if (!configuredSecret && process.env.NODE_ENV === 'production') {
-      throw new RequestProblem(503, 'WEBHOOK_NOT_CONFIGURED', 'Payment webhook is not configured');
-    }
-    const secret = configuredSecret ?? 'test_webhook_secret';
-    const verify = providerIsStripe
-      ? verifyStripeWebhookSignature({ secret, rawBody, signatureHeader: stripeSignature })
-      : verifyWebhookSignature({ secret, timestamp, rawBody, signatureHeader });
-    if (!verify.valid) {
-      throw new RequestProblem(401, 'UNAUTHORIZED', `Webhook signature invalid: ${verify.reason}`);
-    }
-    let body: z.infer<typeof PaymentWebhookSchema>;
-    if (providerIsStripe) {
-      const stripeEvent = request.body as {
-        id?: unknown;
-        type?: unknown;
-        data?: { object?: Record<string, unknown> };
-      };
-      const eventId = typeof stripeEvent.id === 'string' ? stripeEvent.id : null;
-      const eventType = typeof stripeEvent.type === 'string' ? stripeEvent.type : null;
-      const paymentIntent = stripeEvent.data?.object;
-      const providerRef = typeof paymentIntent?.id === 'string' ? paymentIntent.id : null;
-      if (!eventId || !eventType || !paymentIntent || !providerRef) {
-        throw new RequestProblem(400, 'BAD_REQUEST', 'Stripe payment event is malformed');
+      const rawBody =
+        rawBodyByRequest.get(request) ?? Buffer.from(JSON.stringify(request.body ?? {}), 'utf8');
+      const providerIsStripe = process.env.PAYMENT_PROVIDER === 'stripe';
+      const stripeSignature = request.headers['stripe-signature'] as string | undefined;
+      const timestamp =
+        (request.headers['x-webhook-timestamp'] as string) ??
+        (request.headers['x-timestamp'] as string) ??
+        '';
+      const signatureHeader =
+        (request.headers['x-webhook-signature'] as string) ??
+        (request.headers['x-signature'] as string) ??
+        '';
+      const configuredSecret = providerIsStripe
+        ? process.env.PAYMENT_PROVIDER_WEBHOOK_SECRET
+        : process.env.PAYMENT_WEBHOOK_SECRET;
+      if (!configuredSecret && productionLike) {
+        throw new RequestProblem(
+          503,
+          'WEBHOOK_NOT_CONFIGURED',
+          'Payment webhook is not configured',
+        );
       }
-      const status =
-        eventType === 'payment_intent.succeeded'
-          ? 'paid'
-          : eventType === 'payment_intent.payment_failed' || eventType === 'payment_intent.canceled'
-            ? 'failed'
-            : eventType === 'payment_intent.processing' ||
-                eventType === 'payment_intent.requires_action'
-              ? 'unknown'
-              : null;
-      if (!status) return reply.status(200).send({ status: 'ignored', eventId });
-      const metadata: Record<string, unknown> =
-        paymentIntent.metadata && typeof paymentIntent.metadata === 'object'
-          ? (paymentIntent.metadata as Record<string, unknown>)
-          : {};
-      body = parseOrThrow(PaymentWebhookSchema, {
-        eventId,
-        providerRef,
-        status,
-        ...(typeof metadata.provider_key === 'string'
-          ? { providerKey: metadata.provider_key }
-          : {}),
-        ...(typeof metadata.tenant_id === 'string' ? { tenantId: metadata.tenant_id } : {}),
-        ...(typeof paymentIntent.amount === 'number' ? { amountCents: paymentIntent.amount } : {}),
-      });
-    } else {
-      body = parseOrThrow(PaymentWebhookSchema, request.body);
-    }
-    // Tenant identity must be inside the signed body. A header alone is not covered by HMAC.
-    const headerTenantId = (request.headers['x-tenant-id'] as string) ?? null;
-    const bodyWithTenant = request.body as Record<string, unknown>;
-    const bodyTenantId =
-      typeof bodyWithTenant.tenantId === 'string' ? bodyWithTenant.tenantId : null;
-    if (!bodyTenantId) {
-      throw new RequestProblem(400, 'BAD_REQUEST', 'Signed tenantId is required in webhook body');
-    }
-    if (headerTenantId && headerTenantId !== bodyTenantId) {
-      throw new RequestProblem(401, 'UNAUTHORIZED', 'Webhook tenant mismatch');
-    }
-    const tenantId = bodyTenantId;
+      const secret = configuredSecret ?? 'test_webhook_secret';
+      const verify = providerIsStripe
+        ? verifyStripeWebhookSignature({ secret, rawBody, signatureHeader: stripeSignature })
+        : verifyWebhookSignature({ secret, timestamp, rawBody, signatureHeader });
+      if (!verify.valid) {
+        throw new RequestProblem(
+          401,
+          'UNAUTHORIZED',
+          `Webhook signature invalid: ${verify.reason}`,
+        );
+      }
+      let body: z.infer<typeof PaymentWebhookSchema>;
+      if (providerIsStripe) {
+        const stripeEvent = request.body as {
+          id?: unknown;
+          type?: unknown;
+          data?: { object?: Record<string, unknown> };
+        };
+        const eventId = typeof stripeEvent.id === 'string' ? stripeEvent.id : null;
+        const eventType = typeof stripeEvent.type === 'string' ? stripeEvent.type : null;
+        const paymentIntent = stripeEvent.data?.object;
+        const providerRef = typeof paymentIntent?.id === 'string' ? paymentIntent.id : null;
+        if (!eventId || !eventType || !paymentIntent || !providerRef) {
+          throw new RequestProblem(400, 'BAD_REQUEST', 'Stripe payment event is malformed');
+        }
+        const status =
+          eventType === 'payment_intent.succeeded'
+            ? 'paid'
+            : eventType === 'payment_intent.payment_failed' ||
+                eventType === 'payment_intent.canceled'
+              ? 'failed'
+              : eventType === 'payment_intent.processing' ||
+                  eventType === 'payment_intent.requires_action'
+                ? 'unknown'
+                : null;
+        if (!status) return reply.status(200).send({ status: 'ignored', eventId });
+        const metadata: Record<string, unknown> =
+          paymentIntent.metadata && typeof paymentIntent.metadata === 'object'
+            ? (paymentIntent.metadata as Record<string, unknown>)
+            : {};
+        body = parseOrThrow(PaymentWebhookSchema, {
+          eventId,
+          providerRef,
+          status,
+          ...(typeof metadata.provider_key === 'string'
+            ? { providerKey: metadata.provider_key }
+            : {}),
+          ...(typeof metadata.tenant_id === 'string' ? { tenantId: metadata.tenant_id } : {}),
+          ...(typeof paymentIntent.amount === 'number'
+            ? { amountCents: paymentIntent.amount }
+            : {}),
+        });
+      } else {
+        body = parseOrThrow(PaymentWebhookSchema, request.body);
+      }
+      // Tenant identity must be inside the signed body. A header alone is not covered by HMAC.
+      const headerTenantId = (request.headers['x-tenant-id'] as string) ?? null;
+      const bodyWithTenant = request.body as Record<string, unknown>;
+      const bodyTenantId =
+        typeof bodyWithTenant.tenantId === 'string' ? bodyWithTenant.tenantId : null;
+      if (!bodyTenantId) {
+        throw new RequestProblem(400, 'BAD_REQUEST', 'Signed tenantId is required in webhook body');
+      }
+      if (headerTenantId && headerTenantId !== bodyTenantId) {
+        throw new RequestProblem(401, 'UNAUTHORIZED', 'Webhook tenant mismatch');
+      }
+      const tenantId = bodyTenantId;
 
-    // Validate tenantId format
-    if (
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(tenantId)
-    ) {
+      // Validate tenantId format
+      if (
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(tenantId)
+      ) {
+        if (directDatabase) {
+          throw new RequestProblem(
+            400,
+            'BAD_REQUEST',
+            'Persistent webhook tenantId must be a UUID',
+          );
+        }
+      }
+
+      // Dedupe via inbound_payment_events per tenant
+      // Use paymentStore? For now handle via direct DB if available, else in-memory map
+      // For InMemory path, we simulate dedupe via global map (attached to app)
+      const dedupeKey = `${tenantId}:${body.eventId}`;
+      if (webhookDedupe.has(dedupeKey)) {
+        return { status: 'already_processed', eventId: body.eventId };
+      }
+
+      // The persistent dedupe insert and payment transition must commit together.
+      // Otherwise a failed transition could be acknowledged as already processed on retry.
       if (directDatabase) {
-        throw new RequestProblem(400, 'BAD_REQUEST', 'Persistent webhook tenantId must be a UUID');
-      }
-    }
-
-    // Dedupe via inbound_payment_events per tenant
-    // Use paymentStore? For now handle via direct DB if available, else in-memory map
-    // For InMemory path, we simulate dedupe via global map (attached to app)
-    const dedupeKey = `${tenantId}:${body.eventId}`;
-    if (webhookDedupe.has(dedupeKey)) {
-      return { status: 'already_processed', eventId: body.eventId };
-    }
-
-    // The persistent dedupe insert and payment transition must commit together.
-    // Otherwise a failed transition could be acknowledged as already processed on retry.
-    if (directDatabase) {
-      const db = directDatabase;
-      if (!db) throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Database is not configured');
-      try {
-        const outcome = await withTenantTransaction(
-          db,
-          { tenantId, requestId: request.id },
-          async (tx) => {
-            const inserted = await tx.execute<{ id: string }>(sql`
+        const db = directDatabase;
+        if (!db)
+          throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Database is not configured');
+        try {
+          const outcome = await withTenantTransaction(
+            db,
+            { tenantId, requestId: request.id },
+            async (tx) => {
+              const inserted = await tx.execute<{ id: string }>(sql`
               insert into inbound_payment_events (tenant_id, event_id, provider_ref, status, payload)
               values (${tenantId}::uuid, ${body.eventId}, ${body.providerRef}, ${body.status}, ${JSON.stringify(body)}::jsonb)
               on conflict (tenant_id, event_id) do nothing
               returning id
             `);
-            if (inserted.length === 0) return { duplicate: true } as const;
+              if (inserted.length === 0) return { duplicate: true } as const;
 
-            // Find attempt by provider_ref or provider_key inside this tenant transaction.
-            const rows = await tx.execute<{ id: string; status: string; order_id: string }>(sql`
+              // Find attempt by provider_ref or provider_key inside this tenant transaction.
+              const rows = await tx.execute<{ id: string; status: string; order_id: string }>(sql`
               select id, status, order_id from payment_attempts
               where tenant_id=${tenantId}::uuid and (provider_ref=${body.providerRef} or provider_key=${body.providerKey ?? ''} or provider_ref=${body.providerRef})
               limit 1
             `);
-            let attempt = rows[0];
-            if (!attempt && body.providerRef) {
-              const byKey = await tx.execute<{ id: string; status: string; order_id: string }>(sql`
+              let attempt = rows[0];
+              if (!attempt && body.providerRef) {
+                const byKey = await tx.execute<{
+                  id: string;
+                  status: string;
+                  order_id: string;
+                }>(sql`
                 select id, status, order_id from payment_attempts where tenant_id=${tenantId}::uuid and provider_ref=${body.providerRef} limit 1
               `);
-              attempt = byKey[0];
-            }
-            if (!attempt) {
-              const anyRows = await tx.execute<{
-                id: string;
-                status: string;
-                order_id: string;
-              }>(sql`
+                attempt = byKey[0];
+              }
+              if (!attempt) {
+                const anyRows = await tx.execute<{
+                  id: string;
+                  status: string;
+                  order_id: string;
+                }>(sql`
                 select id, status, order_id from payment_attempts where tenant_id=${tenantId}::uuid order by created_at desc limit 1
               `);
-              if (
-                anyRows.length === 1 &&
-                (anyRows[0]!.status === 'pending' ||
-                  anyRows[0]!.status === 'unknown' ||
-                  anyRows[0]!.status === 'created')
-              ) {
-                attempt = anyRows[0];
+                if (
+                  anyRows.length === 1 &&
+                  (anyRows[0]!.status === 'pending' ||
+                    anyRows[0]!.status === 'unknown' ||
+                    anyRows[0]!.status === 'created')
+                ) {
+                  attempt = anyRows[0];
+                }
               }
-            }
 
-            if (!attempt) return { duplicate: false, applied: false } as const;
-            const cur = attempt.status;
-            const target = body.status;
-            if (cur !== target && cur !== 'paid' && cur !== 'failed') {
-              if (canTransition(cur as never, target as never)) {
-                await tx.execute(sql`
+              if (!attempt) return { duplicate: false, applied: false } as const;
+              const cur = attempt.status;
+              const target = body.status;
+              if (cur !== target && cur !== 'paid' && cur !== 'failed') {
+                if (canTransition(cur as never, target as never)) {
+                  await tx.execute(sql`
                   update payment_attempts set status=${target}, provider_ref=${body.providerRef}, updated_at=now()
                   where id=${attempt.id}::uuid and tenant_id=${tenantId}::uuid
                 `);
-                if (target === 'paid') {
-                  await tx.execute(sql`
+                  if (target === 'paid') {
+                    await tx.execute(sql`
                     update orders set status='paid', updated_at=now()
                     where id=${attempt.order_id}::uuid and tenant_id=${tenantId}::uuid
                   `);
-                } else if (target === 'failed') {
-                  await tx.execute(sql`
+                  } else if (target === 'failed') {
+                    await tx.execute(sql`
                     update orders set status='failed', updated_at=now()
                     where id=${attempt.order_id}::uuid and tenant_id=${tenantId}::uuid
                   `);
+                  }
+                  await writeOutboxEvent(tx, {
+                    tenantId,
+                    aggregateType: 'payment',
+                    aggregateId: attempt.id,
+                    eventType: `payment.webhook_${target}`,
+                    payload: {
+                      attemptId: attempt.id,
+                      orderId: attempt.order_id,
+                      providerRef: body.providerRef,
+                      status: target,
+                      eventId: body.eventId,
+                    },
+                    correlationId: getCorrelationId(request),
+                  });
+                  return { duplicate: false, applied: true } as const;
                 }
-                await writeOutboxEvent(tx, {
-                  tenantId,
-                  aggregateType: 'payment',
-                  aggregateId: attempt.id,
-                  eventType: `payment.webhook_${target}`,
-                  payload: {
-                    attemptId: attempt.id,
-                    orderId: attempt.order_id,
-                    providerRef: body.providerRef,
-                    status: target,
-                    eventId: body.eventId,
-                  },
-                  correlationId: getCorrelationId(request),
-                });
-                return { duplicate: false, applied: true } as const;
               }
-            }
-            return { duplicate: false, applied: false } as const;
-          },
-        );
-        if (outcome.duplicate) {
-          webhookDedupe.add(dedupeKey);
-          return { status: 'already_processed', eventId: body.eventId };
-        }
-        webhookDedupe.add(dedupeKey);
-      } catch (error) {
-        request.log.error({ err: error }, 'webhook_payment_update_failed');
-        throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Payment state unavailable');
-      }
-    } else {
-      // InMemory path: update paymentStore directly if global paymentStore accessible
-      // For tests without DB, we can try to use the injected paymentStore (closure)
-      try {
-        // Search attempts for this tenant and update first pending
-        const attempts = await paymentStore.listPaymentAttempts({
-          tenantId,
-          requestId: request.id,
-        } as never);
-        const targetAttempt =
-          attempts.find((a) => a.providerRef === body.providerRef) ??
-          attempts.find(
-            (a) => a.status === 'pending' || a.status === 'unknown' || a.status === 'created',
+              return { duplicate: false, applied: false } as const;
+            },
           );
-        if (targetAttempt) {
-          // Use InMemory mutator if available
-          const memStore = paymentStore as unknown as {
-            setAttemptStatus?: (id: string, s: string, ref?: string) => void;
-          };
-          if (memStore.setAttemptStatus) {
-            memStore.setAttemptStatus(targetAttempt.id, body.status, body.providerRef);
+          if (outcome.duplicate) {
+            webhookDedupe.add(dedupeKey);
+            return { status: 'already_processed', eventId: body.eventId };
           }
+          webhookDedupe.add(dedupeKey);
+        } catch (error) {
+          request.log.error({ err: error }, 'webhook_payment_update_failed');
+          throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Payment state unavailable');
         }
-        webhookDedupe.add(dedupeKey);
-      } catch {
-        // ignore
+      } else {
+        // InMemory path: update paymentStore directly if global paymentStore accessible
+        // For tests without DB, we can try to use the injected paymentStore (closure)
+        try {
+          // Search attempts for this tenant and update first pending
+          const attempts = await paymentStore.listPaymentAttempts({
+            tenantId,
+            requestId: request.id,
+          } as never);
+          const targetAttempt =
+            attempts.find((a) => a.providerRef === body.providerRef) ??
+            attempts.find(
+              (a) => a.status === 'pending' || a.status === 'unknown' || a.status === 'created',
+            );
+          if (targetAttempt) {
+            // Use InMemory mutator if available
+            const memStore = paymentStore as unknown as {
+              setAttemptStatus?: (id: string, s: string, ref?: string) => void;
+            };
+            if (memStore.setAttemptStatus) {
+              memStore.setAttemptStatus(targetAttempt.id, body.status, body.providerRef);
+            }
+          }
+          webhookDedupe.add(dedupeKey);
+        } catch {
+          // ignore
+        }
       }
-    }
 
-    return reply.status(200).send({ status: 'processed', eventId: body.eventId });
-  });
+      return reply.status(200).send({ status: 'processed', eventId: body.eventId });
+    },
+  );
 
   // --- Webhooks outbound (tenant-scoped) ---
   app.post('/v1/webhooks/endpoints', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
@@ -2630,69 +2672,83 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     '/v1/webhooks/inbound',
     { bodyLimit: SMALL_BODY_LIMIT, config: { rawBody: true } },
     async (request, reply) => {
-    // For inbound we trust x-tenant-id header or body.tenantId; HMAC verified against per-tenant secret or global
-    const rawBody =
-      rawBodyByRequest.get(request) ?? Buffer.from(JSON.stringify(request.body ?? {}), 'utf8');
-    const timestamp = (request.headers['x-webhook-timestamp'] as string) ?? '';
-    const signatureHeader =
-      (request.headers['x-webhook-signature'] as string) ??
-      (request.headers['x-signature'] as string) ??
-      '';
-    // Use global secret for demo, but tenant isolation via dedupe key
-    const configuredSecret =
-      process.env.WEBHOOK_INBOUND_SECRET ?? process.env.PAYMENT_WEBHOOK_SECRET;
-    if (!configuredSecret && process.env.NODE_ENV === 'production') {
-      throw new RequestProblem(503, 'WEBHOOK_NOT_CONFIGURED', 'Inbound webhook is not configured');
-    }
-    const secret = configuredSecret ?? 'test_webhook_secret';
-    const verify = verifyWebhookSignature({ secret, timestamp, rawBody, signatureHeader });
-    if (!verify.valid)
-      throw new RequestProblem(401, 'UNAUTHORIZED', `Webhook signature invalid: ${verify.reason}`);
-    const body = parseOrThrow(InboundWebhookSchema, request.body);
-    const headerTenantId = (request.headers['x-tenant-id'] as string) ?? null;
-    const bodyTenantId = body.tenantId ?? null;
-    if (!bodyTenantId)
-      throw new RequestProblem(400, 'BAD_REQUEST', 'Signed tenantId is required in webhook body');
-    if (headerTenantId && headerTenantId !== bodyTenantId) {
-      throw new RequestProblem(401, 'UNAUTHORIZED', 'Webhook tenant mismatch');
-    }
-    const tenantId = bodyTenantId;
-    const dedupeKey = `${tenantId}:${body.eventId}`;
-    if (inboundDedupe.has(dedupeKey)) {
-      return { status: 'already_processed', eventId: body.eventId };
-    }
-    // Persistent dedupe if DB available
-    if (directDatabase) {
-      if (
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
-          tenantId,
-        )
-      ) {
-        throw new RequestProblem(400, 'BAD_REQUEST', 'Persistent webhook tenantId must be a UUID');
+      // For inbound we trust x-tenant-id header or body.tenantId; HMAC verified against per-tenant secret or global
+      const rawBody =
+        rawBodyByRequest.get(request) ?? Buffer.from(JSON.stringify(request.body ?? {}), 'utf8');
+      const timestamp = (request.headers['x-webhook-timestamp'] as string) ?? '';
+      const signatureHeader =
+        (request.headers['x-webhook-signature'] as string) ??
+        (request.headers['x-signature'] as string) ??
+        '';
+      // Use global secret for demo, but tenant isolation via dedupe key
+      const configuredSecret =
+        process.env.WEBHOOK_INBOUND_SECRET ?? process.env.PAYMENT_WEBHOOK_SECRET;
+      if (!configuredSecret && productionLike) {
+        throw new RequestProblem(
+          503,
+          'WEBHOOK_NOT_CONFIGURED',
+          'Inbound webhook is not configured',
+        );
       }
-      const db = directDatabase;
-      if (!db) throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Database is not configured');
-      {
-        const inserted = await withTenantTransaction(
-          db,
-          { tenantId, requestId: request.id },
-          (tx) =>
-            tx.execute<{ id: string }>(sql`
+      const secret = configuredSecret ?? 'test_webhook_secret';
+      const verify = verifyWebhookSignature({ secret, timestamp, rawBody, signatureHeader });
+      if (!verify.valid)
+        throw new RequestProblem(
+          401,
+          'UNAUTHORIZED',
+          `Webhook signature invalid: ${verify.reason}`,
+        );
+      const body = parseOrThrow(InboundWebhookSchema, request.body);
+      const headerTenantId = (request.headers['x-tenant-id'] as string) ?? null;
+      const bodyTenantId = body.tenantId ?? null;
+      if (!bodyTenantId)
+        throw new RequestProblem(400, 'BAD_REQUEST', 'Signed tenantId is required in webhook body');
+      if (headerTenantId && headerTenantId !== bodyTenantId) {
+        throw new RequestProblem(401, 'UNAUTHORIZED', 'Webhook tenant mismatch');
+      }
+      const tenantId = bodyTenantId;
+      const dedupeKey = `${tenantId}:${body.eventId}`;
+      if (inboundDedupe.has(dedupeKey)) {
+        return { status: 'already_processed', eventId: body.eventId };
+      }
+      // Persistent dedupe if DB available
+      if (directDatabase) {
+        if (
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+            tenantId,
+          )
+        ) {
+          throw new RequestProblem(
+            400,
+            'BAD_REQUEST',
+            'Persistent webhook tenantId must be a UUID',
+          );
+        }
+        const db = directDatabase;
+        if (!db)
+          throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Database is not configured');
+        {
+          const inserted = await withTenantTransaction(
+            db,
+            { tenantId, requestId: request.id },
+            (tx) =>
+              tx.execute<{ id: string }>(sql`
               insert into inbound_webhook_events (tenant_id, event_id, source, payload)
               values (${tenantId}::uuid, ${body.eventId}, ${body.source ?? 'external'}, ${JSON.stringify(body.payload ?? body)}::jsonb)
               on conflict (tenant_id, event_id) do nothing returning id
             `),
-        );
-        if (inserted.length === 0) {
-          inboundDedupe.add(dedupeKey);
-          return { status: 'already_processed', eventId: body.eventId };
+          );
+          if (inserted.length === 0) {
+            inboundDedupe.add(dedupeKey);
+            return { status: 'already_processed', eventId: body.eventId };
+          }
         }
       }
-    }
-    inboundDedupe.add(dedupeKey);
-    // For demo, we just ack; automations could be triggered here via outbox
-    return reply.status(200).send({ status: 'processed', eventId: body.eventId });
-  });
+      inboundDedupe.add(dedupeKey);
+      // For demo, we just ack; automations could be triggered here via outbox
+      return reply.status(200).send({ status: 'processed', eventId: body.eventId });
+    },
+  );
 
   // --- API Keys M2M (tenant-scoped) ---
   app.post('/v1/api-keys', { bodyLimit: SMALL_BODY_LIMIT }, async (request, reply) => {
@@ -2742,6 +2798,8 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
         name: k.name,
         scopes: k.scopes,
         expiresAt: k.expiresAt,
+        lastUsedAt: k.lastUsedAt,
+        createdAt: k.createdAt,
       })),
     };
   });
@@ -2841,7 +2899,8 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     // Persistent if DB available, else memory
     if (directDatabase) {
       const db = directDatabase;
-      if (!db) throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Database is not configured');
+      if (!db)
+        throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Database is not configured');
       {
         const rows = await withTenantTransaction(
           db,
@@ -2892,7 +2951,8 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     requirePermission(context, 'automations:read');
     if (directDatabase) {
       const db = directDatabase;
-      if (!db) throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Database is not configured');
+      if (!db)
+        throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Database is not configured');
       {
         const rows = await withTenantTransaction(
           db,
@@ -3409,9 +3469,9 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     });
     const nextCursor =
       audit.length === query.limit && audit.length > 0
-        ? Buffer.from(`${audit[audit.length - 1]!.at}|${audit[audit.length - 1]!.id}`).toString(
-            'base64url',
-          )
+        ? Buffer.from(
+            `${new Date(audit[audit.length - 1]!.at).toISOString()}|${audit[audit.length - 1]!.id}`,
+          ).toString('base64url')
         : null;
     return {
       data: audit.map((record) => ({
@@ -3443,7 +3503,11 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
         .status(413)
         .send(errorBody(request.id, 'PAYLOAD_TOO_LARGE', 'Request body is too large'));
     }
-    if (fastifyError.statusCode && fastifyError.statusCode >= 400 && fastifyError.statusCode < 500) {
+    if (
+      fastifyError.statusCode &&
+      fastifyError.statusCode >= 400 &&
+      fastifyError.statusCode < 500
+    ) {
       return reply
         .status(fastifyError.statusCode)
         .send(
@@ -3456,9 +3520,7 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     }
     const mapped = mapDomainError(error instanceof Error ? error.message : '');
     if (mapped) {
-      return reply
-        .status(mapped.status)
-        .send(errorBody(request.id, mapped.code, mapped.message));
+      return reply.status(mapped.status).send(errorBody(request.id, mapped.code, mapped.message));
     }
     const dbCode = (error as { code?: string }).code;
     if (dbCode === '22P02') {

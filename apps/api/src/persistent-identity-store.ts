@@ -217,11 +217,7 @@ export class PersistentIdentityStore implements IdentityStore {
     userId: string,
     callback: (transaction: DatabaseExecutor) => Promise<T>,
   ): Promise<T> {
-    return withAuthTransaction(
-      this.database,
-      { userId, requestId: 'identity.auth' },
-      callback,
-    );
+    return withAuthTransaction(this.database, { userId, requestId: 'identity.auth' }, callback);
   }
 
   private withAuthBootstrap<T>(
@@ -865,40 +861,20 @@ export class PersistentIdentityStore implements IdentityStore {
           // ignore
         }
       }
-      // Try with new columns, fallback without
-      try {
-        const rows = await transaction.execute<AuditRow>(sql`
-          select id, tenant_id, actor_user_id, action, resource_id, request_id, trace_id, ip, result, created_at, metadata
-          from audit_log
-          where tenant_id = ${context.tenantId}::uuid
-            and (${action}::text is null or action = ${action})
-            and (
-              ${cursorCreatedAt}::timestamptz is null
-              or (created_at, id) > (${cursorCreatedAt}::timestamptz, ${cursorId}::uuid)
-            )
-          order by created_at, id
-          limit ${limit}
-        `);
-        return rows.map(mapAudit);
-      } catch {
-        const rows = await transaction.execute<AuditRow>(sql`
-          select id, tenant_id, actor_user_id, action, resource_id, request_id, created_at, metadata
-          from audit_log
-          where tenant_id = ${context.tenantId}::uuid
-            and (${action}::text is null or action = ${action})
-          order by created_at, id
-          limit ${limit}
-        `);
-        // manual cursor for fallback (filter in memory if needed)
-        let filtered: AuditRow[] = [...(rows as unknown as AuditRow[])];
-        if (cursorId) {
-          const idx = filtered.findIndex((r) => r.id === cursorId);
-          if (idx >= 0) filtered = filtered.slice(idx + 1, idx + 1 + limit);
-        }
-        return filtered.map((r) =>
-          mapAudit({ ...r, trace_id: null, ip: null, result: null } as AuditRow),
-        );
-      }
+      const safeCursorId = isUuid(cursorId ?? undefined) ? cursorId : null;
+      const rows = await transaction.execute<AuditRow>(sql`
+        select id, tenant_id, actor_user_id, action, resource_id, request_id, trace_id, ip, result, created_at, metadata
+        from audit_log
+        where tenant_id = ${context.tenantId}::uuid
+          and (${action}::text is null or action = ${action})
+          and (
+            ${cursorCreatedAt}::timestamptz is null
+            or (created_at, id) > (${cursorCreatedAt}::timestamptz, ${safeCursorId}::uuid)
+          )
+        order by created_at, id
+        limit ${limit}
+      `);
+      return rows.map(mapAudit);
     });
   }
 }

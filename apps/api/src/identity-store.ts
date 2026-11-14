@@ -57,6 +57,7 @@ export interface SessionRecord {
   tokenHash: string;
   userId: string;
   expiresAt: number;
+  absoluteExpiresAt?: number;
   selectedTenantId?: string;
 }
 
@@ -208,6 +209,7 @@ export interface IdentityStore {
 }
 
 const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const SESSION_ABSOLUTE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const INVITATION_TTL_MS = 48 * 60 * 60 * 1000;
 
 function hashToken(token: string): string {
@@ -337,6 +339,7 @@ export class InMemoryIdentityStore {
       tokenHash: hashToken(token),
       userId,
       expiresAt: now + SESSION_TTL_MS,
+      absoluteExpiresAt: now + SESSION_ABSOLUTE_TTL_MS,
     };
     this.sessions.set(record.tokenHash, record);
     return token;
@@ -345,7 +348,11 @@ export class InMemoryIdentityStore {
   getSession(token: string, now = Date.now()): SessionRecord | null {
     const tokenHash = hashToken(token);
     const session = this.sessions.get(tokenHash);
-    if (!session || session.expiresAt <= now) {
+    if (
+      !session ||
+      session.expiresAt <= now ||
+      (session.absoluteExpiresAt !== undefined && session.absoluteExpiresAt <= now)
+    ) {
       this.sessions.delete(tokenHash);
       return null;
     }
@@ -367,7 +374,10 @@ export class InMemoryIdentityStore {
     return revoked;
   }
 
-  refreshSession(token: string, now = Date.now()): { session: SessionRecord; token: string } | null {
+  refreshSession(
+    token: string,
+    now = Date.now(),
+  ): { session: SessionRecord; token: string } | null {
     const record = this.getSession(token, now);
     if (!record) return null;
     this.sessions.delete(record.tokenHash);
@@ -375,7 +385,10 @@ export class InMemoryIdentityStore {
     const next: SessionRecord = {
       ...record,
       tokenHash: hashToken(nextToken),
-      expiresAt: now + SESSION_TTL_MS,
+      expiresAt: Math.min(
+        now + SESSION_TTL_MS,
+        record.absoluteExpiresAt ?? now + SESSION_ABSOLUTE_TTL_MS,
+      ),
     };
     this.sessions.set(next.tokenHash, next);
     return { session: next, token: nextToken };
