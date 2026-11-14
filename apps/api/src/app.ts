@@ -535,6 +535,16 @@ const DOMAIN_ERRORS: Record<string, { status: number; code: string; message: str
   amount_invalid: { status: 400, code: 'BAD_REQUEST', message: 'Invalid amount' },
   quantity_invalid: { status: 400, code: 'BAD_REQUEST', message: 'Invalid quantity' },
   tenant_context_mismatch: { status: 400, code: 'BAD_REQUEST', message: 'Tenant context mismatch' },
+  description_not_supported: {
+    status: 400,
+    code: 'BAD_REQUEST',
+    message: 'Branch descriptions are not supported',
+  },
+  prefix_collision: {
+    status: 503,
+    code: 'DEPENDENCY_UNAVAILABLE',
+    message: 'Could not allocate API key',
+  },
   reference_invalid: { status: 400, code: 'BAD_REQUEST', message: 'Invalid reference' },
   invitation_invalid: { status: 400, code: 'BAD_REQUEST', message: 'Invitation is invalid' },
   invitation_email_mismatch: {
@@ -577,6 +587,16 @@ function organizationView(organization: OrganizationRecord) {
     slug: organization.slug,
     name: organization.name,
     status: organization.status,
+  };
+}
+
+function branchView(branch: BranchRecord) {
+  return {
+    id: branch.id,
+    slug: branch.slug,
+    name: branch.name,
+    ...(branch.description !== undefined ? { description: branch.description ?? '' } : {}),
+    status: branch.status,
   };
 }
 
@@ -999,8 +1019,18 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     },
   ): Omit<AuditRecord, 'id' | 'at'> => {
     const corr = getCorrelation();
+    const { resourceId, metadata, ...rest } = fields;
+    // `resource_id` is a UUID column. A non-UUID reference is preserved as
+    // metadata instead of being silently truncated or sent to the database.
+    const validResourceId = isUuid(resourceId) ? resourceId : undefined;
+    const safeMetadata: Record<string, string> = { ...(metadata ?? {}) };
+    if (resourceId !== undefined && validResourceId === undefined) {
+      safeMetadata.resourceRef = resourceId;
+    }
     const base: Omit<AuditRecord, 'id' | 'at'> = {
-      ...fields,
+      ...rest,
+      ...(validResourceId !== undefined ? { resourceId: validResourceId } : {}),
+      ...(Object.keys(safeMetadata).length > 0 ? { metadata: safeMetadata } : {}),
       requestId: request.id,
       result: fields.result ?? 'success',
     };
@@ -1016,6 +1046,48 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     }
     return base;
   };
+
+  /**
+   * Digest a failed operation into a bounded, non-sensitive audit reason.
+   * Raw internal messages never reach the audit row.
+   */
+  const auditFailureReason = (error: unknown): string => {
+    if (error instanceof RequestProblem) return error.code.toLowerCase();
+    if (error instanceof Error) {
+      const mapped = mapDomainError(error.message);
+      if (mapped) return error.message;
+      const dbCode = (error as { code?: unknown }).code;
+      if (typeof dbCode === 'string' && dbCode.length <= 8) return `db_${dbCode}`;
+    }
+    return 'unexpected_error';
+  };
+
+  /**
+   * Append-only audit writes must never roll back or mask an already-committed
+   * business operation, and must never run inside an aborted transaction.
+   * Failures are surfaced as a metric and an error log instead.
+   */
+  const persistAudit = async (record: Omit<AuditRecord, 'id' | 'at'>): Promise<void> => {
+    try {
+      await store.addAudit(record);
+    } catch (error) {
+      metrics.recordAudit('audit.write_failed');
+      app.log.error(
+        {
+          err: error,
+          request_id: record.requestId,
+          audit_action: record.action,
+          tenant_id: record.tenantId,
+        },
+        'audit_write_failed',
+      );
+    }
+  };
+
+  const writeAudit = (
+    request: FastifyRequest,
+    fields: Parameters<typeof auditBase>[1],
+  ): Promise<void> => persistAudit(auditBase(request, fields));
 
   const enforceCsrf = (request: FastifyRequest): void => {
     if (CSRF_EXEMPT_METHODS.has(request.method)) return;
@@ -1276,7 +1348,18 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       }
       throw new RequestProblem(503, 'DEPENDENCY_UNAVAILABLE', 'Could not expire upload');
     }
-    await fileStore.markExpired(context, file.id);
+    const expired = await fileStore.markExpired(context, file.id);
+    if (expired) {
+      await persistAudit({
+        action: 'file.expired',
+        actorUserId: context.userId,
+        tenantId: context.tenantId,
+        resourceId: file.id,
+        requestId: context.requestId,
+        result: 'success',
+        metadata: { reason: 'pending_expired' },
+      });
+    }
   };
 
   const jwksCache = new Map<string, { keys: OidcJsonWebKey[]; fetchedAt: number }>();
@@ -1620,106 +1703,75 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     await enforceTenantRateLimit(request, reply, context);
     requirePermission(context, 'branches:create');
     const body = parseOrThrow(BranchCreateSchema, request.body);
-    // Try persistent path with description, fallback without if column missing
-    if (
-      'createBranch' in store &&
-      typeof (store as unknown as { createBranch: unknown }).createBranch === 'function'
-    ) {
-      const ps = store as unknown as {
-        createBranch: (
-          ctx: StoreTenantContext,
-          input: { slug: string; name: string; description?: string | null },
-        ) => Promise<BranchRecord>;
-      };
-      try {
-        const created = await ps.createBranch(context, {
+    const auditFields = {
+      action: 'branch.created' as const,
+      actorUserId: context.user.id,
+      tenantId: context.tenantId,
+    };
+    try {
+      let created: BranchRecord;
+      if (
+        'createBranch' in store &&
+        typeof (store as unknown as { createBranch: unknown }).createBranch === 'function'
+      ) {
+        const ps = store as unknown as {
+          createBranch: (
+            ctx: StoreTenantContext,
+            input: { slug: string; name: string; description?: string | null },
+          ) => Promise<BranchRecord>;
+        };
+        try {
+          created = await ps.createBranch(context, {
+            slug: body.slug,
+            name: body.name,
+            description: body.description ?? null,
+          });
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          if (!(msg.includes('description') && msg.includes('does not exist'))) throw error;
+          // fallback: create without description (vN compat)
+          created = await ps.createBranch(context, { slug: body.slug, name: body.name });
+        }
+      } else {
+        // InMemory path: direct map write tenant-scoped
+        const memStore = store as unknown as InMemoryIdentityStore;
+        const existing = [...memStore.branches.values()].find(
+          (branch) => branch.organizationId === context.tenantId && branch.slug === body.slug,
+        );
+        if (existing) throw new RequestProblem(409, 'CONFLICT', 'Branch slug already exists');
+        const id = `branch_${body.slug}_${Math.random().toString(36).slice(2, 8)}`;
+        created = {
+          id,
+          organizationId: context.tenantId,
           slug: body.slug,
           name: body.name,
-          description: body.description ?? null,
-        });
-        await invalidateCache(context.tenantId, 'branches');
-        await store.addAudit(
-          auditBase(request, {
-            action: 'organization.created',
-            actorUserId: context.user.id,
-            tenantId: context.tenantId,
-            resourceId: created.id,
-            metadata: { branch: created.slug },
-          }),
-        );
-        return reply.status(201).send({
-          branch: {
-            id: created.id,
-            slug: created.slug,
-            name: created.name,
-            description: created.description ?? '',
-            status: created.status,
-          },
-        });
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        if (msg.includes('description') && msg.includes('does not exist')) {
-          // fallback: create without description (vN compat)
-          const fallback = await (
-            store as unknown as {
-              createBranch: (
-                ctx: StoreTenantContext,
-                input: { slug: string; name: string },
-              ) => Promise<BranchRecord>;
-            }
-          ).createBranch(context, { slug: body.slug, name: body.name });
-          await invalidateCache(context.tenantId, 'branches');
-          return reply.status(201).send({
-            branch: {
-              id: fallback.id,
-              slug: fallback.slug,
-              name: fallback.name,
-              status: fallback.status,
-            },
-          });
-        }
-        if (
-          msg === 'organization_slug_taken' ||
-          msg.includes('branch_slug_taken') ||
-          msg.includes('duplicate key')
-        )
-          throw new RequestProblem(409, 'CONFLICT', 'Branch slug already exists');
-        throw error;
+          ...(body.description !== undefined ? { description: body.description } : {}),
+          status: 'active',
+        };
+        memStore.branches.set(id, created);
       }
-    }
-    // InMemory path: direct map write tenant-scoped
-    const memStore = store as unknown as InMemoryIdentityStore;
-    try {
-      // Check duplicate slug for tenant
-      const existing = (memStore as unknown as { branches: Map<string, BranchRecord> }).branches
-        ? [
-            ...(memStore as unknown as { branches: Map<string, BranchRecord> }).branches.values(),
-          ].find((b) => b.organizationId === context.tenantId && b.slug === body.slug)
-        : null;
-      if (existing) throw new RequestProblem(409, 'CONFLICT', 'Branch slug already exists');
-      const id = `branch_${body.slug}_${Math.random().toString(36).slice(2, 8)}`;
-      const record: BranchRecord = {
-        id,
-        organizationId: context.tenantId,
-        slug: body.slug,
-        name: body.name,
-        ...(body.description !== undefined ? { description: body.description } : {}),
-        status: 'active',
-      };
-      (memStore as unknown as { branches: Map<string, BranchRecord> }).branches.set(id, record);
       await invalidateCache(context.tenantId, 'branches');
-      return reply.status(201).send({
-        branch: {
-          id: record.id,
-          slug: record.slug,
-          name: record.name,
-          description: record.description ?? '',
-          status: record.status,
-        },
+      await writeAudit(request, {
+        ...auditFields,
+        resourceId: created.id,
+        metadata: { slug: created.slug },
       });
-    } catch (e) {
-      if (e instanceof RequestProblem) throw e;
-      throw e;
+      return reply.status(201).send({ branch: branchView(created) });
+    } catch (error) {
+      await writeAudit(request, {
+        ...auditFields,
+        result: 'failure',
+        metadata: { reason: auditFailureReason(error), slug: body.slug },
+      });
+      const msg = error instanceof Error ? error.message : String(error);
+      if (
+        msg === 'organization_slug_taken' ||
+        msg.includes('branch_slug_taken') ||
+        msg.includes('duplicate key')
+      ) {
+        throw new RequestProblem(409, 'CONFLICT', 'Branch slug already exists');
+      }
+      throw error;
     }
   });
 
@@ -1730,52 +1782,51 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     const params = request.params as { id?: string };
     if (!params.id) throw new RequestProblem(400, 'BAD_REQUEST', 'Branch id required');
     const body = parseOrThrow(BranchUpdateSchema, request.body ?? {});
-    // Try persistent
-    if (
-      'updateBranch' in store &&
-      typeof (store as unknown as { updateBranch: unknown }).updateBranch === 'function'
-    ) {
-      const ps = store as unknown as {
-        updateBranch: (
-          ctx: StoreTenantContext,
-          id: string,
-          patch: { name?: string; description?: string | null },
-        ) => Promise<BranchRecord | null>;
-      };
-      const updated = await ps.updateBranch(context, params.id, {
-        ...(body.name !== undefined ? { name: body.name } : {}),
-        ...(body.description !== undefined ? { description: body.description } : {}),
-      });
+    const auditFields = {
+      action: 'branch.updated' as const,
+      actorUserId: context.user.id,
+      tenantId: context.tenantId,
+      resourceId: params.id,
+    };
+    try {
+      let updated: BranchRecord | null = null;
+      if (
+        'updateBranch' in store &&
+        typeof (store as unknown as { updateBranch: unknown }).updateBranch === 'function'
+      ) {
+        const ps = store as unknown as {
+          updateBranch: (
+            ctx: StoreTenantContext,
+            id: string,
+            patch: { name?: string; description?: string | null },
+          ) => Promise<BranchRecord | null>;
+        };
+        updated = await ps.updateBranch(context, params.id, {
+          ...(body.name !== undefined ? { name: body.name } : {}),
+          ...(body.description !== undefined ? { description: body.description } : {}),
+        });
+      } else {
+        // InMemory
+        const memStore = store as unknown as InMemoryIdentityStore;
+        const existing = memStore.branches.get(params.id);
+        if (existing && existing.organizationId === context.tenantId) {
+          if (body.name !== undefined) existing.name = body.name;
+          if (body.description !== undefined) existing.description = body.description;
+          updated = existing;
+        }
+      }
       if (!updated) throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
       await invalidateCache(context.tenantId, 'branches');
-      return {
-        branch: {
-          id: updated.id,
-          slug: updated.slug,
-          name: updated.name,
-          description: updated.description ?? '',
-          status: updated.status,
-        },
-      };
+      await writeAudit(request, auditFields);
+      return { branch: branchView(updated) };
+    } catch (error) {
+      await writeAudit(request, {
+        ...auditFields,
+        result: 'failure',
+        metadata: { reason: auditFailureReason(error) },
+      });
+      throw error;
     }
-    // InMemory
-    const memStore = store as unknown as InMemoryIdentityStore;
-    const map = (memStore as unknown as { branches: Map<string, BranchRecord> }).branches;
-    const existing = map.get(params.id);
-    if (!existing || existing.organizationId !== context.tenantId)
-      throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
-    if (body.name !== undefined) existing.name = body.name;
-    if (body.description !== undefined) existing.description = body.description;
-    await invalidateCache(context.tenantId, 'branches');
-    return {
-      branch: {
-        id: existing.id,
-        slug: existing.slug,
-        name: existing.name,
-        description: existing.description ?? '',
-        status: existing.status,
-      },
-    };
   });
 
   app.get('/v1/members', async (request, reply) => {
@@ -1989,6 +2040,11 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     await enforceEndpointRateLimit(request, reply, 'POST /v1/inventory/reserve', context.tenantId);
     requirePermission(context, 'inventory:reserve');
     const body = parseOrThrow(ReserveSchema, request.body);
+    const auditFields = {
+      action: 'inventory.reserved' as const,
+      actorUserId: context.user.id,
+      tenantId: context.tenantId,
+    };
     try {
       const reservation = await inventoryStore.reserve(
         { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
@@ -2001,8 +2057,27 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
         },
       );
       await invalidateCache(context.tenantId, 'inventory');
+      await writeAudit(request, {
+        ...auditFields,
+        resourceId: reservation.id,
+        metadata: {
+          productId: body.productId,
+          branchId: body.branchId,
+          quantity: String(body.quantity),
+        },
+      });
       return reply.status(201).send({ reservation });
     } catch (error) {
+      await writeAudit(request, {
+        ...auditFields,
+        result: 'failure',
+        metadata: {
+          reason: auditFailureReason(error),
+          productId: body.productId,
+          branchId: body.branchId,
+          quantity: String(body.quantity),
+        },
+      });
       if (error instanceof Error) {
         if (error.message === 'out_of_stock') {
           throw new RequestProblem(409, 'CONFLICT', 'Insufficient stock');
@@ -2059,14 +2134,26 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     await enforceTenantRateLimit(request, reply, context);
     await enforceEndpointRateLimit(request, reply, 'POST /v1/orders', context.tenantId);
     requirePermission(context, 'orders:create');
-    // Kill switch per tenant (Fase 14): if kill_orders_write enabled, reject with 503 without touching DB
+    // Kill switch per tenant (Fase 14): if kill_orders_write enabled, reject with 503 without touching DB.
+    // The flag read is security-relevant: a failed read must fail closed (503),
+    // never quietly allow writes while the kill switch state is unknown.
+    let killed: boolean;
     try {
-      const killed = await featureFlagStore.isEnabled(context, 'kill_orders_write');
-      if (killed)
-        throw new RequestProblem(503, 'KILL_SWITCH', 'Orders write disabled by kill switch');
-    } catch (e) {
-      if (e instanceof RequestProblem) throw e;
+      killed = await featureFlagStore.isEnabled(context, 'kill_orders_write');
+    } catch (error) {
+      metrics.recordAudit('orders.kill_switch_check_failed');
+      app.log.error(
+        { err: error, request_id: request.id, tenant_id: context.tenantId },
+        'kill_switch_check_failed',
+      );
+      throw new RequestProblem(
+        503,
+        'DEPENDENCY_UNAVAILABLE',
+        'Order availability could not be verified',
+      );
     }
+    if (killed)
+      throw new RequestProblem(503, 'KILL_SWITCH', 'Orders write disabled by kill switch');
     const body = parseOrThrow(OrderCreateSchema, request.body);
     const idempotencyHeader = request.headers['idempotency-key'];
     const rawIdempotencyKey = Array.isArray(idempotencyHeader)
@@ -2845,28 +2932,38 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
     if (!['owner', 'admin'].includes(context.membership.role))
       throw new RequestProblem(403, 'FORBIDDEN', 'Requires owner or admin');
     const body = parseOrThrow(ApiKeyCreateSchema, request.body);
-    const { record, raw } = await apiKeyStore.create(
-      { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
-      {
-        name: body.name,
-        scopes: body.scopes,
-        expiresInMs: body.expiresInMs,
-        createdBy: context.user.id,
-      },
-    );
-    await store.addAudit(
-      auditBase(request, {
-        action: 'api_key.created',
-        actorUserId: context.user.id,
-        tenantId: context.tenantId,
+    const auditFields = {
+      action: 'api_key.created' as const,
+      actorUserId: context.user.id,
+      tenantId: context.tenantId,
+    };
+    try {
+      const { record, raw } = await apiKeyStore.create(
+        { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
+        {
+          name: body.name,
+          scopes: body.scopes,
+          expiresInMs: body.expiresInMs,
+          createdBy: context.user.id,
+        },
+      );
+      await writeAudit(request, {
+        ...auditFields,
         resourceId: record.id,
-        metadata: { apiKeyCreated: record.id },
-      }),
-    );
-    return reply.status(201).send({
-      apiKey: { id: record.id, prefix: record.prefix, name: record.name, scopes: record.scopes },
-      raw,
-    });
+        metadata: { name: record.name },
+      });
+      return reply.status(201).send({
+        apiKey: { id: record.id, prefix: record.prefix, name: record.name, scopes: record.scopes },
+        raw,
+      });
+    } catch (error) {
+      await writeAudit(request, {
+        ...auditFields,
+        result: 'failure',
+        metadata: { reason: auditFailureReason(error) },
+      });
+      throw error;
+    }
   });
 
   app.get('/v1/api-keys', async (request) => {
@@ -2899,21 +2996,25 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       throw new RequestProblem(403, 'FORBIDDEN', 'Requires owner or admin');
     const params = request.params as { id?: string };
     if (!params.id) throw new RequestProblem(400, 'BAD_REQUEST', 'ApiKey id required');
+    const auditFields = {
+      action: 'api_key.revoked' as const,
+      actorUserId: context.user.id,
+      tenantId: context.tenantId,
+      resourceId: params.id,
+    };
     try {
       await apiKeyStore.revoke(
         { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
         params.id,
       );
-      await store.addAudit(
-        auditBase(request, {
-          action: 'api_key.revoked',
-          actorUserId: context.user.id,
-          tenantId: context.tenantId,
-          resourceId: params.id,
-        }),
-      );
+      await writeAudit(request, auditFields);
       return { status: 'revoked' };
     } catch (e) {
+      await writeAudit(request, {
+        ...auditFields,
+        result: 'failure',
+        metadata: { reason: auditFailureReason(e) },
+      });
       if (e instanceof Error && e.message === 'api_key_not_found')
         throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
       throw e;
@@ -2928,20 +3029,21 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       throw new RequestProblem(403, 'FORBIDDEN', 'Requires owner or admin');
     const params = request.params as { id?: string };
     if (!params.id) throw new RequestProblem(400, 'BAD_REQUEST', 'ApiKey id required');
+    const auditFields = {
+      action: 'api_key.rotated' as const,
+      actorUserId: context.user.id,
+      tenantId: context.tenantId,
+    };
     try {
       const { record, raw } = await apiKeyStore.rotate(
         { tenantId: context.tenantId, requestId: request.id, userId: context.user.id },
         params.id,
       );
-      await store.addAudit(
-        auditBase(request, {
-          action: 'api_key.rotated',
-          actorUserId: context.user.id,
-          tenantId: context.tenantId,
-          resourceId: record.id,
-          metadata: { rotatedFrom: params.id, newPrefix: record.prefix },
-        }),
-      );
+      await writeAudit(request, {
+        ...auditFields,
+        resourceId: record.id,
+        metadata: { rotatedFrom: params.id },
+      });
       return reply.status(201).send({
         apiKey: {
           id: record.id,
@@ -2952,6 +3054,12 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
         raw,
       });
     } catch (e) {
+      await writeAudit(request, {
+        ...auditFields,
+        resourceId: params.id,
+        result: 'failure',
+        metadata: { reason: auditFailureReason(e) },
+      });
       if (e instanceof Error && e.message === 'api_key_not_found')
         throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
       throw e;
@@ -3248,13 +3356,28 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       throw new RequestProblem(400, 'BAD_REQUEST', 'Uploaded object content-type does not match');
     }
 
+    const auditFields = {
+      action: 'file.finalized' as const,
+      actorUserId: context.user.id,
+      tenantId: context.tenantId,
+      resourceId: params.id,
+    };
     try {
       const finalized = await fileStore.finalize(contextRef, params.id, {
         sizeActual: head.contentLength,
         ...(body.checksum !== undefined ? { checksum: body.checksum } : {}),
       });
+      await writeAudit(request, {
+        ...auditFields,
+        metadata: { sizeActual: String(head.contentLength) },
+      });
       return { file: fileView(finalized) };
     } catch (error) {
+      await writeAudit(request, {
+        ...auditFields,
+        result: 'failure',
+        metadata: { reason: auditFailureReason(error) },
+      });
       if (error instanceof Error) {
         if (error.message === 'file_not_found')
           throw new RequestProblem(404, 'NOT_FOUND', 'Resource not found');
@@ -3616,19 +3739,41 @@ export function buildApp(options: AppOptions = {}): FastifyInstance {
       return reply.status(mapped.status).send(errorBody(request.id, mapped.code, mapped.message));
     }
     const dbCode = (error as { code?: string }).code;
-    if (dbCode === '22P02') {
-      return reply.status(400).send(errorBody(request.id, 'BAD_REQUEST', 'Invalid identifier'));
-    }
-    if (dbCode === '23505') {
-      return reply.status(409).send(errorBody(request.id, 'CONFLICT', 'Resource already exists'));
-    }
-    if (dbCode === '42501') {
-      return reply.status(403).send(errorBody(request.id, 'FORBIDDEN', 'Request denied'));
+    switch (dbCode) {
+      case '22P02':
+        // Invalid input syntax for uuid/numeric: a malformed id is a client
+        // error, never a 500, and the parser detail is not echoed back.
+        return reply.status(400).send(errorBody(request.id, 'BAD_REQUEST', 'Invalid identifier'));
+      case '22001':
+      case '22003':
+      case '23502':
+      case '23514':
+        return reply.status(400).send(errorBody(request.id, 'BAD_REQUEST', 'Invalid request'));
+      case '23503':
+        return reply
+          .status(409)
+          .send(errorBody(request.id, 'CONFLICT', 'Related resource does not exist'));
+      case '23505':
+        return reply.status(409).send(errorBody(request.id, 'CONFLICT', 'Resource already exists'));
+      case '42501':
+        return reply.status(403).send(errorBody(request.id, 'FORBIDDEN', 'Request denied'));
+      case 'CIRCUIT_OPEN':
+        return reply
+          .status(503)
+          .send(
+            errorBody(request.id, 'DEPENDENCY_UNAVAILABLE', 'Dependency temporarily unavailable'),
+          );
+      default:
+        break;
     }
     request.log.error({ err: error, request_id: request.id }, 'unhandled_request_error');
     return reply
       .status(500)
       .send(errorBody(request.id, 'INTERNAL_ERROR', 'Unexpected server error'));
+  });
+
+  app.setNotFoundHandler((request, reply) => {
+    return reply.status(404).send(errorBody(request.id, 'NOT_FOUND', 'Route not found'));
   });
 
   return app;
