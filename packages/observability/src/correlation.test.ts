@@ -21,6 +21,11 @@ describe('correlation hardening', () => {
     expect(ctx.traceId).not.toBe('z'.repeat(32));
   });
 
+  it('preserves bounded legacy x-trace-id values for audit correlation', () => {
+    const ctx = extractCorrelation({ 'x-trace-id': 'trace-abc-123' }, 'req-1');
+    expect(ctx.traceId).toBe('trace-abc-123');
+  });
+
   it('prefers traceparent over the custom x-trace-id header', () => {
     const ctx = extractCorrelation(
       {

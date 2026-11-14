@@ -19,6 +19,7 @@ const REQUEST_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/u;
 const TRACE_ID_PATTERN = /^[0-9a-f]{32}$/iu;
 const SPAN_ID_PATTERN = /^[0-9a-f]{16}$/iu;
 const TRACEPARENT_PATTERN = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/iu;
+const LEGACY_TRACE_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/u;
 
 export function hashTenant(tenantId: string): string {
   return createHash('sha256').update(tenantId).digest('hex').slice(0, 8);
@@ -147,9 +148,15 @@ export function extractCorrelation(
   const traceparent = headerValue(headers, 'traceparent');
   const traceFromParent = traceparent ? parseTraceparent(traceparent) : null;
   const clientTraceId = headerValue(headers, 'x-trace-id');
+  // W3C ids stay canonical; bounded legacy ids (e.g. pre-traceparent clients,
+  // smoke tests) are preserved so audit/log correlation is not silently broken.
   const traceId =
     traceFromParent?.traceId ??
-    (isValidTraceId(clientTraceId) ? clientTraceId.toLowerCase() : undefined);
+    (isValidTraceId(clientTraceId)
+      ? clientTraceId.toLowerCase()
+      : typeof clientTraceId === 'string' && LEGACY_TRACE_PATTERN.test(clientTraceId)
+        ? clientTraceId
+        : undefined);
   const parentSpanId = traceFromParent?.parentId;
   const rawTenantId = headerValue(headers, 'x-tenant-id');
   const tenantId =
