@@ -111,6 +111,15 @@ describe('analyzeMigration', () => {
     assert.ok(result.errors.some((e) => e.includes('without CONCURRENTLY')));
   });
 
+  it('accepts CREATE UNIQUE INDEX CONCURRENTLY', () => {
+    const result = analyzeMigration({
+      kind: 'indexes',
+      name: '0006_test.sql',
+      raw: 'create unique index concurrently if not exists uq_t on t (tenant_id, id);',
+    });
+    assert.deepEqual(result.errors, []);
+  });
+
   it('flags full-table UPDATE in data migrations but ignores strings', () => {
     const dangerous = analyzeMigration({
       kind: 'data',
