@@ -30,6 +30,7 @@ COPY packages ./packages
 # Next.js collects anonymous telemetry; disable in build
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV STANDALONE=1
+ENV NODE_ENV=production
 RUN pnpm --filter @platform/web build
 
 FROM node:${NODE_VERSION} AS runner
@@ -47,13 +48,16 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
-# Leverage standalone output
-COPY --from=builder /app/apps/web/.next/standalone ./
-COPY --from=builder /app/apps/web/.next/static ./apps/web/.next/static
-COPY --from=builder /app/apps/web/public ./apps/web/public
+# Standalone output traces production dependencies only; dev dependencies stay in the builder.
+COPY --chown=appuser:appgroup --from=builder /app/apps/web/.next/standalone ./
+COPY --chown=appuser:appgroup --from=builder /app/apps/web/.next/static ./apps/web/.next/static
+COPY --chown=appuser:appgroup --from=builder /app/apps/web/public ./apps/web/public
+# next/image and fetch caches live under .next/cache; the runtime user must own it.
+RUN mkdir -p apps/web/.next/cache && chown -R appuser:appgroup apps/web/.next
 USER appuser
 EXPOSE 3000
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD node -e "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))" || \
-      wget --no-verbose --tries=1 --spider http://127.0.0.1:3000/ || exit 1
+# Liveness only: the route is served by the web process and does not depend on the API.
+# Readiness (API dependency) is exposed at /api/health?ready=1 for orchestrators/probes.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=15s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:3000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 CMD ["node", "apps/web/server.js"]

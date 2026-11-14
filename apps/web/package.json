@@ -5,11 +5,12 @@
   "scripts": {
     "dev": "next dev --hostname 0.0.0.0 --port 3000",
     "build": "next build",
+    "start": "next start --hostname 0.0.0.0 --port 3000",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint --config ../../eslint.config.mjs app next-env.d.ts next.config.ts",
-    "test": "vitest run --passWithNoTests",
+    "lint": "eslint --config ../../eslint.config.mjs app components lib middleware.ts next-env.d.ts next.config.ts",
+    "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test --config ../../playwright.config.ts"
   },
   "dependencies": {
     "next": "^15.5.2",
