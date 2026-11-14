@@ -36,7 +36,7 @@ const currency = z.string().regex(/^[A-Z]{3}$/u);
 const amountCents = z.number().int().nonnegative();
 
 /** Payload objects stay open to additive fields, but required fields and units are enforced. */
-function loose<T extends z.ZodRawShape>(shape: T): z.ZodObject<T, 'passthrough'> {
+function loose<T extends z.ZodRawShape>(shape: T) {
   return z.object(shape).passthrough();
 }
 
