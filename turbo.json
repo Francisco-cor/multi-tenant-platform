@@ -1,12 +1,64 @@
 {
   "$schema": "https://turborepo.com/schema.json",
+  "globalDependencies": [".env", ".env.example", ".nvmrc", "tsconfig.base.json", "pnpm-lock.yaml"],
+  "globalEnv": [
+    "CI",
+    "NODE_ENV",
+    "DATABASE_URL",
+    "DATABASE_ROLE",
+    "WORKER_DATABASE_ROLE",
+    "REDIS_URL",
+    "S3_ENDPOINT",
+    "S3_BUCKET",
+    "S3_REGION",
+    "S3_ACCESS_KEY",
+    "S3_SECRET_KEY",
+    "OIDC_ISSUER_URL",
+    "OIDC_CLIENT_ID",
+    "OIDC_CLIENT_SECRET",
+    "OIDC_REDIRECT_URI",
+    "PAYMENT_PROVIDER",
+    "PAYMENT_PROVIDER_API_KEY",
+    "PAYMENT_PROVIDER_BASE_URL",
+    "PAYMENT_WEBHOOK_SECRET",
+    "PAYMENT_PROVIDER_WEBHOOK_SECRET",
+    "WEBHOOK_INBOUND_SECRET",
+    "WEBHOOK_SECRET_ENCRYPTION_KEY",
+    "ALLOW_DEV_LOGIN",
+    "CSRF_STRICT",
+    "RATE_LIMIT_ENABLED",
+    "TRUST_PROXY",
+    "TENANT_BASE_DOMAIN",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_SERVICE_NAME",
+    "LOG_LEVEL"
+  ],
   "tasks": {
     "dev": { "cache": false, "persistent": true },
     "build": { "dependsOn": ["^build"], "outputs": ["dist/**", ".next/**"] },
     "typecheck": { "dependsOn": ["^typecheck"], "outputs": [] },
     "lint": { "dependsOn": ["^lint"], "outputs": [] },
-    "test": { "dependsOn": ["^build"], "outputs": ["coverage/**"] },
-    "test:integration": { "cache": false, "outputs": [] },
+    "test": {
+      "dependsOn": ["^build"],
+      "outputs": ["coverage/**"],
+      "env": [
+        "RUN_DB_INTEGRATION",
+        "RUN_WORKER_INTEGRATION",
+        "RUN_API_INTEGRATION",
+        "RUN_S3_INTEGRATION"
+      ]
+    },
+    "test:integration": {
+      "cache": false,
+      "outputs": [],
+      "env": [
+        "RUN_DB_INTEGRATION",
+        "RUN_WORKER_INTEGRATION",
+        "RUN_API_INTEGRATION",
+        "RUN_S3_INTEGRATION",
+        "S3_PROVIDER"
+      ]
+    },
     "test:e2e": { "cache": false, "outputs": ["playwright-report/**", "test-results/**"] }
   }
 }

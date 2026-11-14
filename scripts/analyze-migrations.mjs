@@ -1,5 +1,7 @@
 #!/usr/bin/env node
-// Analyze migrations before deploy: checks expand-contract compliance, CONCURRENTLY, destructive ops
+// Analyze migrations before deploy: checks expand-contract compliance, CONCURRENTLY, destructive ops.
+// The SQL scanner below understands comments, single/double-quoted literals and dollar-quoted
+// bodies so keywords inside function bodies or strings are not treated as real DDL.
 import { readdir, readFile } from 'node:fs/promises';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,8 +21,342 @@ function ok(msg) {
   console.log(`[analyze:migrations] OK: ${msg}`);
 }
 
+const DOLLAR_TAG = /^\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$/u;
+
+/**
+ * Split SQL into statements while ignoring semicolons inside comments,
+ * strings, quoted identifiers and dollar-quoted bodies.
+ * Returns terminated statements plus the unterminated tail (if any).
+ */
+export function splitSql(raw) {
+  const statements = [];
+  const errors = [];
+  let start = 0;
+  let i = 0;
+  let parens = 0;
+
+  while (i < raw.length) {
+    const c = raw[i];
+    const next = raw[i + 1];
+
+    if (c === '-' && next === '-') {
+      i += 2;
+      while (i < raw.length && raw[i] !== '\n') i += 1;
+      continue;
+    }
+    if (c === '/' && next === '*') {
+      let depth = 1;
+      i += 2;
+      while (i < raw.length && depth > 0) {
+        if (raw[i] === '/' && raw[i + 1] === '*') {
+          depth += 1;
+          i += 2;
+        } else if (raw[i] === '*' && raw[i + 1] === '/') {
+          depth -= 1;
+          i += 2;
+        } else {
+          i += 1;
+        }
+      }
+      if (depth > 0) errors.push('unterminated block comment');
+      continue;
+    }
+    if (c === "'") {
+      const escapeString = /[Ee]$/u.test(raw.slice(Math.max(0, i - 1), i));
+      i += 1;
+      let closed = false;
+      while (i < raw.length) {
+        if (raw[i] === '\\' && escapeString) {
+          i += 2;
+          continue;
+        }
+        if (raw[i] === "'" && raw[i + 1] === "'") {
+          i += 2;
+          continue;
+        }
+        if (raw[i] === "'") {
+          i += 1;
+          closed = true;
+          break;
+        }
+        i += 1;
+      }
+      if (!closed) errors.push('unterminated string literal');
+      continue;
+    }
+    if (c === '"') {
+      i += 1;
+      let closed = false;
+      while (i < raw.length) {
+        if (raw[i] === '"' && raw[i + 1] === '"') {
+          i += 2;
+          continue;
+        }
+        if (raw[i] === '"') {
+          i += 1;
+          closed = true;
+          break;
+        }
+        i += 1;
+      }
+      if (!closed) errors.push('unterminated quoted identifier');
+      continue;
+    }
+    if (c === '$') {
+      const match = DOLLAR_TAG.exec(raw.slice(i));
+      if (match) {
+        const tag = match[0];
+        const close = raw.indexOf(tag, i + tag.length);
+        if (close === -1) {
+          errors.push(`unterminated dollar quote ${tag}`);
+          i = raw.length;
+        } else {
+          i = close + tag.length;
+        }
+        continue;
+      }
+    }
+    if (c === '(') parens += 1;
+    if (c === ')') parens = Math.max(0, parens - 1);
+    if (c === ';' && parens === 0) {
+      const text = raw.slice(start, i + 1);
+      if (text.trim() !== ';') statements.push(text.trim());
+      start = i + 1;
+    }
+    i += 1;
+  }
+
+  const tail = raw.slice(start);
+  return { statements, tail, errors };
+}
+
+/** Remove comments only, keeping literals visible (used to detect an unterminated tail). */
+export function stripComments(raw) {
+  let out = '';
+  let i = 0;
+  while (i < raw.length) {
+    const c = raw[i];
+    const next = raw[i + 1];
+    if (c === '-' && next === '-') {
+      i += 2;
+      while (i < raw.length && raw[i] !== '\n') i += 1;
+      continue;
+    }
+    if (c === '/' && next === '*') {
+      let depth = 1;
+      i += 2;
+      while (i < raw.length && depth > 0) {
+        if (raw[i] === '/' && raw[i + 1] === '*') {
+          depth += 1;
+          i += 2;
+        } else if (raw[i] === '*' && raw[i + 1] === '/') {
+          depth -= 1;
+          i += 2;
+        } else {
+          i += 1;
+        }
+      }
+      out += ' ';
+      continue;
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+
+/** Blank out comments and literal/bodies while preserving SQL structure for regex checks. */
+export function maskSql(raw) {
+  let out = '';
+  let i = 0;
+  while (i < raw.length) {
+    const c = raw[i];
+    const next = raw[i + 1];
+    if (c === '-' && next === '-') {
+      i += 2;
+      while (i < raw.length && raw[i] !== '\n') i += 1;
+      out += ' ';
+      continue;
+    }
+    if (c === '/' && next === '*') {
+      let depth = 1;
+      i += 2;
+      while (i < raw.length && depth > 0) {
+        if (raw[i] === '/' && raw[i + 1] === '*') {
+          depth += 1;
+          i += 2;
+        } else if (raw[i] === '*' && raw[i + 1] === '/') {
+          depth -= 1;
+          i += 2;
+        } else {
+          i += 1;
+        }
+      }
+      out += ' ';
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      const quote = c;
+      i += 1;
+      while (i < raw.length) {
+        if (raw[i] === quote && raw[i + 1] === quote) {
+          i += 2;
+          continue;
+        }
+        if (raw[i] === quote) {
+          i += 1;
+          break;
+        }
+        i += 1;
+      }
+      out += ' ';
+      continue;
+    }
+    if (c === '$') {
+      const match = DOLLAR_TAG.exec(raw.slice(i));
+      if (match) {
+        const tag = match[0];
+        const close = raw.indexOf(tag, i + tag.length);
+        i = close === -1 ? raw.length : close + tag.length;
+        out += ' ';
+        continue;
+      }
+    }
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+
+export function parseMigration(raw) {
+  const { statements, tail, errors } = splitSql(raw);
+  const tailCode = stripComments(tail).trim();
+  if (tailCode.length > 0) errors.push('last statement is missing a trailing semicolon');
+  return { statements, errors };
+}
+
+export function analyzeMigration({ kind, name, raw }) {
+  const errors = [];
+  const warnings = [];
+  const { statements, errors: parseErrors } = parseMigration(raw);
+  errors.push(...parseErrors);
+
+  const maskedStatements = statements.map((statement) => ({
+    raw: statement,
+    sql: maskSql(statement),
+  }));
+
+  const createIndex = maskedStatements.filter((s) => /create\s+index/i.test(s.sql));
+  const createTable = maskedStatements.filter((s) => /create\s+table/i.test(s.sql));
+  const addColumn = maskedStatements.filter((s) => /\badd\s+column\b/i.test(s.sql));
+  const updates = maskedStatements.filter((s) => /\bupdate\s+[a-z0-9_."]+\s+set\b/i.test(s.sql));
+  const destructive = maskedStatements.filter((s) =>
+    /(?:drop\s+(?:column|table|schema)\b|alter\s+table[\s\S]*?\bdrop\s+(?:column|table)\b)/i.test(
+      s.sql,
+    ),
+  );
+
+  // Rule 1: indexes must use CONCURRENTLY and not run inside a transaction.
+  if (kind === 'indexes') {
+    if (createIndex.length === 0) {
+      errors.push(
+        'must use CREATE INDEX CONCURRENTLY (found none); non-concurrent index blocks writes',
+      );
+    }
+    for (const statement of createIndex) {
+      if (!/create\s+index\s+concurrently/i.test(statement.sql)) {
+        errors.push(
+          `CREATE INDEX without CONCURRENTLY: "${statement.raw.trim().slice(0, 120)}" blocks writes`,
+        );
+      }
+    }
+    if (/\b(begin|commit|rollback)\b/i.test(maskSql(raw)) && /concurrently/i.test(maskSql(raw))) {
+      warnings.push(
+        'CONCURRENTLY cannot run in a transaction — runner already treats indexes as non-transactional',
+      );
+    }
+  } else {
+    for (const statement of createIndex) {
+      if (!/create\s+index\s+concurrently/i.test(statement.sql)) {
+        if (!/if\s+not\s+exists/i.test(statement.sql)) {
+          warnings.push(
+            `creates index without IF NOT EXISTS — add for idempotence: "${statement.raw.trim().slice(0, 100)}"`,
+          );
+        }
+      }
+    }
+  }
+
+  // Rule 2: destructive ops should be in contract-only files.
+  if (destructive.length > 0) {
+    if (!/contract/i.test(name)) {
+      warnings.push(
+        "contains destructive DROP — should be deferred to contract phase (rename file to include 'contract' or ensure expand-contract)",
+      );
+    }
+    if (!/\bif\s+exists\b/i.test(maskSql(raw))) {
+      warnings.push('DROP without IF EXISTS — add for safety');
+    }
+  }
+
+  // Rule 3: ADD COLUMN NOT NULL without DEFAULT is forbidden in expand.
+  for (const statement of addColumn) {
+    if (/not\s+null/i.test(statement.sql) && !/\bdefault\b/i.test(statement.sql)) {
+      errors.push(
+        `ADD COLUMN NOT NULL without DEFAULT: "${statement.raw.trim().slice(0, 120)}" — expand must be nullable, backfill then set NOT NULL in contract`,
+      );
+    }
+  }
+
+  // Rule 4: tenant tables must enable RLS in the same or a later schema file.
+  if (createTable.length > 0 && /\btenant_id\b/i.test(maskSql(raw))) {
+    const hasRls = /\b(?:force\s+row\s+level\s+security|enable\s+row\s+level\s+security)\b/i.test(
+      maskSql(raw),
+    );
+    if (!hasRls && kind === 'schema') {
+      warnings.push(
+        'creates tenant table without RLS in same file — ensure RLS added (check schema.ts)',
+      );
+    }
+  }
+
+  // Rule 5: data backfills must be batched.
+  if (kind === 'data') {
+    const statementsForBatch = stripComments(raw);
+    if (
+      !/\blimit\s+(?:\d+|[a-z_][a-z0-9_]*)/i.test(statementsForBatch) &&
+      !/\bwhere\b[\s\S]*\bid\s*>/i.test(statementsForBatch)
+    ) {
+      warnings.push(
+        'data migration without LIMIT/batched WHERE — risk of long lock. Use batches LIMIT 1000 with SKIP LOCKED',
+      );
+    }
+    for (const statement of updates) {
+      if (!/\bwhere\b/i.test(statement.sql)) {
+        errors.push(
+          `UPDATE without WHERE — destructive full table update: "${statement.raw.trim().slice(0, 100)}"`,
+        );
+      }
+    }
+  }
+
+  // Rule 6: ensure IF NOT EXISTS for idempotence on tables.
+  for (const statement of createTable) {
+    if (!/if\s+not\s+exists/i.test(statement.sql)) {
+      warnings.push('CREATE TABLE without IF NOT EXISTS — should be idempotent for reruns');
+    }
+  }
+
+  // Rule 7: schema migrations run in a transaction, so no CONCURRENTLY there.
+  if (kind === 'schema' && /\bconcurrently\b/i.test(maskSql(raw))) {
+    errors.push('schema migration uses CONCURRENTLY — must be in indexes/ (non-transactional)');
+  }
+
+  return { errors, warnings, statements: statements.length };
+}
+
 function withoutSqlComments(raw) {
-  return raw.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
+  return stripComments(raw);
 }
 
 async function collectFiles() {
@@ -62,130 +398,39 @@ async function main() {
   let warnings = 0;
 
   for (const f of files) {
-    const lower = f.raw.toLowerCase();
-    const sql = withoutSqlComments(f.raw);
-    const sqlLower = sql.toLowerCase();
     const id = `${f.kind}/${f.name}`;
-
-    // Rule 1: indexes must use CONCURRENTLY and not inside transaction
-    if (f.kind === 'indexes') {
-      if (!/create\s+index\s+concurrently/i.test(f.raw)) {
-        fail(
-          `${id} must use CREATE INDEX CONCURRENTLY (found none). Non-concurrent index blocks writes.`,
-        );
-        errors++;
-      } else {
-        ok(`${id} uses CONCURRENTLY`);
-      }
-      if (/begin|commit/i.test(lower) && f.raw.includes('CONCURRENTLY')) {
-        warn(
-          `${id} CONCURRENTLY cannot be in transaction — runner already treats indexes as non-transactional`,
-        );
-        warnings++;
-      }
-    } else if (f.kind === 'schema' || f.raw.includes('create index')) {
-      // schema should not have CREATE INDEX without CONCURRENTLY if table large — warn if no CONCURRENTLY but is index
-      if (/create\s+index\s+(?!concurrently)/i.test(sql)) {
-        // Allow small indexes with IF NOT EXISTS
-        if (!sqlLower.includes('if not exists')) {
-          warn(`${id} creates index without IF NOT EXISTS — add for idempotence`);
-          warnings++;
-        }
-      }
+    const result = analyzeMigration(f);
+    for (const message of result.errors) {
+      console.error(`[analyze:migrations] FAIL: ${id} ${message}`);
+      errors += 1;
     }
-
-    // Rule 2: destructive ops should be in contract-only files (name contains contract or drop) and warn
-    if (/(drop\s+(?:column|table)\b|alter\s+table[\s\S]*?\bdrop\s+(?:column|table)\b)/i.test(sql)) {
-      if (!/contract/i.test(f.name)) {
-        warn(
-          `${id} contains destructive DROP — should be deferred to contract phase (rename file to include 'contract' or ensure expand-contract)`,
-        );
-        warnings++;
-      }
-      if (!/if\s+exists/i.test(sqlLower)) {
-        warn(`${id} DROP without IF EXISTS — add for safety`);
-        warnings++;
-      }
+    for (const message of result.warnings) {
+      warn(`${id} ${message}`);
+      warnings += 1;
     }
-
-    // Rule 3: ADD COLUMN NOT NULL without DEFAULT should be forbidden in expand
-    if (/add\s+column/i.test(sqlLower)) {
-      const addCols = [...sql.matchAll(/add\s+column[^;]*;/gi)];
-      for (const m of addCols) {
-        const stmt = m[0];
-        if (/not\s+null/i.test(stmt) && !/default/i.test(stmt)) {
-          fail(
-            `${id} ADD COLUMN NOT NULL without DEFAULT: "${stmt.trim().slice(0, 120)}" — expand must be nullable, backfill then set NOT NULL in contract`,
-          );
-          errors++;
-        }
-      }
-      if (/not\s+null/i.test(lower) && f.kind === 'schema' && !/default/i.test(lower)) {
-        // already flagged
-      } else {
-        // ok expand nullable
-      }
-    }
-
-    // Rule 4: RLS tables must have FORCE RLS
-    if (/create\s+table/i.test(lower) && /tenant_id/i.test(lower)) {
-      const withoutRLS =
-        !/force\s+row\s+level\s+security/i.test(lower) &&
-        !/enable\s+row\s+level\s+security/i.test(lower);
-      // Check if file is expected to add RLS later — but warn if tenant table without RLS in same file
-      if (withoutRLS && f.kind === 'schema') {
-        // We allow separate RLS file? But warn
-        // Only warn if table is tenant-scoped and no RLS in file
-        // Inspect: if file creates tenant table but no RLS, flag warn
-        warn(
-          `${id} creates tenant table without RLS in same file — ensure RLS added (check schema.ts)`,
-        );
-        warnings++;
-      }
-    }
-
-    // Rule 5: data backfills must be batched (LIMIT or WHERE id >)
-    if (f.kind === 'data') {
-      if (!/limit\s+\d+/i.test(f.raw) && !/where\s+.*id\s*>/i.test(lower)) {
-        warn(
-          `${id} data migration without LIMIT/batched WHERE — risk of long lock. Use batches LIMIT 1000 with SKIP LOCKED`,
-        );
-        warnings++;
-      }
-      if (/update\s+\w+\s+set/i.test(lower) && !/where/i.test(lower)) {
-        fail(`${id} UPDATE without WHERE — destructive full table update`);
-        errors++;
-      }
-    }
-
-    // Rule 6: ensure IF NOT EXISTS for idempotence on tables/indexes
-    if (/create\s+table/i.test(sqlLower) && !/if\s+not\s+exists/i.test(sqlLower)) {
-      warn(`${id} CREATE TABLE without IF NOT EXISTS — should be idempotent for reruns`);
-      warnings++;
-    }
-
-    // Rule 7: lock/timeout expectations: schema migrations run in tx, so no CONCURRENTLY
-    if (f.kind === 'schema' && /concurrently/i.test(sqlLower)) {
-      fail(`${id} schema migration uses CONCURRENTLY — must be in indexes/ (non-transactional)`);
-      errors++;
-    }
-  }
-
-  // Summary
-  if (errors > 0) {
-    fail(`analysis failed with ${errors} errors and ${warnings} warnings`);
-  } else {
-    ok(`analysis passed with ${warnings} warnings`);
-    if (warnings > 0) {
-      console.log('[analyze:migrations] Review warnings before deploy');
-    }
-    // also check for pending migrations via dry-run if DATABASE_URL present? We'll leave to migrate:dry-run
-    if (process.env.DATABASE_URL) {
-      console.log(
-        '[analyze:migrations] DATABASE_URL present — consider running pnpm --filter @platform/db migrate:dry-run for pending check',
+    if (result.errors.length === 0) {
+      ok(
+        `${id} ${result.statements} statement(s) — ${withoutSqlComments(f.raw).trim().split('\n').length} lines`,
       );
     }
   }
+
+  if (errors > 0) {
+    fail(`analysis failed with ${errors} errors and ${warnings} warnings`);
+  }
+  ok(`analysis passed with ${warnings} warnings`);
+  if (warnings > 0) {
+    console.log('[analyze:migrations] Review warnings before deploy');
+  }
+  if (process.env.DATABASE_URL) {
+    console.log(
+      '[analyze:migrations] DATABASE_URL present — consider running pnpm --filter @platform/db migrate:dry-run for pending check',
+    );
+  }
 }
 
-await main();
+const invokedDirectly =
+  process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (invokedDirectly) {
+  await main();
+}

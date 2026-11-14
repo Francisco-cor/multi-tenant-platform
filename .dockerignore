@@ -1,6 +1,8 @@
 # Git and local env
 .git
+.github
 .gitignore
+.gitattributes
 .env
 .env.*
 *.local
@@ -24,7 +26,8 @@ test-results
 .vite
 *.log
 .artifacts
-.turbo
+*.sarif
+reports
 out
 
 # Local service data
@@ -49,7 +52,12 @@ docker-compose.override.yml
 infra/terraform/.terraform
 infra/terraform/*.tfstate*
 
-# Misc
-README.md
+# Not needed to build application images
 docs
-infra
+tests
+k6
+README.md
+CONTRIBUTING.md
+SECURITY.md
+IMPLEMENTATION_PLAN.md
+playwright.config.ts

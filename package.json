@@ -8,13 +8,16 @@
     "pnpm": ">=11 <12"
   },
   "scripts": {
-    "dev": "turbo run dev --parallel",
+    "dev": "node scripts/dev.mjs",
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint && eslint --config eslint.config.mjs scripts --max-warnings=0",
     "test": "turbo run test",
+    "test:unit": "node scripts/assert-tests.mjs --suite unit --exclude @platform/web --label unit",
+    "test:coverage": "node scripts/assert-tests.mjs --suite unit --exclude @platform/web --coverage --thresholds lines=45,statements=45,functions=45,branches=55 --label coverage",
     "test:integration": "turbo run test:integration",
-    "test:e2e": "turbo run test:e2e",
+    "test:scripts": "node --test scripts/analyze-migrations.test.mjs scripts/docker-tag.test.mjs",
+    "test:e2e": "playwright test",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "openapi:check": "node scripts/check-openapi.mjs",

@@ -49,6 +49,24 @@ export default [
     },
   },
   {
+    files: [
+      'packages/auth/**/*.ts',
+      'packages/contracts/**/*.ts',
+      'packages/observability/**/*.ts',
+      'packages/testing/**/*.ts',
+    ],
+    languageOptions: {
+      parserOptions: {
+        projectService: true,
+        tsconfigRootDir: import.meta.dirname,
+      },
+    },
+    rules: {
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-misused-promises': 'error',
+    },
+  },
+  {
     files: ['packages/**/*.{ts,tsx,mts,cts}'],
     rules: {
       'no-restricted-imports': [
@@ -71,6 +89,7 @@ export default [
         console: 'readonly',
         fetch: 'readonly',
         process: 'readonly',
+        structuredClone: 'readonly',
         setTimeout: 'readonly',
         clearTimeout: 'readonly',
       },
