@@ -6,13 +6,14 @@
 
 ## Empezar aquí
 
-| Documento                                                | Para qué                                             |
-| -------------------------------------------------------- | ---------------------------------------------------- |
-| [`../README.md`](../README.md)                           | Visión, quickstart y tabla de estado por fase        |
-| [`../IMPLEMENTATION_PLAN.md`](../IMPLEMENTATION_PLAN.md) | Plan histórico + anexo de reconciliación y evidencia |
-| [`demo.md`](./demo.md)                                   | Guion de demo/entrevista y claims que no se hacen    |
-| [`glossary.md`](./glossary.md)                           | Términos del dominio                                 |
-| [`domain-state-machines.md`](./domain-state-machines.md) | Estados de organización, membresía, orden y reserva  |
+| Documento                                                          | Para qué                                             |
+| ------------------------------------------------------------------ | ---------------------------------------------------- |
+| [`../README.md`](../README.md)                                     | Visión, quickstart y tabla de estado por fase        |
+| [`../IMPLEMENTATION_PLAN.md`](../IMPLEMENTATION_PLAN.md)           | Plan histórico + anexo de reconciliación y evidencia |
+| [`audit/2026-11-13-hardening.md`](./audit/2026-11-13-hardening.md) | Auditoría, correcciones, evidencia y gaps abiertos   |
+| [`demo.md`](./demo.md)                                             | Guion de demo/entrevista y claims que no se hacen    |
+| [`glossary.md`](./glossary.md)                                     | Términos del dominio                                 |
+| [`domain-state-machines.md`](./domain-state-machines.md)           | Estados de organización, membresía, orden y reserva  |
 
 ## Arquitectura
 
