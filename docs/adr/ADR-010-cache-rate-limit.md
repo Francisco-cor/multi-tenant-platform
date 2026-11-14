@@ -13,7 +13,7 @@ Añadir rendimiento sin convertir Redis en segunda fuente de verdad. Riesgos:
 2. **Sin rate limit por tenant**: hot tenant monopoliza DB, pool y workers; otros tenants sufren latencia 5xx.
 3. **Sin fail-open**: Redis caído marca API `degraded` pero debería seguir sirviendo con DB (fuente de verdad).
 4. **Sin circuit breaker**: proveedor externo (S3, OIDC) lento hace cascada; cada request espera 30s y satura event loop.
-5. **Stampede**: expiración simultánea de key popular (p.ej. `GET /v1/inventory?branch=main`) genera cientos de queries idénticas.
+5. **Stampede**: expiración simultánea de key popular (p.ej. `GET /v1/inventory?branchId=main`) genera cientos de queries idénticas.
 
 Opciones:
 
@@ -27,13 +27,13 @@ Elegir (2). Redis sigue siendo reconstruible; DB permanece autoridad.
 
 ### 1. Lecturas cacheables y TTL
 
-| Recurso            | Endpoint                                      | TTL | Justificación                                                                                                    |
-| ------------------ | --------------------------------------------- | --- | ---------------------------------------------------------------------------------------------------------------- |
-| branches           | `GET /v1/branches`                            | 60s | lista corta, cambia selten (create org/branch)                                                                   |
-| members            | `GET /v1/members`                             | 30s | RBAC sensible pero reconstruible; invalidación inmediata en `invitation/patch/delete`                            |
-| inventory          | `GET /v1/inventory?branch=&q=&limit=&cursor=` | 30s | catálogo por sucursal, lectura costosa (`JOIN products` + `ILIKE`), invalidación en `POST /v1/inventory/reserve` |
-| webhooks endpoints | `GET /v1/webhooks/endpoints`                  | 60s | config estable, invalidación en `POST/PATCH/DELETE`                                                              |
-| No cache           | `GET /v1/orders*`, `GET /v1/files*`, `POST *` | —   | estado transaccional o ya con validación de stock/pago; no se cachea                                             |
+| Recurso            | Endpoint                                        | TTL | Justificación                                                                                                    |
+| ------------------ | ----------------------------------------------- | --- | ---------------------------------------------------------------------------------------------------------------- |
+| branches           | `GET /v1/branches`                              | 60s | lista corta, cambia selten (create org/branch)                                                                   |
+| members            | `GET /v1/members`                               | 30s | RBAC sensible pero reconstruible; invalidación inmediata en `invitation/patch/delete`                            |
+| inventory          | `GET /v1/inventory?branchId=&q=&limit=&cursor=` | 30s | catálogo por sucursal, lectura costosa (`JOIN products` + `ILIKE`), invalidación en `POST /v1/inventory/reserve` |
+| webhooks endpoints | `GET /v1/webhooks/endpoints`                    | 60s | config estable, invalidación en `POST/PATCH/DELETE`                                                              |
+| No cache           | `GET /v1/orders*`, `GET /v1/files*`, `POST *`   | —   | estado transaccional o ya con validación de stock/pago; no se cachea                                             |
 
 TTL máximo 60s por recurso. Toda cache es `private` (`cache-control: private, max-age=...`) + `x-cache: HIT|MISS`.
 Nunca cachear permisos crudos sin tenant.
@@ -44,7 +44,7 @@ Nunca cachear permisos crudos sin tenant.
 cacheKey = `tenant:{tenantId}:{VERSION}:{resource}:{hash16}`
 VERSION = v1 (permite invalidar global al subir versión)
 hash16 = sha256(JSON.stringify(sorted(params))).slice(0,16)
-Ej: tenant:tenant-acme:v1:inventory:branch=main:hash=a3f9c1e2...
+Ej: tenant:tenant-acme:v1:inventory:branchId=main:hash=a3f9c1e2...
 ```
 
 - `tenantId` **obligatorio**; ningún key global. Test: `cacheKeyFor acme != contoso` aunque mismos params.
@@ -79,7 +79,7 @@ RATE_LIMITS = {
   endpoints: {
     'POST /v1/orders': { max: 20, key: 'tenant' },
     'POST /v1/inventory/reserve': { max: 30, key: 'tenant' },
-    'POST /v1/files/presign': { max: 20, key: 'tenant' },
+    'POST /v1/files/presigned-upload': { max: 20, key: 'tenant' },
     'POST /v1/webhooks/endpoints': { max: 20, key: 'tenant' },
     'POST /v1/auth/dev-login': { max: 10, key: 'ip' },
   },

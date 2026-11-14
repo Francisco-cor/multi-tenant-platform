@@ -5,6 +5,8 @@
 - Alcance: `api`, `db`, `redis`, `BullMQ`, `outbox`, `pagos`, `webhooks`, `s3`
 - Señales: `traceId`, `requestId`, `tenantHash`, `x-request-id`, `traceparent`, `/metrics`, `pg_stat_activity`, Grafana, Prometheus alerts
 
+<a id="error-rate"></a><a id="p95"></a>
+
 ## 1. Qué revisar primero durante un incidente
 
 ### Prioridad 1 — 0-2 min: ¿Qué está rojo?
@@ -65,20 +67,20 @@ curl -s http://localhost:4000/v1/audit?limit=5 -H 'host: acme.app.localhost' -H 
 
 ### Prioridad 3 — 10-30 min: Profundizar por capa
 
-| Capa              | Señal                                                                                               | Logs/Metrics                                                                                                                                                   | Acción                                                                                                                                                                                 |
-| ----------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **API Fastify**   | `http_requests_total` `http_request_duration_p95_seconds` `rate_limit_hits_total` `circuit_state`   | `packages/observability/src/metrics.ts:111` `toPrometheus()` scrape `api:4000/metrics` cada 10s (`prometheus.yml:10`)                                          | Si 5xx >1% → `request.log.error` + `traceId`. Si P95 >300ms → `cache_misses_total`↑? `inventory` query sin índice? Ver `pg_stat_statements`.                                           |
-| **Cache**         | `cache_hits_total` `cache_misses_total` `cache_stampede_fallback_total` `cache_invalidations_total` | `apps/api/src/cache.ts:1` `getOrLoad` lock `SET NX PX 5s`                                                                                                      | Si fallback ↑ → hot key sin TTL. Si invalidations 0 tras write → `invalidateCache` no llamó `deleteByPrefix`.                                                                          |
-| **DB Postgres**   | `application_name` + `app.tenant_id` + `pg_stat_activity` + `pg_stat_statements`                    | `packages/db/src/database.ts:53` `set_config` `application_name` + `statement_timeout 5s` `idle_in_transaction 5s` (`migrations/schema/0005_db_hardening.sql`) | Si `idle_in_transaction` ↑ → long tx. Si `lock` → `FOR UPDATE SKIP LOCKED` en `inventory` y `outbox` relay.                                                                            |
-| **Redis**         | `up{job="redis"}==0` `redis_memory_used_bytes`                                                      | `infra/prometheus/alerts.yml` `RedisDown`                                                                                                                      | Fail-open: cache `get→miss` → DB fallback, rate limiter InMemory, `health degraded` pero `liveness ok`. Ver `apps/api/src/health.ts:56` `checkRedis` fail → degraded, no fail startup. |
-| **BullMQ/outbox** | `outbox_lag_seconds` `outbox_pending` `job_retries_total` `job_duration_p95_seconds` `dlq_size`     | `infra/grafana/provisioning/dashboards/worker.json` `outbox lag` + `payments.json`                                                                             | Si lag ↑ → `relay` no publicó: `OutboxRelay:runOutboxRelayOnce` `FOR UPDATE SKIP LOCKED LIMIT 100` + `deterministicJobId` dedupe. Si `dlq_size` ↑ → `POST /v1/dlq/:id/replay`.         |
-| **Pagos**         | `payment_pending` `payment_unknown` `PaymentUnknown` alert                                          | `migrations/schema/0009_payments.sql` `payment_attempts` + `worker/jobs/reconcilePayments.ts` `SKIP LOCKED` pending>5m → `getStatus`                           | Si `unknown` >30m → `health.ts:129` degraded. Reconciler consulta provider.                                                                                                            |
-| **Webhooks**      | `http_requests_total{route="/v1/webhooks/*"}` + `webhook_deliveries` status                         | `apps/worker/src/jobs/deliverWebhook.ts` HMAC `v1,hmac` + `backoff 10s→10m` + dedupe `(tenant,event_id)`                                                       | Si 5xx/timeout → retry 5xx/429, `dead_letter` tras 8. Si SSRF → `validateUrl` `private_blocked` 400, no `fetch`.                                                                       |
-| **S3**            | `circuit_state{breaker="s3"}==2` `presigned 503`                                                    | `apps/api/src/circuit-breaker.ts:1` `CLOSED→OPEN 5 fails 30s→HALF_OPEN 2 ok` `requestTimeout 2s`                                                               | Si OPEN → `503 DEPENDENCY_UNAVAILABLE` + `circuit_opens_total`. Check MinIO `http://localhost:9001`.                                                                                   |
+| Capa              | Señal                                                                                               | Logs/Metrics                                                                                                                                                               | Acción                                                                                                                                                                              |
+| ----------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **API Fastify**   | `http_requests_total` `http_request_duration_p95_seconds` `rate_limit_hits_total` `circuit_state`   | `packages/observability/src/metrics.ts` `toPrometheus()` scrape `api:4000/metrics` cada 10s (`prometheus.yml:10`)                                                          | Si 5xx >1% → `request.log.error` + `traceId`. Si P95 >300ms → `cache_misses_total`↑? `inventory` query sin índice? Ver `pg_stat_statements`.                                        |
+| **Cache**         | `cache_hits_total` `cache_misses_total` `cache_stampede_fallback_total` `cache_invalidations_total` | `apps/api/src/cache.ts:1` `getOrLoad` lock `SET NX PX 5s`                                                                                                                  | Si fallback ↑ → hot key sin TTL. Si invalidations 0 tras write → `invalidateCache` no llamó `deleteByPrefix`.                                                                       |
+| **DB Postgres**   | `application_name` + `app.tenant_id` + `pg_stat_activity` + `pg_stat_statements`                    | `packages/db/src/database.ts:53` `set_config` `application_name` + `statement_timeout 5s` `idle_in_transaction 5s` (`packages/db/migrations/schema/0005_db_hardening.sql`) | Si `idle_in_transaction` ↑ → long tx. Si `lock` → `FOR UPDATE SKIP LOCKED` en `inventory` y `outbox` relay.                                                                         |
+| **Redis**         | `up{job="redis"}==0` `redis_memory_used_bytes`                                                      | `infra/prometheus/alerts.yml` `RedisDown`                                                                                                                                  | Fail-open: cache `get→miss` → DB fallback, rate limiter InMemory, `health degraded` pero `liveness ok`. Ver `apps/api/src/health.ts` `checkRedis` fail → degraded, no fail startup. |
+| **BullMQ/outbox** | `outbox_lag_seconds` `outbox_pending` `job_retries_total` `job_duration_p95_seconds` `dlq_size`     | `infra/grafana/provisioning/dashboards/worker.json` `outbox lag` + `payments.json`                                                                                         | Si lag ↑ → `relay` no publicó: `OutboxRelay:runOutboxRelayOnce` `FOR UPDATE SKIP LOCKED LIMIT 100` + `deterministicJobId` dedupe. Si `dlq_size` ↑ → `POST /v1/dlq/:id/replay`.      |
+| **Pagos**         | `payment_pending` `payment_unknown` `PaymentUnknown` alert                                          | `packages/db/migrations/schema/0009_payments.sql` `payment_attempts` + `worker/jobs/reconcilePayments.ts` `SKIP LOCKED` pending>5m → `getStatus`                           | Si `unknown` >30m → `apps/api/src/health.ts` degraded. Reconciler consulta provider.                                                                                                |
+| **Webhooks**      | `http_requests_total{route="/v1/webhooks/*"}` + `webhook_deliveries` status                         | `apps/worker/src/jobs/deliverWebhook.ts` HMAC `v1,hmac` + `backoff 10s→10m` + dedupe `(tenant,event_id)`                                                                   | Si 5xx/timeout → retry 5xx/429, `dead_letter` tras 8. Si SSRF → `validateUrl` `private_blocked` 400, no `fetch`.                                                                    |
+| **S3**            | `circuit_state{breaker="s3"}==2` `presigned 503`                                                    | `apps/api/src/circuit-breaker.ts:1` `CLOSED→OPEN 5 fails 30s→HALF_OPEN 2 ok` `requestTimeout 2s`                                                                           | Si OPEN → `503 DEPENDENCY_UNAVAILABLE` + `circuit_opens_total`. Check MinIO `http://localhost:9001`.                                                                                |
 
 ## 2. Alertas y owner
 
-Ver `infra/prometheus/alerts.yml` completo (13 alertas). Cada una tiene `severity`, `owner`, `threshold`, `runbook`:
+Ver `infra/prometheus/alerts.yml` completo (16 alertas). Cada una tiene `severity`, `owner`, `threshold`, `runbook`:
 
 - `ErrorRateHigh` (critical, platform-api, 5m, `rate(5xx)/rate(total)>0.01`) → `docs/runbooks/observability.md#error-rate` + `docs/threat-model.md`.
 - `P95High` (warning, platform-api, 5m, `p95>0.3s`) → `docs/runbooks/cache.md`.
@@ -89,7 +91,7 @@ Ver `infra/prometheus/alerts.yml` completo (13 alertas). Cada una tiene `severit
 
 ## 3. Health checks (liveness/readiness/startup)
 
-`apps/api/src/health.ts:167` `getReadiness()` chequea con timeout 2s:
+`apps/api/src/health.ts` `getReadiness()` chequea con timeout 2s:
 
 - `postgres` `SELECT 1` → fail → degraded (no traffic).
 - `redis` `PING` → fail → degraded pero opcional (no bloquea startup si `REDIS_URL` no set).
@@ -137,17 +139,17 @@ curl -s http://localhost:4000/metrics | grep http_requests_total
 
 ## 6. Costo y sampling
 
-`infra/otel/otel-collector-config.yaml:10` `probabilistic_sampler 10%` en prod (`sampleRatio 0.1`), `1` en dev. Atributo `tenantHash` hashed, no `tenantId` raw en metrics labels (evita cardinalidad). Ver `packages/observability/src/metrics.ts:111` `httpRequests` key es `method:route:status` sin tenant.
+`infra/otel/otel-collector-config.yaml:10` `probabilistic_sampler 10%` en prod (`sampleRatio 0.1`), `1` en dev. Atributo `tenantHash` hashed, no `tenantId` raw en metrics labels (evita cardinalidad). Ver `packages/observability/src/metrics.ts` `httpRequests` key es `method:route:status` sin tenant.
 
 ## 7. Referencias
 
 - `packages/observability/src/correlation.ts:1` `AsyncLocalStorage` + `hashTenant`.
 - `packages/observability/src/tracing.ts:1` `initTracing` OTLP + `withSpan`.
 - `packages/observability/src/logger.ts:1` `createLogger` redact + tenantHash.
-- `packages/observability/src/metrics.ts:111` `toPrometheus()` RED + business.
+- `packages/observability/src/metrics.ts` `toPrometheus()` RED + business.
 - `infra/otel/otel-collector-config.yaml:1` batch/memory_limiter/redact.
 - `infra/prometheus/prometheus.yml:1` scrape `api:4000/metrics` 10s + `alerts.yml`.
 - `infra/grafana/provisioning/dashboards/*.json` 5 dashboards (api-red, payments, isolation, db-redis, worker).
-- `apps/api/src/app.ts:505` `onRequest` correlation + `onResponse` RED.
-- `packages/db/src/database.ts:53` `application_name` tenantHash.
+- `apps/api/src/app.ts` `onRequest` correlation + `onResponse` RED.
+- `packages/db/src/database.ts` `application_name` tenantHash.
 - `apps/worker/src/processor.ts:24` `runWithCorrelation` per job.

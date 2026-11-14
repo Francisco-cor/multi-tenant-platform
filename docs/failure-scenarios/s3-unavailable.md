@@ -7,7 +7,7 @@
 ## Preparación
 
 - S3 `minio/minio:latest` (`docker-compose.yml:33`), bucket `platform`, `FakeS3Service` / `S3Service` (`apps/api/src/s3.ts:1`) con `generateUploadUrl` TTL 300s, `generateDownloadUrl` 60s, `headObject`.
-- `files` tabla `tenants/{tenantId}/{uuid}` `FORCE RLS` (`migrations/schema/0007_files.sql`), `status pending→ready→expired`.
+- `files` tabla `tenants/{tenantId}/{uuid}` `FORCE RLS` (`packages/db/migrations/schema/0007_files.sql`), `status pending→ready→expired`.
 - `s3Breaker` `failureThreshold 5 timeout 30s requestTimeout 2s` (`app.ts:440`).
 - `circuit_state{breaker="s3"}` `GET /metrics`.
 

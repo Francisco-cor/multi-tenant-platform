@@ -35,7 +35,7 @@ buildCacheKey('tenant-contoso','inventory',{same params}) = tenant:tenant-contos
 ### B. Invalidación
 
 ```
-POST /v1/inventory/reserve (quantity 1) → await invalidateCache(tenant,'inventory') → GET /v1/inventory?branch=b1 → MISS con available--.
+POST /v1/inventory/reserve (quantity 1) → await invalidateCache(tenant,'inventory') → GET /v1/inventory?branchId=b1 → MISS con available--.
 ```
 
 ### C. Stampede

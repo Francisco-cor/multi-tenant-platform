@@ -66,12 +66,15 @@ En tests unitarios existe un store en memoria; no es el camino de producción y 
 
 ## 5. Demostración local
 
+`dev-login` solo conoce los usuarios del store en memoria (`user-alice`, `user-acme-only`, `user-contoso-only`). Si la API arranca con `DATABASE_URL` (el default de `.env`), usa `PersistentIdentityStore` y esos IDs no existen: hay que usar los UUID del seed o un login OIDC.
+
+Con seed (`pnpm --filter @platform/db seed` en una base vacía):
+
 1. Arrancar la infraestructura: `docker compose up -d postgres redis`.
 2. Arrancar desde la raíz para cargar `.env`: `pnpm dev`.
-3. Crear sesión demo para `user-acme-only` con `POST /v1/auth/dev-login`.
+3. `POST /v1/auth/dev-login {"userId":"00000000-0000-4000-a000-000000000001"}` (Alice, owner de `acme`).
 4. Consultar `GET /v1/context` con `Host: acme.app.localhost:4000`: responde `200`.
-5. Repetir con `Host: contoso.app.localhost:4000`: responde `403`.
-6. Crear sesión demo para `user-alice`: el primer contexto responde `409` y enumera organizaciones seguras.
-7. Cambiar a `contoso` y usar `Host: contoso.app.localhost:4000`.
+5. Repetir con el usuario de Contoso (`...0002`) y `Host: contoso.app.localhost:4000`: responde `200`; con la sesión de Alice responde `403`.
+6. Para el flujo de varios tenants, usar un usuario con dos membresías o crear la segunda membership; el primer contexto responde `409 ORGANIZATION_SELECTION_REQUIRED` y hay que llamar a `POST /v1/auth/switch-organization`.
 
-No se deben usar datos seed ni `dev-login` fuera de desarrollo/test. Para el flujo de navegador, usar `acme.app.localhost:3000` y el BFF.
+Sin `DATABASE_URL` (tests unitarios) el store en memoria permite `user-alice`, `user-acme-only` y `user-contoso-only`. No se deben usar datos seed ni `dev-login` fuera de desarrollo/test. Para el flujo de navegador, usar `acme.app.localhost:3000` y el BFF.

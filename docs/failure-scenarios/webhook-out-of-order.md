@@ -6,7 +6,7 @@
 
 ## Preparación
 
-- `webhook_endpoints` + `webhook_deliveries` (`migrations/schema/0010_webhooks.sql`) `FORCE RLS`, `endpoint_id, event_id` unique, `status pending/retrying/delivered/dead_letter`.
+- `webhook_endpoints` + `webhook_deliveries` (`packages/db/migrations/schema/0010_webhooks.sql`) `FORCE RLS`, `endpoint_id, event_id` unique, `status pending/retrying/delivered/dead_letter`.
 - `webhookStore` `createDeliveryForEvent` dedupe `endpoint+eventId`, `deliverWebhook` `HMAC v1,hmac` + `backoff 10s→10m` + `dead_letter` tras 8, `apps/worker/src/jobs/deliverWebhook.ts:30`.
 - `inbound_webhook_events` `(tenant,event_id)` unique, `already_processed` (`apps/api/src/app.ts:1688`).
 - `automations` `trigger: order.created|order.paid` versioned `log|webhook|noop` (`packages/domain/src/automations.ts:10`).

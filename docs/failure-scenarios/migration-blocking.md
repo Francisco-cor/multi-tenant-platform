@@ -7,22 +7,22 @@
 ## Preparación
 
 - Runner `packages/db/src/migrate.ts:1` `advisory lock pg_advisory_lock`, `schema/data/indexes` separados, `CONCURRENTLY` fuera de tx, `checksum sha256`.
-- Índice grande: `branches` 10k filas, `CREATE INDEX CONCURRENTLY tenant_branches_lookup ON branches(tenant_id, slug)` (`migrations/indexes/0003_concurrent_branch_lookup.sql`).
+- Índice grande: `branches` 10k filas, `CREATE INDEX CONCURRENTLY branches_tenant_slug_trgm_idx ON branches USING gin (slug gin_trgm_ops)` (`packages/db/migrations/indexes/0005_branch_description_search.sql`).
 - Tráfico: `k6 run k6/orders-read.js --vus 10 --duration 30s` contra `GET /v1/branches` (usa índice `tenant_id, slug`).
-- `statement_timeout 5s` `idle_in_transaction 5s` para `platform_app` (`migrations/schema/0005_db_hardening.sql`).
+- `statement_timeout 5s` `idle_in_transaction 5s` para `platform_app` (`packages/db/migrations/schema/0005_db_hardening.sql`).
 
 ## Inyección
 
 ```bash
 # 1. Baseline sin índice: ya existe, lo borramos para probar migración bloqueante
-psql $DATABASE_URL -c "DROP INDEX IF EXISTS tenant_branches_lookup;"
+psql $DATABASE_URL -c "DROP INDEX IF EXISTS branches_tenant_slug_trgm_idx;"
 
 # 2. Lanzar tráfico en background
 k6 run k6/orders-read.js --vus 10 --duration 60s &
 K6_PID=$!
 
 # 3. Ejecutar migración bloqueante (mala): con LOCK
-psql $DATABASE_URL -c "CREATE INDEX tenant_branches_lookup ON branches(tenant_id, slug);" &
+psql $DATABASE_URL -c "CREATE INDEX branches_tenant_slug_trgm_idx ON branches(tenant_id, slug);" &
 # -> bloquea WRITES en branches durante 5-10s (AccessExclusive), requests 500 o timeout
 
 # 4. Observar: durante CREATE INDEX (sin CONCURRENTLY), curl debe seguir 200 pero con latencia alta
@@ -30,8 +30,8 @@ for i in $(seq 1 10); do curl -s -w "%{http_code} %{time_total}\n" -o /dev/null 
 # -> con bloqueo: 2-3× 500 o >5s timeout
 
 # 5. Ahora con CONCURRENTLY (buena): fuera de transacción, no bloquea
-psql $DATABASE_URL -c "DROP INDEX IF EXISTS tenant_branches_lookup;"
-psql $DATABASE_URL -c "CREATE INDEX CONCURRENTLY tenant_branches_lookup ON branches(tenant_id, slug);"
+psql $DATABASE_URL -c "DROP INDEX IF EXISTS branches_tenant_slug_trgm_idx;"
+psql $DATABASE_URL -c "CREATE INDEX CONCURRENTLY branches_tenant_slug_trgm_idx ON branches(tenant_id, slug);"
 # -> no bloquea, requests siguen 200, p95 no sube >100ms
 
 # 6. Runner correcto: debe hacer CONCURRENTLY fuera de tx
@@ -45,7 +45,7 @@ psql $DATABASE_URL -c "SELECT * FROM schema_migrations WHERE filename='0003_conc
 # -> no row (no registrada porque no terminó), estado conocido. Reintentar:
 pnpm --filter @platform/db migrate
 # -> debe reintentar CONCURRENTLY, no dejar índice inválido (PG marca INVALID si falla CONCURRENTLY, debe DROP y reintentar)
-psql $DATABASE_URL -c "SELECT indexname, indisvalid FROM pg_index WHERE indexname='tenant_branches_lookup';"
+psql $DATABASE_URL -c "SELECT indexname, indisvalid FROM pg_index WHERE indexname='branches_tenant_slug_trgm_idx';"
 # -> indisvalid false si falló a mitad, runner debe DROP CONCURRENTLY IF EXISTS y re-crear
 
 # 8. Verificar que migración fallida no deja estado desconocido sin runbook
@@ -63,13 +63,13 @@ cat docs/runbooks/postgres-migrations.md
 ## Recuperación
 
 - **Automática**: `CONCURRENTLY` no bloquea `SELECT/INSERT` en `branches`. `statement_timeout 5s` evita que `migrate` bloquee indefinidamente.
-- **Manual**: si `indisvalid` true: `DROP INDEX CONCURRENTLY tenant_branches_lookup;` + `pnpm migrate` (reintenta). Si `advisory lock` quedó (runner murió sin `pg_advisory_unlock`), el siguiente `migrate` espera 5s timeout y lo toma.
+- **Manual**: si `indisvalid` true: `DROP INDEX CONCURRENTLY branches_tenant_slug_trgm_idx;` + `pnpm migrate` (reintenta). Si `advisory lock` quedó (runner murió sin `pg_advisory_unlock`), el siguiente `migrate` espera 5s timeout y lo toma.
 - **Backfill**: para `data` migrations grandes, usar `batches LIMIT 1000` reanudables con `WHERE id > last_id ORDER BY id LIMIT 1000` + `pg_sleep 10ms` para no saturar.
 
 ## Evidencia
 
 - `k6` con índice bloqueante: `http_req_failed 0.05` `p95 2100ms` FAIL, con `CONCURRENTLY`: `http_req_failed 0` `p95 120ms` PASS.
-- `psql \di` `tenant_branches_lookup` `indisvalid true` tras kill, luego `false` tras re-run.
+- `psql \di` `branches_tenant_slug_trgm_idx` `indisvalid true` tras kill, luego `false` tras re-run.
 - `pnpm migrate --dry-run` en CI con DB efímera (`CI .github/workflows/ci.yml:52` `migrate-check`).
 
 ## Aprendizaje

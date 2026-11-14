@@ -1,7 +1,7 @@
 # Failure scenario — Outbox duplicado (Fase 7)
 
 - **Fecha:** 2026-09-01
-- **Fase:** 7 (PLAN_ELEVACION.md:286)
+- **Fase:** 7
 - **Hipótesis:** si el relay publica el mismo `eventId` dos veces (ej. muerte tras `queue.add` antes de `UPDATE outbox SET done`), o si un job se reintenta tras `SIGTERM` mid-handler, el efecto de negocio debe ocurrir **una sola vez** gracias a `jobId` determinista + `processed_jobs` dedupe.
 
 ## Preparación

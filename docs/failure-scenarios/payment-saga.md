@@ -1,13 +1,13 @@
 # Failure scenario — Pago con muerte post-cobro (Fase 8)
 
 - **Fecha:** 2026-09-01
-- **Fase:** 8 (PLAN_ELEVACION.md:308, IMPLEMENTATION_PLAN.md:342)
+- **Fase:** 8
 - **Hipótesis:** si el worker muere inmediatamente después de `provider.charge()` y antes de `UPDATE payment_attempts SET status='paid'` + `UPDATE orders SET status='paid'`, el retry **no debe** cobrar de nuevo y el sistema debe cerrar eventualmente a `paid` vía retry con misma `provider_idempotency_key` o vía reconciler/webhook.
 
 ## Preparación
 
 - **Dominio:** `packages/domain/src/payments.ts:10` máquina `created→pending→paid|failed|unknown`, `providerIdempotencyKey = sha256(tenantId:orderId:amount:currency).slice(0,32)` determinista, `shouldReconcile >5m`.
-- **DB:** `migrations/schema/0009_payments.sql:1` `orders(pending_payment)`, `payment_attempts(provider_key UNIQUE, status, provider_ref)`, `inbound_payment_events(tenant_id,event_id UNIQUE)` `FORCE RLS`, outbox `payment` aggregate agregado a `outbox_aggregate_check`.
+- **DB:** `packages/db/migrations/schema/0009_payments.sql:1` `orders(pending_payment)`, `payment_attempts(provider_key UNIQUE, status, provider_ref)`, `inbound_payment_events(tenant_id,event_id UNIQUE)` `FORCE RLS`, outbox `payment` aggregate agregado a `outbox_aggregate_check`.
 - **API:** `apps/api/src/payment-store.ts:40` `createOrderWithPayment` en `withTenantTransaction`: `INSERT orders` + `INSERT payment_attempts(created)` + `writeOutboxEvent(order.created)` + `writeOutboxEvent(payment.created)` atómicos, sin dual write.
 - **Provider:** `apps/worker/src/providers/fakePaymentProvider.ts:30` `FakePaymentProvider` con `Map providerKey→ChargeResult`, `chargeCalls` contador, `failNextChargeAfterProvider` flag para simular `kill` tras side-effect.
 - **Worker:** `apps/worker/src/jobs/processPayment.ts:30` `processPayment` con `SELECT ... FOR UPDATE` → `pending`, `provider.charge` fuera de tx con misma key, `SELECT ... FOR UPDATE` → `paid/failed/unknown` + `UPDATE orders` + `writeOutboxEvent`.
@@ -113,7 +113,7 @@ psql -c "update payment_attempts set updated_at = now() - interval '6 minutes', 
 `pnpm --filter @platform/domain test src/payments.test.ts` → 4 passed
 `pnpm --filter @platform/worker test src/payments.saga.test.ts` → 4 passed
 `pnpm --filter @platform/api test src/payments.test.ts` → 3 passed
-`pnpm lint/typecheck/build` verde, `pnpm openapi:check` 25 paths/28 schemas hash `fd0fe0b9ed98`.
+`pnpm lint/typecheck/build` verde y `pnpm openapi:check` verde; el conteo/hash no se cita porque cambia con el contrato.
 
 **Métricas/Health (local sin DB real):**
 

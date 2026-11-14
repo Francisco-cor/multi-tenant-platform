@@ -1,5 +1,8 @@
 # Runbook — Rollback, roll-forward y criterios de abort (Fase 14)
 
+- Owner: `platform-infra`
+- Última revisión: 2026-11-13
+
 > Fase 14 expand-contract — regla crítica: **rollback de app no implica rollback de DB**. Si el esquema ya se expandió, la app anterior debe seguir compatible; si no lo es, se hace **roll-forward** con corrección compatible. Cambios destructivos se difieren hasta contract.
 
 ## 1. Principios
@@ -16,8 +19,9 @@
 CI: pnpm --filter @platform/db analyze:migrations   # verifica CONCURRENTLY, no NOT NULL sin default, no DROP sin contract
     pnpm --filter @platform/db migrate:dry-run      # lista pending sin aplicar (JSON log)
     pnpm --filter @platform/db migrate              # aplica schema -> data -> indexes con lock
-CD: helm upgrade --set image.tag=$COMMIT_SHA  (rollingUpdate maxUnavailable 0 maxSurge 1, readiness /health/ready)
-    kubectl rollout status deployment/api
+# Objetivo futuro (no hay manifests K8s/Helm en el repo):
+# helm upgrade --set image.tag=$COMMIT_SHA  (rollingUpdate maxUnavailable 0 maxSurge 1, readiness /health/ready)
+# kubectl rollout status deployment/api
     node scripts/smoke.mjs --api https://staging.api
     node scripts/rolling-deploy-check.mjs --api https://staging.api
 ```
@@ -57,7 +61,7 @@ Canary por tenant: habilitar `branch_description` solo en `acme` (`payload:{perc
 
 Checklist rollback:
 
-- [ ] `kubectl get pods` — ¿quedan pods `vN`? Si sí, contract **no** aplicado.
+- [ ] En un clúster real (pendiente de manifests): ¿quedan pods `vN`? Si sí, contract **no** aplicado.
 - [ ] `select * from schema_migrations order by applied_at` — confirmar qué expand está aplicado.
 - [ ] `select indexname, indisvalid from pg_index where indisvalid=false` — si false, `DROP CONCURRENTLY` y rerun.
 - [ ] `node scripts/smoke.mjs` — liveness/readiness/metrics/openapi.
@@ -81,7 +85,7 @@ Checklist rollback:
 
 **Continuar/promover** (100%):
 
-- Smoke 8 checks pasan (`scripts/smoke.mjs`).
+- Todos los checks de `scripts/smoke.mjs` pasan (`--api` y tenant configurados).
 - Rolling check pasa (`rolling-deploy-check.mjs`).
 - `migrate:dry-run` pending 0 y `analyze:migrations` sin errores.
 - `GET /metrics` sin `kill_switch` activo salvo intencional.

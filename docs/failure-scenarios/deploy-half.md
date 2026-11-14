@@ -6,9 +6,9 @@
 
 ## Preparación
 
-- Esquema `expand`: `ALTER TABLE branches ADD COLUMN IF NOT EXISTS description text` (`migrations/schema/0012_expand_branch_description.sql` nullable, no `NOT NULL`, no índice bloqueante, fuera de `indexes/` si `CONCURRENTLY`). `vN` no conoce `description`, `vN+1` la lee/escribe pero no la requiere.
+- Esquema `expand`: `ALTER TABLE branches ADD COLUMN IF NOT EXISTS description text` (`packages/db/migrations/schema/0012_expand_branch_description.sql` nullable, no `NOT NULL`, no índice bloqueante, fuera de `indexes/` si `CONCURRENTLY`). `vN` no conoce `description`, `vN+1` la lee/escribe pero no la requiere.
 - Código `vN`: `SELECT id, slug, name FROM branches` (sin `description`). `vN+1`: `SELECT id, slug, name, description` con fallback `COALESCE(description,'')`.
-- Deploy `infra/k8s` `Deployment` `rollingUpdate maxUnavailable 0 maxSurge 1` `readinessProbe /health/ready` `liveness /health/live` `preStop 30s` `terminationGracePeriod 30s` (`PLAN_ELEVACION.md:15`).
+- Deploy objetivo: Kubernetes `Deployment` con `rollingUpdate maxUnavailable 0 maxSurge 1`, `readinessProbe /health/ready`, `liveness /health/live`, `preStop 30s`, `terminationGracePeriod 30s`. **No hay manifests K8s en el repo**; el escenario actual se simula con dos procesos locales o contenedores.
 - Métricas `http_requests_total` por `version` label (si `OTEL_RESOURCE_ATTRIBUTES service.version`), `health/startup` debe ser `ok` para ambas versiones.
 
 ## Inyección
@@ -61,7 +61,7 @@ psql $DATABASE_URL -c "ALTER TABLE branches DROP COLUMN description;" # solo cua
 
 ## Recuperación
 
-- **Roll-forward**, no `rollback` de DB: si `vN+1` tiene bug, se despliega `vN+2` con fix, no `DROP COLUMN`. `ROLLBACK` de app no implica `ROLLBACK` de schema (`IMPLEMENTATION_PLAN.md:538`).
+- **Roll-forward**, no `rollback` de DB: si `vN+1` tiene bug, se despliega `vN+2` con fix, no `DROP COLUMN`. `ROLLBACK` de app no implica `ROLLBACK` de schema (`IMPLEMENTATION_PLAN.md` (runbook de rollback)).
 - Si `contract` ya se hizo y `vN` aún vivo, `vN` fallará `SELECT` con `description` missing → por eso `contract` se difiere 1 release.
 - Backfill controlado: `UPDATE branches SET description='' WHERE description IS NULL LIMIT 1000` en batches pequeños reanudables, no `UPDATE` masivo bloqueante.
 
@@ -69,7 +69,7 @@ psql $DATABASE_URL -c "ALTER TABLE branches DROP COLUMN description;" # solo cua
 
 - `curl` ambos puertos `200` durante expand, `GET /metrics` `version` 50/50.
 - `psql \d branches` muestra `description text` nullable.
-- `git log` `migrations/schema/0012_expand...` + `migrations/data/0012_backfill...` separados, `indexes/0005_... CONCURRENTLY`.
+- `git log` `packages/db/migrations/schema/0012_expand_branch_description.sql` + `packages/db/migrations/data/0001_backfill_branch_description.sql` separados, `packages/db/migrations/indexes/0005_branch_description_search.sql` `CONCURRENTLY`.
 - Grafana `api-red` con `Error Rate 0%` durante rolling.
 
 ## Aprendizaje

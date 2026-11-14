@@ -1,5 +1,8 @@
 # Runbook — Pagos inciertos `unknown` y reconciliación (Fase 8)
 
+- Owner: `platform-payments`
+- Última revisión: 2026-11-13
+
 ## Objetivo
 
 Recuperar pagos en estado `pending`/`unknown` sin duplicar cobro, liberar o mantener reserva correctamente y restaurar consistencia `payment_attempt` ↔ `orders`.
@@ -57,7 +60,7 @@ curl -s http://localhost:4000/health/ready | jq .dependencies
 | `payment_pending` sin decrementar                 | Worker caído o relay lag                           | `docker compose logs worker`, verifica `outbox_pending` y `processPayment` con `FakeProvider chargeCalls`. Retry es idempotente por `provider_key`.                  |
 | `payment_unknown 1`                               | Proveedor timeout / `provider_killed_after_charge` | No liberar reserva; reconciler resolverá en <5m vía `getStatus`. Si permanece >30m, `health payments fail` y alerta.                                                 |
 | `payment_unknown` con `oldest >30m` health `fail` | PSP caído prolongado                               | Consultar `provider.getStatus` manual, verificar `inbound_payment_events` dedupe, contactar PSP con `providerRef`. Solo `failed` libera reserva; `unknown` conserva. |
-| `webhook 401 signature_mismatch`                  | Secret rotado o body tampered                      | Verificar `PAYMENT_WEBHOOK_SECRET`, que el emisor use la serialización canónica actual y `timestamp` dentro de 5m; migrar a bytes HTTP exactos antes de producción.  |
+| `webhook 401 signature_mismatch`                  | Secret rotado o body tampered                      | Verificar `PAYMENT_WEBHOOK_SECRET` y que el emisor firme los bytes exactos; la API conserva el raw body antes de parsear. El modo Stripe valida `Stripe-Signature`.  |
 | `webhook 401 timestamp_tolerance`                 | Clock skew >5m                                     | Sincronizar NTP, tolerancia fija 5m (`webhook-payment.ts:9`).                                                                                                        |
 | Cross-tenant `GET /v1/payments/:id` 404           | Intento de enumerar payment de otro tenant         | IDs no filtrables: RLS + `WHERE tenant_id` garantiza 404 idéntico a no existe. Audit `payment.created` no expone datos sensibles.                                    |
 
@@ -65,11 +68,11 @@ curl -s http://localhost:4000/health/ready | jq .dependencies
 
 1. **Muerte post-cobro**: worker murió tras `provider.charge` pero antes de `UPDATE payment_attempt SET paid`. El `provider` ya tiene `providerRef` asociado a `provider_key`. Retry usa misma key → `FakeProvider.getStored(key)` hit → `chargeCalls` no incrementa, segundo `processPayment` ve `pending` y actualiza a `paid` + `orders.status=paid` + `outbox payment.paid` + `order.paid`. Ver `payments.saga.test.ts:18` `kill after charge does not double charge`.
 2. **Webhook fuera de orden / duplicado**: `inbound_payment_events` `UNIQUE(tenant_id,event_id)` + `processed` check antes de `UPDATE payment_attempts`. Reenvío 3× mismo `eventId` → 1 efecto. Entrega `pending` antes de `created` → `SELECT pending/created` limit fallback: si solo hay un pending, se aplica al pending actual; si inválida transición, se mantiene estado y reconciler la corregirá.
-3. **Reconciler no resuelve**: si `provider.getStatus` sigue `unknown` tras 3 intentos, `payment_attempt` permanece `unknown` y `metrics.payment_unknown` + `health degraded` disparan alerta. Manual: `psql` → `select * from payment_attempts where status='unknown'`, llamar a PSP dashboard con `provider_ref`, luego `update payment_attempts set status='paid'` manualmente dentro de `withTenantTransaction` y `writeOutboxEvent` para liberar inventario. Registrar en `audit_log` con `payment.webhook`.
-4. **Rollback**: no hacer `DELETE` de `payment_attempt`; marcar `failed` y crear nueva `payment_attempt` con nuevo `provider_key` si reintento de pago con monto distinto. El `provider_key` incluye `orderId:amount`, por lo que nuevo monto genera nueva key sin colisionar.
+3. **Reconciler no resuelve**: si `provider.getStatus` sigue `unknown` tras 3 intentos, `payment_attempt` permanece `unknown` y `metrics.payment_unknown` + `health degraded` disparan alerta. Manual: `psql` → `select * from payment_attempts where status='unknown'`, llamar al panel del PSP con `provider_ref` y obtener confirmación explícita. Solo entonces, y con revisión 2-man, aplicar la transición dentro de `withTenantTransaction` + `writeOutboxEvent`; no hacer un `UPDATE` suelto. Registrar el evento de auditoría correspondiente. Si no hay confirmación, mantener `unknown` y escalar.
+4. **Rollback**: no hacer `DELETE` de `payment_attempt`; marcar `failed` y crear nueva `payment_attempt` con nuevo `provider_key` si reintento de pago con monto distinto. El `provider_key` incluye `tenantId:orderId:amount:currency`, por lo que nuevo monto genera nueva key sin colisionar.
 
-## Estado actual (2026-09-01)
+## Estado actual (2026-11-13)
 
-- InMemory: cobertura sin Docker ( `payments.test.ts` 3 suites, `payments.saga.test.ts` 4 tests). Persistent: `orders`, `payment_attempts` (`provider_key UNIQUE`), `inbound_payment_events` `FORCE RLS`, outbox `payment.*` y `order.*` en misma tx, `processPayment` con `FOR UPDATE` + `provider deterministic`, webhook HMAC 5m + dedupe, reconciler `SKIP LOCKED`, `metrics payment_unknown` y `health payments`.
+- InMemory: cobertura sin Docker. Persistent: `orders`, `payment_attempts` (`provider_key UNIQUE`), `inbound_payment_events` `FORCE RLS`, outbox `payment.*` y `order.*` en misma tx, `processPayment` con `FOR UPDATE` + provider determinista, webhook HMAC 5m + dedupe, reconciler `SKIP LOCKED`, `metrics payment_unknown` y `health payments`.
 - Evidencia: `packages/domain/src/payments.test.ts` transitions + `providerIdempotencyKey` + `shouldReconcile`, `apps/worker/src/payments.saga.test.ts` kill-mid-tx 1 charge, `apps/api/src/payments.test.ts` tenant isolation + HMAC 401 + dedupe.
-- Pendiente: testcontainers Postgres real para `reconcilePayments` con `testcontainers` helper y `k6` para pago concurrente.
+- Pendiente: prueba de `StripePaymentProvider` contra sandbox/live, reembolsos y `k6` de pago concurrente. El adapter Stripe tiene tests unitarios; no se ha usado contra la API real.

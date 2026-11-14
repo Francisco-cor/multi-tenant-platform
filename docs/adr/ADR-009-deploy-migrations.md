@@ -20,9 +20,9 @@ Se necesita una política que garantice:
 
 ### 1. Separación por clases
 
-- `migrations/schema/`: DDL, RLS, funciones, constraints — transaccionales (cada archivo en `BEGIN/COMMIT`), se aplican con advisory lock `pg_try_advisory_lock` con timeout (`packages/db/src/migrate.ts`).
-- `migrations/data/`: backfills y transformaciones reanudables, con `LIMIT`/`SKIP LOCKED`, no mezclados con DDL.
-- `migrations/indexes/`: `CREATE INDEX CONCURRENTLY` — **no transaccionales** (`packages/db/src/migrate.ts`, `transactional: kind !== 'indexes'`).
+- `packages/db/migrations/schema/`: DDL, RLS, funciones, constraints — transaccionales (cada archivo en `BEGIN/COMMIT`), se aplican con advisory lock `pg_try_advisory_lock` con timeout (`packages/db/src/migrate.ts`).
+- `packages/db/migrations/data/`: backfills y transformaciones reanudables, con `LIMIT`/`SKIP LOCKED`, no mezclados con DDL.
+- `packages/db/migrations/indexes/`: `CREATE INDEX CONCURRENTLY` — **no transaccionales** (`packages/db/src/migrate.ts`, `transactional: kind !== 'indexes'`).
 
 Orden de aplicación: `schema` → `data` → `indexes`, y dentro de cada clase por `id` lexicográfico (`packages/db/src/migrate.ts`).
 
