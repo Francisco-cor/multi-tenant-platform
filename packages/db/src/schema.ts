@@ -1,8 +1,10 @@
 import { sql } from 'drizzle-orm';
 import {
+  bigint,
   boolean,
   index,
   integer,
+  jsonb,
   pgTable,
   text,
   timestamp,
@@ -91,7 +93,7 @@ export const tenantFeatureFlags = pgTable(
       .references(() => organizations.id, { onDelete: 'cascade' }),
     flag: text('flag').notNull(),
     enabled: boolean('enabled').notNull().default(false),
-    payload: text('payload').notNull().default('{}'),
+    payload: jsonb('payload').notNull(),
     updatedBy: uuid('updated_by').references(() => users.id, { onDelete: 'set null' }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -239,13 +241,17 @@ export const outboxEvents = pgTable(
     aggregateType: text('aggregate_type').notNull(),
     aggregateId: uuid('aggregate_id').notNull(),
     eventType: text('event_type').notNull(),
-    payload: text('payload').notNull(),
+    payload: jsonb('payload').notNull(),
     payloadVersion: integer('payload_version').notNull().default(1),
     status: text('status').notNull().default('pending'),
     attempts: integer('attempts').notNull().default(0),
     nextAttemptAt: timestamp('next_attempt_at', { withTimezone: true }).notNull().defaultNow(),
     lastError: text('last_error'),
     correlationId: text('correlation_id'),
+    /** Producer-side idempotency key: `tenant:aggregate:eventType:payloadHash`. */
+    dedupeKey: text('dedupe_key'),
+    claimToken: text('claim_token'),
+    claimUntil: timestamp('claim_until', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
     publishedAt: timestamp('published_at', { withTimezone: true }),
@@ -256,6 +262,9 @@ export const outboxEvents = pgTable(
       .where(sql`status = 'pending'`),
     index('outbox_aggregate_idx').on(table.tenantId, table.aggregateType, table.aggregateId),
     index('outbox_created_idx').on(table.createdAt),
+    uniqueIndex('outbox_dedupe_uidx')
+      .on(table.tenantId, table.dedupeKey)
+      .where(sql`dedupe_key is not null`),
   ],
 );
 
@@ -267,9 +276,14 @@ export const processedJobs = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: 'cascade' }),
     queue: text('queue').notNull(),
-    result: text('result'),
+    result: jsonb('result'),
     processedAt: timestamp('processed_at', { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    status: text('status').notNull().default('completed'),
+    leaseUntil: timestamp('lease_until', { withTimezone: true }),
+    leaseToken: text('lease_token'),
+    /** Monotonic takeover counter: every new lease claim increments it. */
+    leaseFence: bigint('lease_fence', { mode: 'number' }).notNull().default(0),
   },
   (table) => [index('processed_jobs_tenant_idx').on(table.tenantId, table.queue)],
 );
@@ -283,7 +297,7 @@ export const dlqJobs = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: 'cascade' }),
     queue: text('queue').notNull(),
-    payload: text('payload').notNull(),
+    payload: jsonb('payload').notNull(),
     cause: text('cause').notNull(),
     attempts: integer('attempts').notNull().default(0),
     status: text('status').notNull().default('pending'),
@@ -359,6 +373,26 @@ export const paymentAttempts = pgTable(
   ],
 );
 
+export const orderIdempotency = pgTable(
+  'order_idempotency',
+  {
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => organizations.id, { onDelete: 'cascade' }),
+    key: text('key').notNull(),
+    requestHash: text('request_hash').notNull(),
+    response: jsonb('response'),
+    orderId: uuid('order_id').references(() => orders.id, { onDelete: 'set null' }),
+    attemptId: uuid('attempt_id').references(() => paymentAttempts.id, { onDelete: 'set null' }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('order_idempotency_tenant_key_unique').on(table.tenantId, table.key),
+    index('order_idempotency_tenant_created_idx').on(table.tenantId, table.createdAt),
+  ],
+);
+
 export const inboundPaymentEvents = pgTable(
   'inbound_payment_events',
   {
@@ -369,7 +403,7 @@ export const inboundPaymentEvents = pgTable(
     eventId: text('event_id').notNull(),
     providerRef: text('provider_ref'),
     status: text('status'),
-    payload: text('payload').notNull(),
+    payload: jsonb('payload').notNull(),
     processedAt: timestamp('processed_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -393,7 +427,7 @@ export const webhookEndpoints = pgTable(
     previousSecretCiphertext: text('previous_secret_ciphertext'),
     previousSecretVersion: integer('previous_secret_version'),
     previousSecretExpiresAt: timestamp('previous_secret_expires_at', { withTimezone: true }),
-    events: text('events').notNull(),
+    events: jsonb('events').notNull(),
     status: text('status').notNull().default('active'),
     version: integer('version').notNull().default(1),
     failureCount: integer('failure_count').notNull().default(0),
@@ -422,7 +456,7 @@ export const webhookDeliveries = pgTable(
     deliveryKey: text('delivery_key').notNull(),
     eventId: text('event_id').notNull(),
     eventType: text('event_type').notNull(),
-    payload: text('payload').notNull(),
+    payload: jsonb('payload').notNull(),
     secretVersion: integer('secret_version').notNull().default(1),
     status: text('status').notNull().default('pending'),
     attempts: integer('attempts').notNull().default(0),
@@ -456,7 +490,7 @@ export const inboundWebhookEvents = pgTable(
       .references(() => organizations.id, { onDelete: 'cascade' }),
     eventId: text('event_id').notNull(),
     source: text('source').notNull().default('external'),
-    payload: text('payload').notNull(),
+    payload: jsonb('payload').notNull(),
     processedAt: timestamp('processed_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
@@ -475,7 +509,7 @@ export const apiKeys = pgTable(
       .references(() => organizations.id, { onDelete: 'cascade' }),
     prefix: text('prefix').notNull(),
     hash: text('hash').notNull(),
-    scopes: text('scopes').notNull(),
+    scopes: jsonb('scopes').notNull(),
     name: text('name').notNull(),
     expiresAt: timestamp('expires_at', { withTimezone: true }),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
@@ -498,7 +532,7 @@ export const automations = pgTable(
       .notNull()
       .references(() => organizations.id, { onDelete: 'cascade' }),
     trigger: text('trigger').notNull(),
-    action: text('action').notNull(),
+    action: jsonb('action').notNull(),
     version: integer('version').notNull().default(1),
     enabled: boolean('enabled').notNull().default(true),
     createdBy: uuid('created_by').references(() => users.id, { onDelete: 'set null' }),
@@ -527,6 +561,7 @@ export const schema = {
   processedJobs,
   dlqJobs,
   orders,
+  orderIdempotency,
   paymentAttempts,
   inboundPaymentEvents,
   webhookEndpoints,
@@ -539,3 +574,5 @@ export const schema = {
 
 export type Organization = typeof organizations.$inferSelect;
 export type NewOrganization = typeof organizations.$inferInsert;
+export type OrderIdempotencyRecord = typeof orderIdempotency.$inferSelect;
+export type NewOrderIdempotencyRecord = typeof orderIdempotency.$inferInsert;

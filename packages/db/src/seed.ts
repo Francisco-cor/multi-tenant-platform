@@ -1,17 +1,19 @@
 import { sql } from 'drizzle-orm';
-import { createDatabase } from './database.js';
+import { createAdminDatabase } from './database.js';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 
 /**
- * Separate seed runner — never destructive in production.
+ * Separate seed runner — never destructive, never mutates an existing tenant.
  * Usage:
- *   pnpm --filter @platform/db seed              # idempotent insert of demo tenants (dev/test)
+ *   pnpm --filter @platform/db seed              # insert demo tenants into an empty DB
  *   pnpm --filter @platform/db seed --check      # verify seed exists, exit 1 if missing
  * Guard:
- *   - In production (NODE_ENV=production) requires ALLOW_SEED=1, otherwise refuses.
- *   - Never runs DELETE/TRUNCATE; uses INSERT ... ON CONFLICT DO NOTHING.
- *   - Seeded data is minimal and tenant-scoped (acme/contoso) for E2E/Playwright.
+ *   - Refuses to run when the database already has any organization. The guard
+ *     is the data, not NODE_ENV: an unset NODE_ENV must not be a bypass.
+ *   - In production, ALLOW_SEED=1 is additionally required. `--force` is gone.
+ *   - Every statement is INSERT ... ON CONFLICT DO NOTHING: an existing row
+ *     (including a real tenant that happens to use a demo slug) is untouched.
  */
 interface SeedOptions {
   check?: boolean;
@@ -21,28 +23,21 @@ function isProduction(): boolean {
   return process.env.NODE_ENV === 'production';
 }
 
-function allowSeed(): boolean {
-  return process.env.ALLOW_SEED === '1' || process.argv.includes('--force');
-}
-
 export async function runSeed(
   connectionString: string,
   options: SeedOptions = {},
 ): Promise<{ seeded: boolean; tenants: string[] }> {
-  if (isProduction() && !allowSeed()) {
-    throw new Error(
-      'seed_refused_in_production: set ALLOW_SEED=1 to allow seeds in production (never use destructive seeds)',
-    );
+  if (isProduction() && process.env.ALLOW_SEED !== '1') {
+    throw new Error('seed_refused_in_production: set ALLOW_SEED=1 to allow seeds in production');
   }
 
-  const db = createDatabase(connectionString);
+  const db = createAdminDatabase(connectionString);
   const logJson = (payload: Record<string, unknown>): void => {
     console.log(JSON.stringify({ ts: new Date().toISOString(), component: 'seed', ...payload }));
   };
 
   try {
-    // Idempotent demo seed: two tenants, two users, branches, products
-    // Uses raw sql with ON CONFLICT to remain idempotent across reruns.
+    // Idempotent demo seed: two tenants, two users, branches, products.
     // All inserts are additive; never DELETE/UPDATE destructive.
 
     // Upsert demo users (idempotent by oidc identity)
@@ -74,11 +69,19 @@ export async function runSeed(
       return { seeded: false, tenants: ['acme', 'contoso'].slice(0, count) };
     }
 
+    const existing = await db.db.execute<{ count: string }>(
+      sql`select count(*)::text as count from organizations`,
+    );
+    const organizations = Number(existing[0]?.count ?? '0');
+    if (organizations > 0) {
+      throw new Error('seed_refused_non_empty_database: refusing to touch existing tenants');
+    }
+
     for (const u of users) {
       await db.db.execute(sql`
         insert into users (id, oidc_issuer, oidc_subject, email, display_name, active)
         values (${u.id}::uuid, ${u.oidcIssuer}, ${u.oidcSubject}, ${u.email}, ${u.displayName}, true)
-        on conflict (oidc_issuer, oidc_subject) do update set email = excluded.email, display_name = excluded.display_name
+        on conflict (oidc_issuer, oidc_subject) do nothing
       `);
     }
 
@@ -91,7 +94,7 @@ export async function runSeed(
       await db.db.execute(sql`
         insert into organizations (id, slug, name, status)
         values (${t.id}::uuid, ${t.slug}, ${t.name}, 'active')
-        on conflict (slug) do update set name = excluded.name
+        on conflict (slug) do nothing
       `);
       logJson({ event: 'tenant_seeded', slug: t.slug, id: t.id });
     }
@@ -105,7 +108,7 @@ export async function runSeed(
       await db.db.execute(sql`
         insert into memberships (tenant_id, user_id, role, active)
         values (${m.tenantId}::uuid, ${m.userId}::uuid, ${m.role}, true)
-        on conflict (tenant_id, user_id) do update set role = excluded.role, active = true
+        on conflict (tenant_id, user_id) do nothing
       `);
     }
 
@@ -128,60 +131,53 @@ export async function runSeed(
       await db.db.execute(sql`
         insert into branches (id, tenant_id, slug, name, active)
         values (${b.id}::uuid, ${b.tenantId}::uuid, ${b.slug}, ${b.name}, true)
-        on conflict (tenant_id, slug) do update set name = excluded.name
+        on conflict (tenant_id, slug) do nothing
       `);
     }
 
-    // Products + stock demo (only if products table exists)
-    try {
-      const products = [
-        {
-          id: '30000000-0000-4000-a000-000000000001',
-          tenantId: tenants[0]!.id,
-          sku: 'acme-1',
-          name: 'Acme Widget',
-        },
-        {
-          id: '30000000-0000-4000-a000-000000000002',
-          tenantId: tenants[1]!.id,
-          sku: 'contoso-1',
-          name: 'Contoso Widget',
-        },
-      ];
-      for (const p of products) {
-        await db.db.execute(sql`
-          insert into products (id, tenant_id, sku, name, active)
-          values (${p.id}::uuid, ${p.tenantId}::uuid, ${p.sku}, ${p.name}, true)
-          on conflict (tenant_id, sku) do update set name = excluded.name
-        `);
-      }
-      // Stock per branch (available 100)
-      const stocks = [
-        {
-          tenantId: tenants[0]!.id,
-          branchId: branches[0]!.id,
-          productId: products[0]!.id,
-          available: 100,
-        },
-        {
-          tenantId: tenants[1]!.id,
-          branchId: branches[1]!.id,
-          productId: products[1]!.id,
-          available: 100,
-        },
-      ];
-      for (const s of stocks) {
-        await db.db.execute(sql`
-          insert into stock_per_branch (tenant_id, branch_id, product_id, available)
-          values (${s.tenantId}::uuid, ${s.branchId}::uuid, ${s.productId}::uuid, ${s.available})
-          on conflict do nothing
-        `);
-      }
-    } catch (e) {
-      logJson({
-        event: 'seed_products_skipped',
-        error: e instanceof Error ? e.message : String(e),
-      });
+    // Products + stock demo
+    const products = [
+      {
+        id: '30000000-0000-4000-a000-000000000001',
+        tenantId: tenants[0]!.id,
+        sku: 'acme-1',
+        name: 'Acme Widget',
+      },
+      {
+        id: '30000000-0000-4000-a000-000000000002',
+        tenantId: tenants[1]!.id,
+        sku: 'contoso-1',
+        name: 'Contoso Widget',
+      },
+    ];
+    for (const p of products) {
+      await db.db.execute(sql`
+        insert into products (id, tenant_id, sku, name, active)
+        values (${p.id}::uuid, ${p.tenantId}::uuid, ${p.sku}, ${p.name}, true)
+        on conflict (tenant_id, sku) do nothing
+      `);
+    }
+    // Stock per branch (available 100)
+    const stocks = [
+      {
+        tenantId: tenants[0]!.id,
+        branchId: branches[0]!.id,
+        productId: products[0]!.id,
+        available: 100,
+      },
+      {
+        tenantId: tenants[1]!.id,
+        branchId: branches[1]!.id,
+        productId: products[1]!.id,
+        available: 100,
+      },
+    ];
+    for (const s of stocks) {
+      await db.db.execute(sql`
+        insert into stock_per_branch (tenant_id, branch_id, product_id, available)
+        values (${s.tenantId}::uuid, ${s.branchId}::uuid, ${s.productId}::uuid, ${s.available})
+        on conflict do nothing
+      `);
     }
 
     logJson({ event: 'seed_complete', tenants: tenants.map((t) => t.slug) });

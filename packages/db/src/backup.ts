@@ -1,5 +1,6 @@
-import { access, mkdir, stat } from 'node:fs/promises';
+import { access, chmod, mkdir, readFile, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { runPostgresTool } from './pg-tools.js';
@@ -8,6 +9,7 @@ export interface BackupResult {
   bytes: number;
   connectionDatabase: string;
   outputPath: string;
+  sha256: string;
 }
 
 function argumentValue(args: string[], name: string): string | undefined {
@@ -46,9 +48,27 @@ export async function createBackup(
     '--file',
     outputPath,
   ]);
+
+  // A dump of the whole platform contains every tenant's PII, webhook secrets,
+  // API key hashes and session token hashes. Never leave it world-readable.
+  await chmod(outputPath, 0o600);
+
+  // Validate the archive before it is considered a backup: a truncated custom
+  // dump has a plausible size and would only fail months later, during restore.
+  await runPostgresTool('pg_restore', 'PG_RESTORE_BIN', connectionString, ['--list', outputPath]);
+
   const outputStats = await stat(outputPath);
+  if (outputStats.size === 0) throw new Error('backup_empty: ' + outputPath);
+  const sha256 = createHash('sha256')
+    .update(await readFile(outputPath))
+    .digest('hex');
   const database = new URL(connectionString).pathname.replace(/^\/+/, '') || 'unknown';
-  return { bytes: outputStats.size, connectionDatabase: decodeURIComponent(database), outputPath };
+  return {
+    bytes: outputStats.size,
+    connectionDatabase: decodeURIComponent(database),
+    outputPath,
+    sha256,
+  };
 }
 
 async function main(): Promise<void> {

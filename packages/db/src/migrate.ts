@@ -22,24 +22,40 @@ interface MigrationFile {
 
 export interface MigrationRunResult {
   applied: string[];
+  pending: string[];
   skipped: string[];
 }
 
 const migrationKinds: MigrationKind[] = ['schema', 'data', 'indexes'];
 const migrationsDirectory = join(dirname(fileURLToPath(import.meta.url)), '../migrations');
+const DOLLAR_QUOTE_PATTERN = /^\$[A-Za-z_0-9]*\$/;
 
-/** Split only the non-transactional migration files, preserving quoted SQL. */
-function splitNonTransactionalSql(source: string): string[] {
+/**
+ * Split only the non-transactional migration files, preserving quoted SQL.
+ * Understands dollar-quoted bodies (`$$ ... $$`, `$tag$ ... $tag$`) so a
+ * PL/pgSQL `DO` block is sent as one statement instead of being shredded at
+ * its inner semicolons.
+ */
+export function splitNonTransactionalSql(source: string): string[] {
   const statements: string[] = [];
   let start = 0;
   let inSingleQuote = false;
   let inDoubleQuote = false;
   let inLineComment = false;
   let inBlockComment = false;
+  let dollarTag: string | null = null;
 
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index];
     const next = source[index + 1];
+
+    if (dollarTag) {
+      if (character === '$' && source.startsWith(dollarTag, index)) {
+        index += dollarTag.length - 1;
+        dollarTag = null;
+      }
+      continue;
+    }
     if (inLineComment) {
       if (character === '\n') inLineComment = false;
       continue;
@@ -60,6 +76,14 @@ function splitNonTransactionalSql(source: string): string[] {
       inBlockComment = true;
       index += 1;
       continue;
+    }
+    if (!inSingleQuote && !inDoubleQuote && character === '$') {
+      const match = DOLLAR_QUOTE_PATTERN.exec(source.slice(index));
+      if (match) {
+        dollarTag = match[0];
+        index += dollarTag.length - 1;
+        continue;
+      }
     }
     if (!inDoubleQuote && character === "'" && source[index - 1] !== '\\') {
       if (inSingleQuote && next === "'") {
@@ -92,12 +116,14 @@ function splitNonTransactionalSql(source: string): string[] {
 async function readMigrationFiles(): Promise<MigrationFile[]> {
   const files: MigrationFile[] = [];
   const rootEntries = await readdir(migrationsDirectory, { withFileTypes: true });
+  const basenames = new Map<string, string>();
 
   for (const entry of rootEntries) {
     if (entry.isFile() && entry.name.endsWith('.sql')) {
       files.push(
         await toMigrationFile('schema', entry.name, join(migrationsDirectory, entry.name), []),
       );
+      basenames.set(entry.name, 'schema/' + entry.name);
     }
   }
 
@@ -114,6 +140,11 @@ async function readMigrationFiles(): Promise<MigrationFile[]> {
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith('.sql')) continue;
       const id = kind + '/' + entry.name;
+      const duplicate = basenames.get(entry.name);
+      if (duplicate && kind === 'schema') {
+        throw new Error(`migration_duplicate_basename: ${displayPath(duplicate)} and ${id}`);
+      }
+      basenames.set(entry.name, id);
       const legacyIds = kind === 'schema' ? [entry.name] : [];
       files.push(await toMigrationFile(kind, id, join(directory, entry.name), legacyIds));
     }
@@ -123,6 +154,10 @@ async function readMigrationFiles(): Promise<MigrationFile[]> {
     const kindOrder = migrationKinds.indexOf(left.kind) - migrationKinds.indexOf(right.kind);
     return kindOrder || left.id.localeCompare(right.id);
   });
+}
+
+function displayPath(id: string): string {
+  return id.replaceAll(sep, '/');
 }
 
 async function toMigrationFile(
@@ -148,7 +183,7 @@ async function migrationIsApplied(
 ): Promise<{ applied: boolean; checksum?: string; legacyId?: string }> {
   const ids = [migration.id, ...migration.legacyIds];
   const rows = await client.unsafe<{ checksum: string | null; id: string }[]>(
-    'select id, checksum from schema_migrations where id = any($1::text[]) limit 1',
+    'select id, checksum from schema_migrations where id = any($1::text[]) order by applied_at, id limit 1',
     [ids],
   );
   const row = rows[0];
@@ -160,6 +195,45 @@ async function migrationIsApplied(
         ...(id === migration.id ? {} : { legacyId: id }),
       }
     : { applied: false };
+}
+
+function readTimeoutMilliseconds(
+  environmentVariable: string,
+  fallback: number,
+  options: { allowZero: boolean },
+): number {
+  const raw = process.env[environmentVariable];
+  if (raw === undefined || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0 || (!options.allowZero && value === 0)) {
+    throw new Error(`${environmentVariable}_invalid: ${raw}`);
+  }
+  return Math.trunc(value);
+}
+
+interface InvalidIndexRow {
+  relname: string;
+}
+
+async function findInvalidIndexes(client: postgres.Sql): Promise<string[]> {
+  const rows = await client.unsafe<InvalidIndexRow[]>(
+    'select c.relname from pg_index i ' +
+      'join pg_class c on c.oid = i.indexrelid ' +
+      'join pg_namespace n on n.oid = c.relnamespace ' +
+      'where n.nspname = current_schema() and not i.indisvalid',
+  );
+  return rows.map((row) => row.relname);
+}
+
+/** A cancelled CONCURRENTLY build leaves indisvalid = false forever. */
+async function dropInvalidIndexes(client: postgres.Sql): Promise<string[]> {
+  const invalid = await findInvalidIndexes(client);
+  for (const relname of invalid) {
+    await client.unsafe(
+      'drop index concurrently if exists "' + relname.replaceAll('"', '""') + '"',
+    );
+  }
+  return invalid;
 }
 
 export interface RunMigrationsOptions {
@@ -177,9 +251,15 @@ export async function runMigrations(
   const pending: string[] = [];
   const migrationFiles = await readMigrationFiles();
   const quote = String.fromCharCode(39);
-  // Use try-lock with timeout instead of blocking forever. 10s timeout mirrors CI expectations.
-  const migrationLockTimeoutMs = Number(process.env.MIGRATION_LOCK_TIMEOUT_MS ?? '10000');
-  const migrationStatementTimeoutMs = Number(process.env.MIGRATION_STATEMENT_TIMEOUT_MS ?? '30000');
+  // Advisory-lock acquisition window. Distinct from lock_timeout (DDL locks).
+  const migrationLockTimeoutMs = readTimeoutMilliseconds('MIGRATION_LOCK_TIMEOUT_MS', 10000, {
+    allowZero: false,
+  });
+  const migrationStatementTimeoutMs = readTimeoutMilliseconds(
+    'MIGRATION_STATEMENT_TIMEOUT_MS',
+    30000,
+    { allowZero: true },
+  );
 
   const acquireLock = async (): Promise<void> => {
     const deadline = Date.now() + migrationLockTimeoutMs;
@@ -209,13 +289,10 @@ export async function runMigrations(
   };
 
   try {
-    // Set session timeouts for migration connection (prevents runaway DDL)
-    await client
-      .unsafe(`set lock_timeout = '${Math.min(migrationLockTimeoutMs, 10000)}ms'`)
-      .catch(() => undefined);
-    await client
-      .unsafe(`set statement_timeout = '${migrationStatementTimeoutMs}ms'`)
-      .catch(() => undefined);
+    // DDL lock timeout is validated, never silently swallowed: a malformed env
+    // var must fail the deploy instead of running with the server default.
+    await client.unsafe(`set lock_timeout = '${migrationLockTimeoutMs}ms'`);
+    await client.unsafe(`set statement_timeout = '${migrationStatementTimeoutMs}ms'`);
     await acquireLock();
     logJson({ event: 'lock_acquired', timeoutMs: migrationLockTimeoutMs });
     await client.unsafe(
@@ -240,11 +317,22 @@ export async function runMigrations(
       'alter table schema_migrations add column if not exists applied_by text default current_user',
     );
 
-    for (const migration of migrationFiles) {
+    let lastAppliedIndex = -1;
+    for (const [index, migration] of migrationFiles.entries()) {
       const status = await migrationIsApplied(client, migration);
       if (status.applied) {
+        lastAppliedIndex = index;
         if (status.checksum && status.checksum !== migration.checksum) {
           throw new Error('migration_checksum_mismatch: ' + migration.id);
+        }
+        if (!status.checksum && !dryRun) {
+          // Rows created before the checksum column existed were never
+          // verified. Backfill so the next run can detect edits.
+          await client.unsafe('update schema_migrations set checksum = $1 where id = $2', [
+            migration.checksum,
+            status.legacyId ?? migration.id,
+          ]);
+          logJson({ event: 'checksum_backfilled', id: migration.id });
         }
         skipped.push(migration.id);
         if (status.legacyId) {
@@ -253,6 +341,10 @@ export async function runMigrations(
           logJson({ event: 'skipped', id: migration.id, kind: migration.kind });
         }
         continue;
+      }
+
+      if (!dryRun && index < lastAppliedIndex) {
+        throw new Error('migration_out_of_order: ' + migration.id);
       }
 
       if (dryRun) {
@@ -294,9 +386,8 @@ export async function runMigrations(
         transactional: migration.transactional,
         checksum: migration.checksum.slice(0, 8),
       });
-      const apply = async (executor: MigrationExecutor) => {
-        await executor.unsafe(migrationSql);
-        const durationMs = Date.now() - migrationStart;
+
+      const record = async (executor: MigrationExecutor, durationMs: number) => {
         await executor.unsafe(
           'insert into schema_migrations (id, kind, checksum, duration_ms) values ($1, $2, $3, $4)',
           [migration.id, migration.kind, migration.checksum, durationMs],
@@ -305,16 +396,29 @@ export async function runMigrations(
 
       try {
         if (migration.transactional) {
-          await client.begin(async (transaction) => apply(transaction));
+          await client.begin(async (transaction) => {
+            await transaction.unsafe(migrationSql);
+            await record(transaction, Date.now() - migrationStart);
+          });
         } else {
+          // Index builds legitimately exceed the generic statement timeout;
+          // lock_timeout still protects against blocked DDL.
+          await client.unsafe('set statement_timeout = 0');
+          const dropped = await dropInvalidIndexes(client);
+          if (dropped.length > 0) {
+            logJson({ event: 'invalid_indexes_dropped', id: migration.id, indexes: dropped });
+          }
           for (const statement of splitNonTransactionalSql(migrationSql)) {
             await client.unsafe(statement);
           }
-          const durationMs = Date.now() - migrationStart;
-          await client.unsafe(
-            'insert into schema_migrations (id, kind, checksum, duration_ms) values ($1, $2, $3, $4)',
-            [migration.id, migration.kind, migration.checksum, durationMs],
-          );
+          const remaining = await findInvalidIndexes(client);
+          if (remaining.length > 0) {
+            throw new Error(
+              'migration_invalid_index: ' + migration.id + ': ' + remaining.join(','),
+            );
+          }
+          await record(client, Date.now() - migrationStart);
+          await client.unsafe(`set statement_timeout = '${migrationStatementTimeoutMs}ms'`);
         }
         const durationMsLog = Date.now() - migrationStart;
         applied.push(migration.id);
@@ -357,7 +461,7 @@ export async function runMigrations(
       if (pending.length > 0)
         console.log(`[migrate:dry-run] ${pending.length} pending: ${pending.join(', ')}`);
       else console.log('[migrate:dry-run] no pending migrations');
-      return { applied: [], skipped };
+      return { applied: [], pending, skipped };
     }
 
     logJson({
@@ -367,7 +471,7 @@ export async function runMigrations(
       applied,
       skipped,
     });
-    return { applied, skipped };
+    return { applied, pending: [], skipped };
   } finally {
     await client.unsafe(migrationUnlock).catch(() => undefined);
     logJson({ event: 'lock_released' });
@@ -379,14 +483,12 @@ const entryPoint = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).hre
 if (entryPoint === import.meta.url) {
   const configuredConnectionString = process.env.DATABASE_URL;
   if (!configuredConnectionString) throw new Error('DATABASE_URL is required to run migrations');
+  const checkOnly = process.argv.includes('--check');
   const dryRun =
-    process.argv.includes('--dry-run') ||
-    process.argv.includes('--check') ||
-    process.env.MIGRATE_DRY_RUN === '1';
+    process.argv.includes('--dry-run') || checkOnly || process.env.MIGRATE_DRY_RUN === '1';
   const result = await runMigrations(configuredConnectionString, { dryRun });
-  if (dryRun && result.skipped) {
-    // In dry-run we already logged pending; exit 0 unless caller wants check failure
-    // If --check and there are pending, exit non-zero to enforce CI?
-    // For now success; caller can inspect logs.
+  if (checkOnly && result.pending.length > 0) {
+    console.error(`[migrate:check] ${result.pending.length} pending migration(s)`);
+    process.exitCode = 1;
   }
 }

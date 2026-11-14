@@ -23,13 +23,16 @@ suite('Fase 13 — tests de migración (N-1 → N, expand-contract)', () => {
     if (!url) throw new Error('no url');
     const db = createDatabase(url, { role: 'platform_app' });
     const first = await runMigrations(url);
-    // first may have 0 applied if already migrated, but skipped should be >=11
+    expect(first.pending).toEqual([]);
     expect(first.applied.length + first.skipped.length).toBeGreaterThanOrEqual(11);
     const rows = await (admin as NonNullable<
       typeof admin
     >)`select id, checksum from schema_migrations order by id`;
     expect(rows.length).toBeGreaterThanOrEqual(11);
     expect(rows.some((r) => (r as { id: string }).id.includes('0011_audit_hardening'))).toBe(true);
+    // Checksums must be recorded for every applied row: a NULL checksum means
+    // drift detection silently ignores that file.
+    expect(rows.every((r) => (r as { checksum: string | null }).checksum !== null)).toBe(true);
     const second = await runMigrations(url);
     expect(second.applied.length).toBe(0);
     expect(second.skipped.length).toBe(rows.length);
@@ -40,14 +43,22 @@ suite('Fase 13 — tests de migración (N-1 → N, expand-contract)', () => {
     await db.close();
   });
 
-  it('no deja índices inválidos tras migración', async () => {
-    if (!admin || !url) return;
-    const idx = await (admin as NonNullable<
-      typeof admin
-    >)`select indexname, indisvalid from pg_index where indexname='tenant_branches_lookup'`;
-    if (idx.length) {
-      expect((idx[0] as { indisvalid: boolean }).indisvalid).toBe(true);
-    }
-    expect(true).toBe(true);
+  it('leaves no invalid indexes after migrating', async () => {
+    if (!admin || !url) throw new Error('admin required');
+    await runMigrations(url);
+    const invalid = await (admin as NonNullable<typeof admin>)`
+      select c.relname from pg_index i
+      join pg_class c on c.oid = i.indexrelid
+      join pg_namespace n on n.oid = c.relnamespace
+      where n.nspname = current_schema() and not i.indisvalid
+    `;
+    expect(invalid).toEqual([]);
+  });
+
+  it('reports pending migrations and can gate CI (--check semantics)', async () => {
+    if (!url) throw new Error('no url');
+    const dry = await runMigrations(url, { dryRun: true });
+    expect(dry.applied).toEqual([]);
+    expect(dry.pending).toEqual([]);
   });
 });

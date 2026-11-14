@@ -29,7 +29,23 @@ export interface BranchRecord {
   active: boolean;
 }
 
+export interface PageOptions {
+  /** Keyset cursor: last id of the previous page. */
+  afterId?: string | undefined;
+  /** Defaults to 100, capped at 500. */
+  limit?: number | undefined;
+}
+
 type QueryExecutor = DatabaseExecutor;
+
+const DEFAULT_PAGE_SIZE = 100;
+const MAX_PAGE_SIZE = 500;
+
+function pageSize(options: PageOptions): number {
+  const limit = options.limit ?? DEFAULT_PAGE_SIZE;
+  if (!Number.isFinite(limit) || limit <= 0) throw new Error('page_limit_invalid');
+  return Math.min(Math.trunc(limit), MAX_PAGE_SIZE);
+}
 
 export class TenantOrganizationRepository extends TenantRepository {
   public constructor(db: QueryExecutor) {
@@ -103,14 +119,27 @@ export class TenantMembershipRepository extends TenantRepository {
     return rows[0] ?? null;
   }
 
-  public async listForTenant(context: TenantRepositoryContext): Promise<MembershipRecord[]> {
+  public async listForTenant(
+    context: TenantRepositoryContext,
+    options: PageOptions = {},
+  ): Promise<MembershipRecord[]> {
     this.assertContext(context);
+    const limit = pageSize(options);
+    const afterId = options.afterId ?? null;
     return this.db.execute<MembershipRecord>(sql`
       select id, tenant_id as "tenantId", user_id as "userId", role, active
       from memberships
       where tenant_id = ${context.tenantId}
         and active = true
-      order by created_at, id
+        and (
+          ${afterId}::uuid is null
+          or (created_at, id) < (
+            select created_at, id from memberships
+            where id = ${afterId}::uuid and tenant_id = ${context.tenantId}
+          )
+        )
+      order by created_at desc, id desc
+      limit ${limit}
     `);
   }
 }
@@ -150,13 +179,26 @@ export class TenantBranchRepository extends TenantRepository {
     return rows[0] ?? null;
   }
 
-  public async listForTenant(context: TenantRepositoryContext): Promise<BranchRecord[]> {
+  public async listForTenant(
+    context: TenantRepositoryContext,
+    options: PageOptions = {},
+  ): Promise<BranchRecord[]> {
     this.assertContext(context);
+    const limit = pageSize(options);
+    const afterId = options.afterId ?? null;
     return this.db.execute<BranchRecord>(sql`
       select id, tenant_id as "tenantId", slug, name, active
       from branches
       where tenant_id = ${context.tenantId}
-      order by slug, id
+        and (
+          ${afterId}::uuid is null
+          or (created_at, id) < (
+            select created_at, id from branches
+            where id = ${afterId}::uuid and tenant_id = ${context.tenantId}
+          )
+        )
+      order by created_at desc, id desc
+      limit ${limit}
     `);
   }
 }
